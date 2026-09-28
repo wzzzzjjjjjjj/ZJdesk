@@ -2,6 +2,7 @@
 
 #include "diagnostics/event_log.h"
 #include "media/media_engine.h"
+#include "media/screen_share.h"
 #include "remote-control/control_session.h"
 #include "signaling/signaling_client.h"
 #include <QTimer>
@@ -40,6 +41,12 @@ public:
     QString previewDetail() const { return previewDetail_; }
     QString audioDetail() const { return audioDetail_; }
     PreviewStats previewStats() const { return media_.stats(); }
+    bool startScreenShare(const QString &source = "desktop");
+    void stopScreenShare();
+    PreviewState shareState() const { return shareState_; }
+    QString shareDetail() const { return shareDetail_; }
+    bool receivingScreen() const { return receivingScreen_; }
+    bool screenActive() const { return !streamId_.isEmpty(); }
 
 signals:
     void stateChanged(zjdesk::SessionCoordinator::State state);
@@ -50,18 +57,29 @@ signals:
     void previewChanged();
     void audioChanged();
     void previewFrame(const QImage &image);
+    void shareChanged();
+    void shareFrame(const QImage &image);
 
 private:
     void receive(const protocol::Message &message);
     void changeState(State state, const QString &detail);
     void fail(const QString &reason);
     void clearMembership();
+    void receiveShare(const protocol::Message &message);
+    void clearScreenShare(bool notifyPeer);
 
     SignalingClient signaling_;
     EventLog events_;
     ControlSession control_;
     QTimer deadline_;
     MediaEngine media_;
+    ScreenShare screen_;
+    PreviewState shareState_ = PreviewState::Stopped;
+    QString shareDetail_ = QStringLiteral("屏幕共享未启动");
+    QString streamId_;
+    QString ownPeerId_;
+    quint64 shareEpoch_ = 0;
+    bool receivingScreen_ = false;
     QList<MediaDevice> devices_;
     PreviewState previewState_ = PreviewState::Stopped;
     PreviewState audioState_ = PreviewState::Stopped;

@@ -38,7 +38,8 @@ MediaEnvironment MediaEnvironment::inspect()
     result.version = QString("%1.%2.%3").arg(major).arg(minor).arg(micro);
     for (const auto *name : {"videotestsrc", "audiotestsrc", "appsink", "videoconvert", "videoscale",
                            "audioconvert", "audioresample", "autoaudiosink",
-                           "webrtcbin", "vp8enc", "opusenc", "nicesrc", "dtlssrtpenc", "rtpbin"})
+                           "webrtcbin", "vp8enc", "vp8dec", "rtpvp8pay", "rtpvp8depay", "jpegdec",
+                           "tee", "queue", "opusenc", "nicesrc", "dtlssrtpenc", "rtpbin"})
     {
         if (auto *factory = gst_element_factory_find(name))
             gst_object_unref(factory);
@@ -47,7 +48,7 @@ MediaEnvironment MediaEnvironment::inspect()
     }
     result.ready = result.missingPlugins.isEmpty();
     result.description = result.ready
-        ? QStringLiteral("媒体依赖就绪；支持本地预览与设备枚举，尚无双人通话")
+        ? QStringLiteral("媒体依赖就绪；支持摄像头预览与双人屏幕共享")
         : QStringLiteral("缺少媒体插件：") + result.missingPlugins.join(", ");
 #else
     result.description = QStringLiteral("当前构建未启用媒体依赖，音视频暂不可用");

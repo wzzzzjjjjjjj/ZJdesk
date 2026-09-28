@@ -144,6 +144,41 @@ private slots:
         QCOMPARE(message->type, "joined");
         QCOMPARE(server.roomCount(), 1);
     }
+
+    void shareMessagesValidateActionAndBindSender()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SignalingClient alice, bob;
+        QSignalSpy aConnected(&alice, &zjdesk::SignalingClient::connected);
+        QSignalSpy bConnected(&bob, &zjdesk::SignalingClient::connected);
+        QSignalSpy aMessages(&alice, &zjdesk::SignalingClient::messageReceived);
+        QSignalSpy bMessages(&bob, &zjdesk::SignalingClient::messageReceived);
+        alice.open(url);
+        bob.open(url);
+        QTRY_COMPARE(aConnected.count(), 1);
+        QTRY_COMPARE(bConnected.count(), 1);
+        QVERIFY(alice.send({"join", {{"roomId", "share"}, {"name", "Alice"}}}));
+        QTRY_COMPARE(aMessages.count(), 1);
+        const auto identity = qvariant_cast<zjdesk::protocol::Message>(aMessages.first().at(0))
+            .payload.value("peerId").toString();
+        QVERIFY(bob.send({"join", {{"roomId", "share"}, {"name", "Bob"}}}));
+        QTRY_COMPARE(bMessages.count(), 1);
+        QTRY_COMPARE(aMessages.count(), 2);
+        aMessages.clear();
+        bMessages.clear();
+        QVERIFY(alice.send({"share", {{"action", "invalid"}, {"streamId", "stream"}}}));
+        QTRY_COMPARE(aMessages.count(), 1);
+        QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(aMessages.takeFirst().at(0))
+            .payload.value("code").toString(), "invalid_share");
+        QCOMPARE(bMessages.count(), 0);
+        QVERIFY(alice.send({"share", {{"action", "start"}, {"streamId", "stream"}, {"fromPeerId", "forged"}}}));
+        QTRY_COMPARE(bMessages.count(), 1);
+        const auto message = qvariant_cast<zjdesk::protocol::Message>(bMessages.first().at(0));
+        QCOMPARE(message.payload.value("fromPeerId").toString(), identity);
+        QCOMPARE(message.payload.value("streamId").toString(), "stream");
+    }
 };
 
 QTEST_GUILESS_MAIN(SignalingTests)

@@ -95,6 +95,72 @@ private slots:
         QTest::mouseClick(button, Qt::LeftButton);
         QTRY_VERIFY(surface->hasFrame());
     }
+
+    void screenShareCapturesDesktopAndDisplaysAtPeer()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const auto url = QString("ws://127.0.0.1:%1").arg(server.port());
+        MainWindow alice(url, "desktop", "Alice"), bob(url, "desktop", "Bob");
+        alice.show();
+        bob.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&bob));
+        auto *aliceShare = alice.findChild<QPushButton *>("shareButton");
+        auto *bobShare = bob.findChild<QPushButton *>("shareButton");
+        auto *bobStatus = bob.findChild<QLabel *>("shareStatus");
+        auto *surface = dynamic_cast<VideoSurface *>(bob.findChild<QOpenGLWidget *>());
+        QVERIFY(aliceShare && bobShare && bobStatus && surface);
+        if (!alice.findChild<QPushButton *>("previewButton")->isEnabled())
+            QSKIP("GStreamer is not enabled in this build");
+        QVERIFY(!aliceShare->isEnabled());
+        alice.findChild<QPushButton *>("primaryButton")->click();
+        bob.findChild<QPushButton *>("primaryButton")->click();
+        QTRY_VERIFY(aliceShare->isEnabled());
+        // A known visible desktop marker proves the peer receives captured pixels.
+        QWidget marker(nullptr, Qt::Tool | Qt::WindowStaysOnTopHint);
+        marker.resize(400, 300);
+        marker.move(QGuiApplication::primaryScreen()->geometry().topLeft());
+        marker.setStyleSheet("background: #ff00ff;");
+        marker.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&marker));
+        aliceShare->click();
+        QTRY_VERIFY_WITH_TIMEOUT(bobStatus->text().contains(QStringLiteral("正在接收对方屏幕"))
+            && surface->hasFrame(), 20000);
+        QVERIFY(!bobShare->isEnabled());
+        const auto hasColor = [surface](bool green) {
+            const auto image = surface->grabFramebuffer();
+            int count = 0;
+            for (int y = 0; y < image.height(); y += 4)
+                for (int x = 0; x < image.width(); x += 4)
+                {
+                    const auto color = image.pixelColor(x, y);
+                    if (green ? color.green() > 200 && color.red() < 60 && color.blue() < 60
+                              : color.red() > 200 && color.blue() > 200 && color.green() < 60)
+                        ++count;
+                }
+            return count > 100;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(hasColor(false), 10000);
+        marker.setStyleSheet("background: #00ff00;");
+        QTRY_VERIFY_WITH_TIMEOUT(hasColor(true), 10000);
+        qInfo().noquote() << "Desktop receiver:" << bobStatus->text();
+        marker.hide();
+        bob.raise();
+        QTest::qWait(150);
+        QVERIFY(QDir().mkpath("output"));
+        QVERIFY(bob.screen()->grabWindow(bob.winId()).save("output/ui-screen-share.png"));
+        aliceShare->click();
+        QTRY_COMPARE(aliceShare->text(), QStringLiteral("共享主屏幕"));
+        QTRY_COMPARE(bobShare->text(), QStringLiteral("共享主屏幕"));
+        QVERIFY(!surface->hasFrame());
+        QTRY_VERIFY(bobShare->isEnabled());
+        bobShare->click();
+        auto *aliceSurface = dynamic_cast<VideoSurface *>(alice.findChild<QOpenGLWidget *>());
+        QTRY_VERIFY_WITH_TIMEOUT(aliceSurface->hasFrame(), 20000);
+        bob.findChild<QPushButton *>("primaryButton")->click();
+        QTRY_VERIFY(!aliceSurface->hasFrame());
+        QVERIFY(!aliceShare->isEnabled());
+    }
 };
 
 QTEST_MAIN(WindowTests)

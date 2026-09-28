@@ -1,6 +1,57 @@
 # 验证记录
 
-## 0.2.0：2026-09-29 最新 Windows 验证
+## 0.3.0：2026-09-29 最新 Windows 验证
+
+平台与 SDK 沿用 0.2 的 Windows 11 x64 / Qt 6.8.3 / MSVC2022 / GStreamer 1.26.11。
+
+| 项目 | Debug | Release |
+| --- | --- | --- |
+| 客户端 / 服务 / 媒体构建 | 通过 | 通过 |
+| core | 15 项通过 | 15 项通过 |
+| signaling | 8 项通过 | 8 项通过 |
+| media | 10 项，零失败，物理摄像头默认跳过 1 项 | 同左 |
+| desktop（显式 -GuiTests） | 5 项通过 | 5 项通过 |
+| 物理摄像头最高模式 | 单独 3 项通过，含初始化 / 清理 | 未单独运行 |
+| 无媒体 SDK 构建 / core / signaling | 通过，之后已恢复启用媒体 | 未单独运行 |
+| Qt + GStreamer 本地部署 | 不适用 | 通过 |
+| 部署目录隔离 SDK 后真实桌面共享 | 不适用 | 单独 3 项通过，含初始化 / 清理 |
+
+计数包含 Qt Test 初始化 / 清理，跳过摄像头不等于硬件验收。
+最新默认构建只执行 core / signaling / media；desktop 报告来自显式 GUI 完整测试。
+最后仅增加旧 SDP 与信令中断回归，两种配置的三组默认测试已再次通过。
+
+新增真实验证：
+
+- 模式选择：1920×1080 / 30 fps 优先于 640×480 / 120 fps；同分辨率按分数帧率比较，
+  raw / JPEG 与范围模式测试通过；无尺寸 / 帧率的 caps 不伪造模式。
+- HP Wide Vision HD Camera 公布最高模式为 NV12 1280×720 / 30 fps；实际预览 caps 与尺寸一致，
+  三次打开，每次至少三帧，停止后均能重新打开。记录为 `build/camera-max.txt` / `.xml`。
+- 测试源通过真实 WebSocket 协商、WebRTC / ICE / DTLS / SRTP、VP8 编解码到另一端 QImage，
+  不是信令转发图片；连续三次停止 / 重开，接收画面尺寸及动态变化通过。
+- 共享方交换、同时点击、开始后取消、退出清理、信令服务关闭清理均通过。
+  旧流 ICE 在停止后被拒绝，旧流无效 SDP 在新流运行中也不会终止新流。
+- share 动作校验、服务器覆盖伪造发送者身份的协议回归通过。
+- Windows D3D11 主屏幕采集接收 1920×1080，目标采集帧率 15 fps；GUI 测试显示已知紫色标记，
+  改为绿色后接收端 OpenGL framebuffer 检测到对应变化，证明收到真实桌面内容。
+  停止后画面清空，换另一端共享及对方离开清理均通过。
+- 已查看 `build/windows-debug/output/ui-screen-share.png` 的真实 UI；后续修正共享期间连接说明，
+  共享显示目标帧率，避免误称实测实时 FPS。RTT / 实际码率统计仍未实现。
+- Release 便携目录临时加入 GUI 测试程序与 Qt Test DLL；清除 Qt / GStreamer 插件环境变量，
+  PATH 仅保留 Windows 系统目录；真实桌面颜色变化、停止、交换共享方通过。
+  临时文件已清理，记录为 `build/deployment-share.txt` / `.xml`。
+
+构建记录：`build/validation-0.3-debug.log`、`validation-0.3-release.log`、
+`validation-0.3-release-regression.log`、`validation-0.3-without-media.log`。
+默认 Debug 与 Release 的媒体配置均为 ON，SDK 路径仍在各自 CMakeCache。
+
+首次回归发现并修复两项实际问题：对方退出后再次发送 stop 引发 peer_unavailable，
+以及停止尚未确认时按钮文字已恢复导致交换共享方测试过早点击；当前回归均通过。
+
+当前没有双向摄像头通话、麦克风 / 远端音频、系统声音共享、远控、转写或会议纪要。
+Ubuntu 22.04 / X11、不同电脑之间、其他摄像头、长时间稳定性、干净电脑、公网 TURN、
+Wayland、云端 CI 和正式安装包尚未验收；这些结果不能用本机双客户端替代。
+
+## 0.2.0：2026-09-29 历史 Windows 验证
 
 平台与 Qt / MSVC / CMake / Ninja 沿用下面的 0.1 基线；媒体为 GStreamer 1.26.11 MSVC x64。
 MSI SHA256 已与同目录下载校验文件匹配，Runtime / Development 提取在同一独立前缀，

@@ -26,7 +26,7 @@ void VideoSurface::paintGL()
         painter.drawImage(target, frame_);
         painter.setPen(Qt::white);
         painter.drawText(QRect(16, 12, width() - 32, 24), Qt::AlignLeft,
-                         QStringLiteral("本地预览 · 尚未发送给对方"));
+                         frameCaption_);
         return;
     }
     QLinearGradient background(0, 0, width(), height());

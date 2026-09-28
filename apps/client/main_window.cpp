@@ -69,7 +69,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     workspaceButton->setChecked(true);
     nav->addStretch();
     nav->addWidget(text("WINDOWS / LINUX", "sidebarSubtitle"));
-    nav->addWidget(text(QStringLiteral("设备预览  %1").arg(zjdesk::build::Version), "sidebarSubtitle"));
+    nav->addWidget(text(QStringLiteral("屏幕共享  %1").arg(zjdesk::build::Version), "sidebarSubtitle"));
     rootLayout->addWidget(sidebar);
 
     auto *content = new QWidget;
@@ -174,17 +174,24 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     auto *controlLayout = new QHBoxLayout(controls);
     controlLayout->setContentsMargins(16, 12, 16, 12);
     for (const auto &caption : {QStringLiteral("通话麦克风"), QStringLiteral("通话摄像头"),
-                                QStringLiteral("共享屏幕"), QStringLiteral("远程协助")})
+                                QStringLiteral("远程协助")})
     {
         auto *button = new QPushButton(caption);
         button->setEnabled(false);
         button->setToolTip(QStringLiteral("当前版本尚未支持此功能"));
         controlLayout->addWidget(button);
     }
+    shareButton_ = new QPushButton(QStringLiteral("共享主屏幕"));
+    shareButton_->setObjectName("shareButton");
+    shareButton_->setToolTip(QStringLiteral("将整个主屏幕及鼠标指针发送给房间中的另一位成员"));
+    controlLayout->addWidget(shareButton_);
     controlLayout->addStretch();
-    controlLayout->addWidget(text(QStringLiteral("音视频尚未开启"), "muted"));
+    shareLabel_ = text(session_.shareDetail(), "muted");
+    shareLabel_->setObjectName("shareStatus");
+    shareLabel_->setWordWrap(true);
+    controlLayout->addWidget(shareLabel_);
     workspaceLayout->addWidget(controls);
-    auto *notice = text(QStringLiteral("本地预览不发送给对方；双人音视频、屏幕共享和远控尚未接入。"), "muted");
+    auto *notice = text(QStringLiteral("两人加入同一房间后可共享主屏幕，每次由一人共享。摄像头预览仅在本机显示。"), "muted");
     notice->setWordWrap(true);
     workspaceLayout->addWidget(notice);
     pages->addWidget(workspace);
@@ -219,7 +226,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     environmentLayout->addRow(QStringLiteral("本地预览帧"), previewStatsLabel_);
     trafficLabel_ = text(QStringLiteral("发送 0 · 接收 0"));
     environmentLayout->addRow(QStringLiteral("信令消息"), trafficLabel_);
-    environmentLayout->addRow(QStringLiteral("媒体 RTT / FPS / 码率"), text(QStringLiteral("不可用：尚无媒体连接")));
+    environmentLayout->addRow(QStringLiteral("媒体 RTT / 码率"), text(QStringLiteral("尚未实现统计")));
     diagnosticsLayout->addWidget(environmentCard);
     auto *eventsHeader = new QHBoxLayout;
     eventsHeader->addWidget(text(QStringLiteral("会话事件"), "sectionTitle"));
@@ -260,7 +267,18 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     connect(&session_, &zjdesk::SessionCoordinator::devicesChanged, this, &MainWindow::refreshDevices);
     connect(&session_, &zjdesk::SessionCoordinator::previewChanged, this, &MainWindow::refreshPreview);
     connect(&session_, &zjdesk::SessionCoordinator::audioChanged, this, &MainWindow::refreshPreview);
-    connect(&session_, &zjdesk::SessionCoordinator::previewFrame, video_, &VideoSurface::setFrame);
+    connect(&session_, &zjdesk::SessionCoordinator::previewFrame, this, [this](const QImage &image) {
+        if (!session_.screenActive())
+            video_->setFrame(image);
+    });
+    connect(&session_, &zjdesk::SessionCoordinator::shareFrame, video_, &VideoSurface::setFrame);
+    connect(&session_, &zjdesk::SessionCoordinator::shareChanged, this, &MainWindow::refreshShare);
+    connect(shareButton_, &QPushButton::clicked, this, [this] {
+        if (session_.screenActive())
+            session_.stopScreenShare();
+        else
+            session_.startScreenShare();
+    });
     connect(previewButton_, &QPushButton::clicked, this, [this] {
         using Preview = zjdesk::SessionCoordinator::PreviewState;
         if (session_.previewState() == Preview::Stopped || session_.previewState() == Preview::Failed)
@@ -298,8 +316,9 @@ void MainWindow::refreshDevices()
     for (const auto &device : session_.devices())
     {
         if (device.kind.contains("Video/Source"))
-            sourceCombo_->addItem(device.name, device.id);
-        const auto description = device.kind + " · " + device.name;
+            sourceCombo_->addItem(device.name + " · " + device.maximumMode.description(), device.id);
+        const auto description = device.kind + " · " + device.name
+            + (device.kind == "Video/Source" ? " · " + device.maximumMode.description() : "");
         if (!descriptions.contains(description))
             descriptions.append(description);
     }
@@ -320,13 +339,30 @@ void MainWindow::refreshPreview()
     sourceCombo_->setEnabled(ready && idle);
     refreshDevicesButton_->setEnabled(ready && idle);
     previewLabel_->setText(ready ? session_.previewDetail() : session_.mediaEnvironment().description);
-    if (idle)
+    if (idle && !session_.screenActive())
         video_->setFrame({});
     const auto audio = session_.audioState();
     audioButton_->setEnabled(ready && audio != Preview::Stopping);
     audioButton_->setText(audio == Preview::Stopped || audio == Preview::Failed
         ? QStringLiteral("测试声音") : QStringLiteral("停止声音"));
     audioLabel_->setText(session_.audioDetail());
+    refreshShare();
+}
+
+void MainWindow::refreshShare()
+{
+    using Preview = zjdesk::SessionCoordinator::PreviewState;
+    shareButton_->setEnabled(session_.mediaEnvironment().ready
+        && session_.state() == zjdesk::SessionCoordinator::State::PeerAvailable
+        && !session_.receivingScreen() && session_.shareState() != Preview::Stopping);
+    shareButton_->setText(session_.shareState() == Preview::Stopping ? QStringLiteral("正在停止")
+        : session_.receivingScreen() ? QStringLiteral("对方正在共享")
+        : session_.screenActive() ? QStringLiteral("停止共享") : QStringLiteral("共享主屏幕"));
+    shareLabel_->setText(session_.shareDetail());
+    statusDetail_->setText(session_.screenActive() ? session_.shareDetail() : session_.detail());
+    video_->setFrameCaption(session_.screenActive()
+        ? session_.receivingScreen() ? QStringLiteral("对方的屏幕") : QStringLiteral("主屏幕 · 正在共享给对方")
+        : QStringLiteral("本地预览 · 尚未发送给对方"));
 }
 
 void MainWindow::refreshSession()
@@ -345,6 +381,7 @@ void MainWindow::refreshSession()
     statusDetail_->setText(session_.detail());
     memberLabel_->setText(QStringLiteral("%1 / 2 人").arg(session_.memberCount()));
     peerLabel_->setText(session_.peerName().isEmpty() ? QStringLiteral("尚未加入") : session_.peerName());
+    refreshShare();
     if (state == State::PeerAvailable)
         video_->setParticipant(session_.peerName(), QStringLiteral("已加入房间 · 摄像头尚未开启"));
     else

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(ZJdesk VERSION 0.2.0 LANGUAGES CXX)
+project(ZJdesk VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,7 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(ZJDESK_BUILD_CLIENT "Build the desktop client" ON)
-option(ZJDESK_ENABLE_GSTREAMER "Enable GStreamer devices and local preview" OFF)
+option(ZJDESK_ENABLE_GSTREAMER "Enable GStreamer preview and screen sharing" OFF)
 option(ZJDESK_GUI_TESTS "Run GUI smoke tests on a visible desktop or Xvfb" OFF)
 include(CTest)
 
@@ -34,6 +34,8 @@ add_library(zjdesk_client_core STATIC
     src/diagnostics/event_log.cpp src/diagnostics/event_log.h
     src/media/media_environment.cpp src/media/media_environment.h
     src/media/media_engine.cpp src/media/media_engine.h
+    src/media/camera_mode.cpp src/media/camera_mode.h
+    src/media/screen_share.cpp src/media/screen_share.h
     src/platform/platform_info.cpp src/platform/platform_info.h)
 target_link_libraries(zjdesk_client_core PUBLIC zjdesk_protocol Qt6::Gui Qt6::Network Qt6::WebSockets)
 if(ZJDESK_ENABLE_GSTREAMER)
@@ -81,9 +83,9 @@ if(BUILD_TESTING)
     set_tests_properties(core signaling PROPERTIES TIMEOUT 30)
     if(ZJDESK_ENABLE_GSTREAMER)
         qt_add_executable(zjdesk-media-tests tests/integration/tst_media.cpp)
-        target_link_libraries(zjdesk-media-tests PRIVATE zjdesk_client_core Qt6::Test)
+        target_link_libraries(zjdesk-media-tests PRIVATE zjdesk_client_core zjdesk_signaling Qt6::Test)
         add_test(NAME media COMMAND zjdesk-media-tests -o "${CMAKE_BINARY_DIR}/test-results/media.xml,junitxml")
-        set_tests_properties(media PROPERTIES TIMEOUT 60)
+        set_tests_properties(media PROPERTIES TIMEOUT 120)
     endif()
     if(ZJDESK_BUILD_CLIENT AND ZJDESK_GUI_TESTS)
         qt_add_executable(zjdesk-ui-tests tests/ui/tst_window.cpp
@@ -94,6 +96,6 @@ if(BUILD_TESTING)
             Qt6::Widgets Qt6::OpenGLWidgets Qt6::Test)
         qt_add_resources(zjdesk-ui-tests test_styles PREFIX "/" FILES resources/styles.qss)
         add_test(NAME desktop COMMAND zjdesk-ui-tests -o "${CMAKE_BINARY_DIR}/test-results/desktop.xml,junitxml")
-        set_tests_properties(desktop PROPERTIES TIMEOUT 30)
+        set_tests_properties(desktop PROPERTIES TIMEOUT 90)
     endif()
 endif()

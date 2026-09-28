@@ -154,6 +154,13 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
     }
     if (protocol::isRelayType(message->type))
     {
+        if (message->type == "share")
+        {
+            const auto action = message->payload.value("action").toString();
+            const auto stream = message->payload.value("streamId").toString();
+            if ((action != "start" && action != "stop") || !protocol::isRoomIdValid(stream))
+                return reject(socket, "invalid_share");
+        }
         if (peers_[socket].room.isEmpty())
             return reject(socket, "not_joined");
         auto *other = otherPeer(socket);

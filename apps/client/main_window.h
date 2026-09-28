@@ -23,6 +23,7 @@ private:
     void exportEvents();
     void refreshPreview();
     void refreshDevices();
+    void refreshShare();
     zjdesk::SessionCoordinator session_;
     QLineEdit *serverEdit_ = nullptr;
     QLineEdit *roomEdit_ = nullptr;
@@ -43,4 +44,6 @@ private:
     QLabel *audioLabel_ = nullptr;
     QLabel *deviceLabel_ = nullptr;
     QLabel *previewStatsLabel_ = nullptr;
+    QPushButton *shareButton_ = nullptr;
+    QLabel *shareLabel_ = nullptr;
 };

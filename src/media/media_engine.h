@@ -1,6 +1,7 @@
 #pragma once
 
 #include "media_environment.h"
+#include "camera_mode.h"
 #include <QImage>
 #include <QList>
 #include <QMutex>
@@ -15,6 +16,7 @@ struct MediaDevice
     QString id;
     QString name;
     QString kind;
+    CameraMode maximumMode;
 };
 
 struct PreviewStats

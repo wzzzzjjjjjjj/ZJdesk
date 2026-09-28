@@ -26,6 +26,7 @@ flowchart TD
 | remote-control / ControlSession | 本地授权、控制代次、序号校验 | 当前没有传输或 OS 输入注入 |
 | media / MediaEnvironment | 可选 SDK 初始化、插件检查与部署环境选择 | 不推断通话连接成功 |
 | media / MediaEngine | 设备枚举、本地视频预览、音频测试与有界帧交接 | Gst 指针只在媒体模块，当前不发送媒体 |
+| media / ScreenShare | 桌面采集、WebRTC 协商、VP8 编解码与有界帧交接 | 独立工作线程，不直接修改会话业务状态 |
 | platform / PlatformInfo | 真实平台、架构、会话信息 | 系统输入与采集适配留到对应功能实现 |
 | apps/client | 界面布局、显示状态、收集用户操作 | 不直接操作 socket、系统输入或 GStreamer 对象 |
 
@@ -53,8 +54,8 @@ stateDiagram-v2
     PeerAvailable --> Idle: 离开
 ```
 
-`PeerAvailable` 仅表示双方已入会。接入媒体后新增 `Negotiating`、`Connected` 等实际媒体状态，
-必须由媒体建立 / 中断事件推动，不能由 WebSocket 连接直接判定。
+`PeerAvailable` 仅表示双方已入会。屏幕共享另有 Stopped / Starting / Running / Stopping / Failed
+状态；Running 必须同时收到实际画面和 WebRTC connected 事件，不能由 WebSocket 连接直接判定。
 
 每次连接创建一个新的 QWebSocket，回调检查当前 socket 身份。
 退出时先清空当前连接标识，再断开回调与 socket，防止旧连接回调影响新会话。
@@ -64,10 +65,13 @@ stateDiagram-v2
 ## 协议
 
 统一信封：`{"version":1,"type":"join","payload":{...}}`，UTF-8 总长度最多 64 KiB。
-客户端类型为 `join`、`leave`、`offer`、`answer`、`ice`。
+客户端类型为 `join`、`leave`、`share`、`offer`、`answer`、`ice`。
 服务响应为 `joined`、`left`、`peer_joined`、`peer_left`、`error`。
 服务端根据当前连接所属房间转发协商消息，并覆盖 `fromPeerId`，客户端不能自行指定另一个房间或发送者身份。
-SDP / ICE 的具体业务字段在真实媒体接入时补上对应验证；目前服务只转发 JSON payload。
+`share` 包含 action=start/stop 和 streamId，服务验证动作和标识格式。
+共享 SDP 消息携带 sdp，ICE 携带 candidate / sdpMLineIndex；都携带 streamId。
+接收端先校验成员身份和当前流标识，再解析 SDP 或 ICE；旧流事件被丢弃。
+WebSocket 只传共享控制与协商信息，视频 RTP 由 WebRTC 的 ICE / DTLS / SRTP 通道传输。
 
 远控消息将走 WebRTC DataChannel，不能复用信令转发持续发送画面或键鼠。
 被控端本地确认后才能授权，每次授权生成新的 controlEpoch；
@@ -95,11 +99,26 @@ Stopping / Failed，与房间状态独立。只有第一帧到达才显示预览
 SDK 的旧 ksvideosrc 在本机摄像头失败，当前排除该接口，使用枚举出的 Media Foundation 接口。
 音频设备仅枚举；audiotestsrc 可接扬声器或测试用 fakesink，尚无麦克风录制与远端音频。
 
-下一步 0.3 再接入 WebRTC 协商和真实通话；需要 GLib 回调时按实际职责接入 MainContext，
-状态事件继续 queued 转交协调层并携带会话代次。
+## 0.3 摄像头模式与屏幕共享
 
-屏幕采集和输入执行到落地时才加入平台接口，通过 CMake 选择 Windows 或 Linux 实现。
-Ubuntu 22.04 先验证 X11，再独立增加 Wayland；不在业务类内散布平台宏。
+CameraMode 从设备 caps 的单个结构中固定宽高与帧率，按像素数、再按分数帧率比较；
+不把不同模式的宽高和帧率拼成设备未公布的组合。raw 直接转换，JPEG 先解码，再转 RGB；
+预览保留采集原始尺寸。UI 的运行详情读取首帧的真实 caps，帧率是协商值，尚非实时测量值。
+
+用户将屏幕共享提前，语音通话仍待实现，因此共享是独立单向视频管线，摄像头预览保持本地。
+ScreenShareWorker 在专用 Qt 线程管理管线、GstBus 和 appsink；发送侧桌面 tee 分为本地预览
+和 VP8 / RTP / webrtcbin，接收侧 webrtcbin / VP8 解码进入有界 QImage 交接槽。
+Windows 采集使用 d3d11screencapturesrc / d3d11download，Linux X11 使用 ximagesrc；
+平台差异集中在媒体采集管线入口，UI 与协调层不包含平台 API，Wayland 暂不支持。
+
+每次共享生成新 streamId；启停带独立 epoch，回调与帧都拒绝旧代次。
+GStreamer 的 SDP promise 和 ICE 回调通过受生命周期保护的 queued invokeMethod 回到工作线程。
+RTP pad 在 streaming 回调返回前同步连接预建的解码入口，避免未连接错误；不从回调修改 UI。
+远端描述应用完成前缓存最多 256 个 ICE 事件；连接启动超时为 15 秒。
+SessionCoordinator 决定共享角色及状态；双方同时开始时按 peerId 排序确定同一共享方。
+停止、成员离开或信令失败均取消管线，清空画面；对方已离开时不会再发送停止消息。
+全局信令和共享连接分别清理，避免把退出期间迟到的 peer_unavailable 当作本端退会。
+共享目前仅采用局域网 host ICE，无 STUN / TURN、公网恢复或系统声音。
 
 ## 新增需求：转写与会议纪要
 
@@ -107,7 +126,7 @@ Ubuntu 22.04 先验证 X11，再独立增加 Wayland；不在业务类内散布�
 服务端须覆盖发送者身份，不能接受客户端伪造说话人。独立音轨无需用声纹猜测房间成员；
 同一麦克风附近的多名说话人属于额外的说话人分离需求，当前未承诺。
 最终按时间汇总发言，生成讨论内容、决策、待办与待确认事项；不补写转写中不存在的事实。
-用户已确定先保持两人，不扩展房间人数。处理后端、本地模型或云端 API 仍待选择，目前没有功能实现。
+用户已确定先保持两人，不扩展房间人数；最新要求暂缓转写与纪要，目前没有功能实现。
 
 ## 增加功能的顺序
 

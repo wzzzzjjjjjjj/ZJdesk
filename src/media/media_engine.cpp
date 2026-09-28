@@ -58,7 +58,17 @@ public:
             else if (category.contains("Audio") && category.contains("Sink"))
                 category = "Audio/Sink";
             const QString id = QString("device-%1-%2").arg(deviceGeneration_).arg(devices_.size());
-            result.append({id, QString::fromUtf8(name), category});
+            CameraMode mode;
+            if (category == "Video/Source")
+            {
+                auto *caps = gst_device_get_caps(device);
+                auto *text = gst_caps_to_string(caps);
+                mode = maximumCameraMode(QString::fromUtf8(text));
+                g_free(text);
+                gst_caps_unref(caps);
+            }
+            result.append({id, QString::fromUtf8(name), category, mode});
+            modes_.insert(id, mode);
             devices_.insert(id, GST_DEVICE(gst_object_ref(device)));
             g_free(name);
             g_free(kind);
@@ -79,10 +89,6 @@ public:
         videoEpoch_ = epoch;
         QString error;
         GError *parseError = nullptr;
-        const char *tail = "capsfilter caps=\"video/x-raw,width=640,height=480,framerate=30/1\" ! "
-            "videoconvert ! videoscale ! "
-            "video/x-raw,format=RGB,width=640,height=480 ! "
-            "appsink name=frames max-buffers=1 drop=true sync=false wait-on-eos=false";
         if (sourceId == "test")
         {
             video_ = gst_parse_launch("videotestsrc is-live=true pattern=ball ! "
@@ -93,7 +99,13 @@ public:
         else if (devices_.contains(sourceId))
         {
             auto *source = gst_device_create_element(devices_.value(sourceId), "camera");
-            auto *conversion = gst_parse_bin_from_description(tail, TRUE, &parseError);
+            const auto mode = modes_.value(sourceId);
+            const auto tail = QString("capsfilter caps=\"%1\" ! %2videoconvert ! "
+                "video/x-raw,format=RGB ! appsink name=frames max-buffers=1 "
+                "drop=true sync=false wait-on-eos=false")
+                .arg(mode.caps, mode.jpeg ? "jpegdec ! " : "");
+            auto *conversion = mode.caps.isEmpty() ? nullptr
+                : gst_parse_bin_from_description(tail.toUtf8().constData(), TRUE, &parseError);
             video_ = gst_pipeline_new("local-preview");
             if (source && conversion && !parseError)
             {
@@ -214,6 +226,7 @@ private:
         for (auto *device : devices_)
             gst_object_unref(device);
         devices_.clear();
+        modes_.clear();
     }
 
     void releaseVideo()
@@ -311,7 +324,9 @@ private:
                     if (!firstFrame_)
                     {
                         firstFrame_ = true;
-                        emit videoStatus(videoEpoch_, "running", QStringLiteral("本地预览正在运行 · 640 × 480"));
+                        emit videoStatus(videoEpoch_, "running", QStringLiteral("本地预览 · %1 × %2 · %3 fps")
+                            .arg(info.width).arg(info.height)
+                            .arg(info.fps_d ? double(info.fps_n) / info.fps_d : 0, 0, 'f', 2));
                     }
                 }
                 gst_sample_unref(sample);
@@ -353,6 +368,7 @@ private:
     }
 
     QHash<QString, GstDevice *> devices_;
+    QHash<QString, CameraMode> modes_;
     quint64 deviceGeneration_ = 0;
     GstElement *video_ = nullptr;
     GstElement *audio_ = nullptr;
