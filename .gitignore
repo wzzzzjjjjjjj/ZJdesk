@@ -1,0 +1,9 @@
+/build/
+/dist/
+/output/
+/CMakeUserPresets.json
+*.user
+*.user.*
+*.autosave
+/.vs/
+/.idea/

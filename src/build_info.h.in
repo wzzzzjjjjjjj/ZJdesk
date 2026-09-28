@@ -1,0 +1,6 @@
+#pragma once
+
+namespace zjdesk::build
+{
+inline constexpr char Version[] = "@PROJECT_VERSION@";
+} // namespace zjdesk::build
