@@ -5,6 +5,7 @@
 #include <QMainWindow>
 
 class QLabel;
+class QComboBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
@@ -20,8 +21,9 @@ public:
 private:
     void refreshSession();
     void exportEvents();
+    void refreshPreview();
+    void refreshDevices();
     zjdesk::SessionCoordinator session_;
-    zjdesk::MediaEnvironment media_;
     QLineEdit *serverEdit_ = nullptr;
     QLineEdit *roomEdit_ = nullptr;
     QLineEdit *nameEdit_ = nullptr;
@@ -33,4 +35,12 @@ private:
     QLabel *trafficLabel_ = nullptr;
     QPlainTextEdit *logView_ = nullptr;
     VideoSurface *video_ = nullptr;
+    QComboBox *sourceCombo_ = nullptr;
+    QPushButton *previewButton_ = nullptr;
+    QPushButton *audioButton_ = nullptr;
+    QPushButton *refreshDevicesButton_ = nullptr;
+    QLabel *previewLabel_ = nullptr;
+    QLabel *audioLabel_ = nullptr;
+    QLabel *deviceLabel_ = nullptr;
+    QLabel *previewStatsLabel_ = nullptr;
 };

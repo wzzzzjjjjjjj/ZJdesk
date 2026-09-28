@@ -3,7 +3,7 @@
 C++ / Qt 跨平台协作工作台，目标平台为 Windows 11 x64 与 Ubuntu 22.04 x64。
 本项目沿用 MeetScope 的产品方向，以 ZJdesk 为工程名，按可验证的小版本持续开发。
 
-## 当前版本：0.1.0 基础框架
+## 当前版本：0.2.0 媒体依赖与本地预览
 
 已实现：
 
@@ -13,10 +13,14 @@ C++ / Qt 跨平台协作工作台，目标平台为 Windows 11 x64 与 Ubuntu 22
 - offer / answer / ICE 转发、房间隔离、版本化 JSON 协议及消息大小限制。
 - 有界事件日志、JSONL 报告导出，以及远控授权与代次校验的核心逻辑。
 - CMake / Ninja 构建、Qt Test / CTest 测试和 Windows 本地部署。
+- 可选启用 GStreamer 1.26.11，枚举摄像头、音频输入与输出设备。
+- 视频测试源和摄像头本地预览，开始 / 停止 / 重新开始；最多两帧交接缓存。
+- 音频测试源和低音量测试音，本地预览的真实采集 / 丢弃帧数。
 
-音视频、屏幕采集、DataChannel、实际键鼠注入、自动重连还没有实现。
-界面中的相关操作保持禁用；两人入会成功只表示房间信令成功。
+双人音视频、屏幕采集、DataChannel、实际键鼠注入、自动重连还没有实现。
+本地预览不会发送给对方；通话、共享和远控操作保持禁用；两人入会成功只表示房间信令成功。
 诊断面板不填充虚构的 FPS、RTT 或码率。
+新增需求为两人成员语音转写和会议纪要，尚未实现；用户已确定先保持两人，本地 / 云端处理方式待确认。
 
 ## 依赖基线
 
@@ -27,7 +31,7 @@ C++ / Qt 跨平台协作工作台，目标平台为 Windows 11 x64 与 Ubuntu 22
 | Windows | VS 2022 / v143 / amd64，Windows SDK，CDB |
 | Ubuntu | 22.04，GCC / G++ 11，Qt 在 22.04 环境构建 |
 | 构建 | CMake >= 3.28，Ninja；本机使用 CMake 3.31.6 / Ninja 1.12.1 |
-| 媒体 | GStreamer 1.26.11，当前为可选依赖探测 |
+| 媒体 | GStreamer 1.26.11，可选启用设备枚举与本地预览 |
 
 Qt 组件：Core、Network、WebSockets；桌面客户端增加 Widgets、OpenGLWidgets；测试增加 Test。
 WebSocket 使用 [Qt WebSockets](https://doc.qt.io/qt-6.8/qwebsocket.html)，
@@ -35,19 +39,41 @@ Windows 本地部署使用 [Qt CMake deployment](https://doc.qt.io/qt-6.8/qt-gen
 
 ## Windows 快速开始
 
-在 PowerShell 中执行：
+在 VS Code 中打开本项目，选择“终端 → 新建终端”，使用 **PowerShell** 执行：
 
 ```powershell
 cd F:\projects\ZJdesk
-.\tools\build-windows.ps1 -Preset windows-debug
-.\tools\run-demo.ps1 -Preset windows-debug
+.\build.ps1
+.\run.ps1
 ```
 
+默认构建 Debug。构建脚本自动找到 VS 2022，加载 MSVC x64、CMake、Ninja 和 Qt 环境，
+依次完成配置、编译和无界面的测试；启用媒体后增加 media 回归，任一步失败即停止。无需使用 Developer Command Prompt。
+默认不运行会弹出窗口的 `desktop` 界面测试；需要完整测试时执行 `.\build.ps1 -GuiTests`。
+项目只提供两个 PowerShell 入口：`build.ps1` 负责构建，`run.ps1` 负责启动。
+修改代码后重新执行构建脚本即可增量构建；构建前关闭上一次演示窗口，避免可执行文件被占用。
+
 演示脚本启动一个本机服务与 Alice、Bob 两个窗口。在两个窗口分别点击“加入房间”，
-可以观察两人成员状态、离开和重新加入。关闭两个窗口后脚本停止自己创建的服务。
+可以观察两人成员状态、离开和重新加入。终端会保持运行；关闭两个窗口后脚本停止自己创建的服务。
+在该终端按 `Ctrl+C` 会清理本次脚本创建的客户端和服务，不影响其他实例。
 不会修改全局 PATH、系统配置或现有 Qt 5 项目。
 
 Qt 安装位置不同时，两个脚本都可传入 `-QtRoot '实际的 Qt MSVC2022 x64 目录'`。
+
+构建和运行 Release：
+
+```powershell
+.\build.ps1 -Preset windows-release
+.\run.ps1 -Preset windows-release
+```
+
+构建输出位于 `build/windows-debug/bin/` 或 `build/windows-release/bin/`。
+如果 PowerShell 提示脚本执行被策略禁止，可以用下列命令仅为本次进程运行脚本：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run.ps1
+```
 
 ### Qt Creator
 
@@ -59,7 +85,7 @@ Qt 安装位置不同时，两个脚本都可传入 `-QtRoot '实际的 Qt MSVC2
 ### 可直接双击的本地部署
 
 ```powershell
-.\tools\build-windows.ps1 -Preset windows-release -Deploy
+.\build.ps1 -Preset windows-release -Deploy
 ```
 
 输出到 `dist/windows-release/bin/`，包含客户端、信令服务和 Qt 运行依赖。
@@ -96,23 +122,42 @@ ctest --preset linux-debug
 GUI 测试需要真实桌面或 Xvfb，显式配置 `-DZJDESK_GUI_TESTS=ON`；不使用 offscreen 验证 OpenGL。
 Ubuntu 跨机运行尚待实机验收，不能以 Windows 的测试结果代替。
 
-## 启用 GStreamer 依赖探测
+## 启用 GStreamer 与本地预览
 
 默认 `ZJDESK_ENABLE_GSTREAMER=OFF`，因此安装媒体 SDK 前也可以维护和测试房间逻辑。
-安装同版本的 Runtime 与 Development 到同一目录后，在 Qt Creator 的 CMake 配置中添加：
+准备同版本 MSVC x64 Runtime 与 Development 的共同目录后，首次在 PowerShell 中执行：
 
-```text
-ZJDESK_ENABLE_GSTREAMER:BOOL=ON
-GST_ROOT:PATH=F:/gstreamer/1.0/msvc_x86_64
+```powershell
+.\build.ps1 -GstRoot '实际的 GStreamer SDK 目录'
+.\run.ps1
 ```
 
-`GST_ROOT` 必须换成真实安装目录；把它的 `bin` 加到**项目运行环境** PATH。
-Linux 使用该独立前缀的 `PKG_CONFIG_PATH` 和 `LD_LIBRARY_PATH`，通过 pkg-config 查找。
-目前接入仅初始化运行库、记录实际版本并检查必要插件，不创建通话管线。
-启用后仍需部署 GStreamer 自身的 DLL、插件和扫描器；Qt 部署工具不会自动处理它们。
+之后两个脚本从对应 preset 的 CMakeCache 读取 SDK 路径；只设置子进程的 DLL、插件、
+扫描器与独立注册缓存，不修改系统 PATH。`build.ps1 -WithoutMedia` 可显式关闭媒体。
+Qt Creator 使用 `ZJDESK_ENABLE_GSTREAMER=ON`、`GST_ROOT=<真实 SDK 目录>`，并配置对应运行环境。
+
+本机 SDK 是校验官方 MSI 后提取的独立目录：
+`F:\gstreamer\1.26.11\PFiles64\gstreamer\1.0\msvc_x86_64`，没有写系统安装记录。
+本机首次启用可将该路径传给 `-GstRoot`；它不是其他机器的默认路径。
+
+在“本地预览”选择视频测试源或摄像头，点击“开始预览”；停止后可以重新开始。
+预览不需要加入房间。点击“测试声音”播放低音量测试音，再次点击停止。
+诊断页显示真实版本、枚举设备和预览帧计数；默认测试不打开摄像头，也不播放测试音。
+
+Release 需要为自己的 preset 首次指定 `-GstRoot`：
+
+```powershell
+.\build.ps1 -Preset windows-release -GstRoot '实际的 GStreamer SDK 目录' -Deploy
+```
+
+部署包含 SDK Runtime DLL、插件、扫描器及随包许可；程序自动选择部署目录的媒体依赖。
+这是本地便携部署，尚未完成干净电脑验收或正式安装包。
+Linux 设置独立前缀的 `PKG_CONFIG_PATH`、`LD_LIBRARY_PATH` 后，使用
+`cmake --preset linux-debug -DZJDESK_ENABLE_GSTREAMER=ON`；Ubuntu 22.04 尚未实机验证。
 
 ## 项目文档
 
+- [项目交接与未完成清单](docs/handoff.md)
 - [架构与扩展约定](docs/architecture.md)
 - [开发与验证流程](docs/development.md)
 - [迭代路线](docs/roadmap.md)

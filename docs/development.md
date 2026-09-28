@@ -2,10 +2,14 @@
 
 ## 构建入口
 
-Windows 的 tools/build-windows.ps1 自动定位本机 VS C++ 工具，初始化 amd64 环境，
+Windows 的根目录 build.ps1 自动定位本机 VS C++ 工具，初始化 amd64 环境，
 然后顺序运行 configure、build、CTest。任一步失败即停止。
+默认 CTest 运行 core、signaling，以及启用 GStreamer 时的 media，不弹出窗口或播放测试音；
+加 `-GuiTests` 才执行包括 desktop 的完整测试。
+`-GstRoot` 首次启用媒体并保存 CMakeCache，后续复用；`-WithoutMedia` 显式关闭。
 使用参数 `-Fresh` 重建 CMake 配置，`-Deploy` 输出本地部署目录。
 所有环境修改只在子进程中生效，不写系统环境变量。
+根目录 run.ps1 启动本机信令服务与客户端演示，不执行构建。
 
 Qt Creator 打开根 CMakeLists.txt 并选择已经配好的 Qt 6.8.3 MSVC2022 x64 Kit。
 Qt / GStreamer 本机路径放在 Kit、环境变量或被忽略的 CMakeUserPresets.json，
@@ -17,7 +21,8 @@ Qt / GStreamer 本机路径放在 Kit、环境变量或被忽略的 CMakeUserPre
 | --- | --- |
 | core | 协议异常输入、房间校验、授权代次 / 重放、日志容量和导出、入会校验 |
 | signaling | 真实本机 WebSocket、第三人拒绝、房间隔离、SDP/ICE 转发、20 次入退会、断开与重新加入 |
-| desktop | 两个真实 Qt 窗口、加入与离开按钮、成员显示、OpenGL 上下文和页面截图 |
+| media | 实际视频测试源、五次启停、有界缓存、取消 / 旧帧、失败后重试、设备枚举及静音音频测试源 |
+| desktop | 两个真实 Qt 窗口、成员状态、OpenGL、本地预览动态画面及截图 |
 
 core 和 signaling 不需要桌面。desktop 由 ZJDESK_GUI_TESTS 控制，需要可见桌面或 Xvfb，
 Windows presets 已启用它；Linux presets 默认关闭，避免将 offscreen 当成真实 OpenGL 验证。
@@ -27,6 +32,8 @@ CTest 输出位于 build/<preset>/Testing/Temporary/LastTest.log。
 每组测试另写 JUnit XML 到 build/<preset>/test-results/，供后续 CI 收集。
 desktop 输出截图到 build/<preset>/output/，这些生成文件不进入源码版本管理。
 所有网络测试使用本机随机端口，不占用演示默认端口 8765。
+物理摄像头用例默认跳过，必须在项目 SDK 环境中设置 `ZJDESK_CAMERA_TEST=1` 后执行
+`zjdesk-media-tests cameraReleasesDevice`，单独保存结果；不能把默认跳过当作硬件通过。
 
 ## 持续集成准备
 

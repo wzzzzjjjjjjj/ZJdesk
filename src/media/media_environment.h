@@ -7,6 +7,7 @@ namespace zjdesk
 struct MediaEnvironment
 {
     bool sdkLinked = false;
+    bool ready = false;
     QString version;
     QStringList missingPlugins;
     QString description;

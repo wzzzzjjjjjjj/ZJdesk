@@ -3,6 +3,7 @@
 #include "video_surface.h"
 #include "zjdesk/build_info.h"
 #include <QFileDialog>
+#include <QComboBox>
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -12,6 +13,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QStackedWidget>
+#include <QScrollArea>
 #include <QVBoxLayout>
 
 namespace
@@ -34,7 +36,7 @@ QFrame *card()
 } // namespace
 
 MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QString &name,
-                       QWidget *parent) : QMainWindow(parent), media_(zjdesk::MediaEnvironment::inspect())
+                       QWidget *parent) : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("ZJdesk · 跨平台协作工作台"));
     resize(1200, 780);
@@ -67,7 +69,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     workspaceButton->setChecked(true);
     nav->addStretch();
     nav->addWidget(text("WINDOWS / LINUX", "sidebarSubtitle"));
-    nav->addWidget(text(QStringLiteral("基础框架  %1").arg(zjdesk::build::Version), "sidebarSubtitle"));
+    nav->addWidget(text(QStringLiteral("设备预览  %1").arg(zjdesk::build::Version), "sidebarSubtitle"));
     rootLayout->addWidget(sidebar);
 
     auto *content = new QWidget;
@@ -145,10 +147,33 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     stage->addWidget(sessionCard, 1);
     workspaceLayout->addLayout(stage, 1);
 
+    auto *previewCard = card();
+    auto *previewLayout = new QHBoxLayout(previewCard);
+    previewLayout->setContentsMargins(16, 10, 16, 10);
+    previewLayout->addWidget(text(QStringLiteral("本地预览"), "fieldLabel"));
+    sourceCombo_ = new QComboBox;
+    sourceCombo_->setObjectName("previewSource");
+    sourceCombo_->setMinimumWidth(165);
+    sourceCombo_->addItem(QStringLiteral("视频测试源"), "test");
+    previewLayout->addWidget(sourceCombo_, 1);
+    previewButton_ = new QPushButton(QStringLiteral("开始预览"));
+    previewButton_->setObjectName("previewButton");
+    previewLayout->addWidget(previewButton_);
+    audioButton_ = new QPushButton(QStringLiteral("测试声音"));
+    audioButton_->setObjectName("audioTestButton");
+    previewLayout->addWidget(audioButton_);
+    refreshDevicesButton_ = new QPushButton(QStringLiteral("刷新设备"));
+    previewLayout->addWidget(refreshDevicesButton_);
+    workspaceLayout->addWidget(previewCard);
+    previewLabel_ = text(session_.previewDetail(), "muted");
+    previewLabel_->setObjectName("previewStatus");
+    previewLabel_->setWordWrap(true);
+    workspaceLayout->addWidget(previewLabel_);
+
     auto *controls = card();
     auto *controlLayout = new QHBoxLayout(controls);
     controlLayout->setContentsMargins(16, 12, 16, 12);
-    for (const auto &caption : {QStringLiteral("麦克风"), QStringLiteral("摄像头"),
+    for (const auto &caption : {QStringLiteral("通话麦克风"), QStringLiteral("通话摄像头"),
                                 QStringLiteral("共享屏幕"), QStringLiteral("远程协助")})
     {
         auto *button = new QPushButton(caption);
@@ -159,7 +184,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     controlLayout->addStretch();
     controlLayout->addWidget(text(QStringLiteral("音视频尚未开启"), "muted"));
     workspaceLayout->addWidget(controls);
-    auto *notice = text(QStringLiteral("当前可体验房间连接与成员状态；音视频、屏幕共享和远控将在后续版本开放。"), "muted");
+    auto *notice = text(QStringLiteral("本地预览不发送给对方；双人音视频、屏幕共享和远控尚未接入。"), "muted");
     notice->setWordWrap(true);
     workspaceLayout->addWidget(notice);
     pages->addWidget(workspace);
@@ -174,10 +199,24 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     environmentLayout->addRow(QStringLiteral("操作系统"), text(platform.system));
     environmentLayout->addRow(QStringLiteral("架构 / 会话"), text(platform.architecture + " / " + platform.desktopSession));
     environmentLayout->addRow(QStringLiteral("Qt 版本"), text(QString::fromLatin1(qVersion())));
-    auto *mediaDescription = text(media_.description);
+    const auto &media = session_.mediaEnvironment();
+    auto *mediaDescription = text(media.description);
     mediaDescription->setWordWrap(true);
     environmentLayout->addRow(QStringLiteral("媒体状态"), mediaDescription);
-    environmentLayout->addRow(QStringLiteral("媒体版本"), text(media_.version.isEmpty() ? QStringLiteral("未启用") : media_.version));
+    environmentLayout->addRow(QStringLiteral("媒体版本"), text(media.version.isEmpty() ? QStringLiteral("未启用") : media.version));
+    deviceLabel_ = text(QStringLiteral("正在枚举设备"));
+    deviceLabel_->setWordWrap(true);
+    auto *deviceScroll = new QScrollArea;
+    deviceScroll->setWidgetResizable(true);
+    deviceScroll->setFrameShape(QFrame::NoFrame);
+    deviceScroll->setMaximumHeight(100);
+    deviceScroll->setWidget(deviceLabel_);
+    environmentLayout->addRow(QStringLiteral("音视频设备"), deviceScroll);
+    audioLabel_ = text(session_.audioDetail());
+    audioLabel_->setWordWrap(true);
+    environmentLayout->addRow(QStringLiteral("音频测试"), audioLabel_);
+    previewStatsLabel_ = text(QStringLiteral("采集 0 帧 · 丢弃 0 帧 · 待显示 0 帧"));
+    environmentLayout->addRow(QStringLiteral("本地预览帧"), previewStatsLabel_);
     trafficLabel_ = text(QStringLiteral("发送 0 · 接收 0"));
     environmentLayout->addRow(QStringLiteral("信令消息"), trafficLabel_);
     environmentLayout->addRow(QStringLiteral("媒体 RTT / FPS / 码率"), text(QStringLiteral("不可用：尚无媒体连接")));
@@ -218,8 +257,76 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     });
     connect(session_.events(), &zjdesk::EventLog::appended, logView_, &QPlainTextEdit::appendPlainText);
     connect(exportButton, &QPushButton::clicked, this, &MainWindow::exportEvents);
+    connect(&session_, &zjdesk::SessionCoordinator::devicesChanged, this, &MainWindow::refreshDevices);
+    connect(&session_, &zjdesk::SessionCoordinator::previewChanged, this, &MainWindow::refreshPreview);
+    connect(&session_, &zjdesk::SessionCoordinator::audioChanged, this, &MainWindow::refreshPreview);
+    connect(&session_, &zjdesk::SessionCoordinator::previewFrame, video_, &VideoSurface::setFrame);
+    connect(previewButton_, &QPushButton::clicked, this, [this] {
+        using Preview = zjdesk::SessionCoordinator::PreviewState;
+        if (session_.previewState() == Preview::Stopped || session_.previewState() == Preview::Failed)
+            session_.startPreview(sourceCombo_->currentData().toString());
+        else
+            session_.stopPreview();
+    });
+    connect(audioButton_, &QPushButton::clicked, this, [this] {
+        using Preview = zjdesk::SessionCoordinator::PreviewState;
+        if (session_.audioState() == Preview::Stopped || session_.audioState() == Preview::Failed)
+            session_.startAudioTest();
+        else
+            session_.stopAudioTest();
+    });
+    connect(refreshDevicesButton_, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::refreshDevices);
+    auto *statsTimer = new QTimer(this);
+    connect(statsTimer, &QTimer::timeout, this, [this] {
+        const auto stats = session_.previewStats();
+        previewStatsLabel_->setText(QStringLiteral("采集 %1 帧 · 丢弃 %2 帧 · 待显示 %3 帧")
+            .arg(stats.capturedFrames).arg(stats.droppedFrames).arg(stats.pendingFrames));
+    });
+    statsTimer->start(1000);
     session_.events()->append("application", QStringLiteral("工作台已启动"));
     refreshSession();
+    refreshPreview();
+    QTimer::singleShot(0, &session_, &zjdesk::SessionCoordinator::refreshDevices);
+}
+
+void MainWindow::refreshDevices()
+{
+    const auto selected = sourceCombo_->currentData().toString();
+    sourceCombo_->clear();
+    sourceCombo_->addItem(QStringLiteral("视频测试源"), "test");
+    QStringList descriptions;
+    for (const auto &device : session_.devices())
+    {
+        if (device.kind.contains("Video/Source"))
+            sourceCombo_->addItem(device.name, device.id);
+        const auto description = device.kind + " · " + device.name;
+        if (!descriptions.contains(description))
+            descriptions.append(description);
+    }
+    const auto index = sourceCombo_->findData(selected);
+    sourceCombo_->setCurrentIndex(index < 0 ? 0 : index);
+    deviceLabel_->setText(!session_.mediaEnvironment().ready ? session_.mediaEnvironment().description
+        : descriptions.isEmpty() ? QStringLiteral("没有可用设备；测试源仍可使用") : descriptions.join('\n'));
+}
+
+void MainWindow::refreshPreview()
+{
+    using Preview = zjdesk::SessionCoordinator::PreviewState;
+    const auto state = session_.previewState();
+    const bool idle = state == Preview::Stopped || state == Preview::Failed;
+    const bool ready = session_.mediaEnvironment().ready;
+    previewButton_->setEnabled(ready && state != Preview::Stopping);
+    previewButton_->setText(idle ? QStringLiteral("开始预览") : QStringLiteral("停止预览"));
+    sourceCombo_->setEnabled(ready && idle);
+    refreshDevicesButton_->setEnabled(ready && idle);
+    previewLabel_->setText(ready ? session_.previewDetail() : session_.mediaEnvironment().description);
+    if (idle)
+        video_->setFrame({});
+    const auto audio = session_.audioState();
+    audioButton_->setEnabled(ready && audio != Preview::Stopping);
+    audioButton_->setText(audio == Preview::Stopped || audio == Preview::Failed
+        ? QStringLiteral("测试声音") : QStringLiteral("停止声音"));
+    audioLabel_->setText(session_.audioDetail());
 }
 
 void MainWindow::refreshSession()

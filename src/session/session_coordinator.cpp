@@ -6,6 +6,39 @@ namespace zjdesk
 SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
 {
     qRegisterMetaType<State>();
+    qRegisterMetaType<PreviewState>();
+    connect(&media_, &MediaEngine::devicesReady, this, [this](const QList<MediaDevice> &devices, const QString &error) {
+        devices_ = devices;
+        events_.append("media", error.isEmpty()
+            ? QStringLiteral("发现 %1 个音视频设备").arg(devices.size()) : error);
+        emit devicesChanged();
+    });
+    connect(&media_, &MediaEngine::videoStatus, this, [this](quint64 epoch, const QString &status, const QString &detail) {
+        if (epoch != previewEpoch_)
+            return;
+        if (status == "stopped" && previewState_ == PreviewState::Failed)
+            return;
+        previewState_ = status == "running" ? PreviewState::Running
+            : status == "stopped" ? PreviewState::Stopped : PreviewState::Failed;
+        previewDetail_ = detail;
+        if (previewState_ == PreviewState::Failed)
+            media_.stopVideo(++previewEpoch_);
+        events_.append("media", detail);
+        emit previewChanged();
+    });
+    connect(&media_, &MediaEngine::audioStatus, this, [this](quint64 epoch, const QString &status, const QString &detail) {
+        if (epoch != audioEpoch_)
+            return;
+        audioState_ = status == "running" ? PreviewState::Running
+            : status == "stopped" ? PreviewState::Stopped : PreviewState::Failed;
+        audioDetail_ = detail;
+        events_.append("media", detail);
+        emit audioChanged();
+    });
+    connect(&media_, &MediaEngine::frameReady, this, [this](quint64 epoch, const QImage &image) {
+        if (epoch == previewEpoch_ && previewState_ == PreviewState::Running)
+            emit previewFrame(image);
+    });
     deadline_.setSingleShot(true);
     connect(&deadline_, &QTimer::timeout, this, [this] { fail(QStringLiteral("入会超时，请检查信令服务")); });
     connect(&signaling_, &SignalingClient::connected, this, [this] {
@@ -69,6 +102,8 @@ void SessionCoordinator::clearMembership()
 
 void SessionCoordinator::leave()
 {
+    stopPreview();
+    stopAudioTest();
     deadline_.stop();
     signaling_.close();
     clearMembership();
@@ -86,11 +121,78 @@ void SessionCoordinator::changeState(State state, const QString &detail)
 
 void SessionCoordinator::fail(const QString &reason)
 {
+    stopPreview();
+    stopAudioTest();
     deadline_.stop();
     signaling_.close();
     clearMembership();
     changeState(State::Failed, reason);
     emit membersChanged();
+}
+
+void SessionCoordinator::refreshDevices()
+{
+    if (previewState_ == PreviewState::Starting || previewState_ == PreviewState::Running
+        || previewState_ == PreviewState::Stopping)
+        return;
+    media_.refreshDevices();
+}
+
+bool SessionCoordinator::startPreview(const QString &sourceId)
+{
+    if (previewState_ != PreviewState::Stopped && previewState_ != PreviewState::Failed)
+        return false;
+    if (!media_.environment().ready)
+    {
+        previewState_ = PreviewState::Failed;
+        previewDetail_ = media_.environment().description;
+        emit previewChanged();
+        return false;
+    }
+    previewState_ = PreviewState::Starting;
+    previewDetail_ = QStringLiteral("正在启动本地预览");
+    emit previewChanged();
+    media_.startVideo(sourceId, ++previewEpoch_);
+    return true;
+}
+
+void SessionCoordinator::stopPreview()
+{
+    if (previewState_ == PreviewState::Stopped || previewState_ == PreviewState::Stopping)
+        return;
+    previewState_ = PreviewState::Stopping;
+    previewDetail_ = QStringLiteral("正在停止本地预览");
+    media_.stopVideo(++previewEpoch_);
+    emit previewFrame({});
+    emit previewChanged();
+}
+
+bool SessionCoordinator::startAudioTest(bool audible)
+{
+    if (audioState_ != PreviewState::Stopped && audioState_ != PreviewState::Failed)
+        return false;
+    if (!media_.environment().ready)
+    {
+        audioState_ = PreviewState::Failed;
+        audioDetail_ = media_.environment().description;
+        emit audioChanged();
+        return false;
+    }
+    audioState_ = PreviewState::Starting;
+    audioDetail_ = QStringLiteral("正在启动音频测试");
+    emit audioChanged();
+    media_.startAudio(audible, ++audioEpoch_);
+    return true;
+}
+
+void SessionCoordinator::stopAudioTest()
+{
+    if (audioState_ == PreviewState::Stopped || audioState_ == PreviewState::Stopping)
+        return;
+    audioState_ = PreviewState::Stopping;
+    audioDetail_ = QStringLiteral("正在停止音频测试");
+    media_.stopAudio(++audioEpoch_);
+    emit audioChanged();
 }
 
 bool SessionCoordinator::sendNegotiation(const QString &type, const QJsonObject &payload)

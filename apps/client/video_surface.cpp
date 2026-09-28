@@ -17,6 +17,18 @@ void VideoSurface::paintGL()
 {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
+    if (!frame_.isNull())
+    {
+        painter.fillRect(rect(), Qt::black);
+        const auto size = frame_.size().scaled(this->size(), Qt::KeepAspectRatio);
+        const QRect target((width() - size.width()) / 2, (height() - size.height()) / 2,
+                           size.width(), size.height());
+        painter.drawImage(target, frame_);
+        painter.setPen(Qt::white);
+        painter.drawText(QRect(16, 12, width() - 32, 24), Qt::AlignLeft,
+                         QStringLiteral("本地预览 · 尚未发送给对方"));
+        return;
+    }
     QLinearGradient background(0, 0, width(), height());
     background.setColorAt(0, QColor("#172740"));
     background.setColorAt(1, QColor("#263b59"));
@@ -43,4 +55,10 @@ void VideoSurface::paintGL()
                      Qt::AlignHCenter | Qt::TextWordWrap, caption_);
     painter.setPen(QColor("#7790b3"));
     painter.drawText(QRect(20, 18, width() - 40, 22), Qt::AlignLeft, QStringLiteral("远端画面"));
+}
+
+void VideoSurface::setFrame(const QImage &frame)
+{
+    frame_ = frame;
+    update();
 }

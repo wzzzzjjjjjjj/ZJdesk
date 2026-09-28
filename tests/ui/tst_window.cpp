@@ -1,4 +1,5 @@
 #include "main_window.h"
+#include "video_surface.h"
 #include "signaling/room_server.h"
 #include <QDir>
 #include <QFile>
@@ -63,6 +64,36 @@ private slots:
         QTRY_COMPARE(aliceStatus->text(), QStringLiteral("等待成员"));
         QTest::mouseClick(aliceJoin, Qt::LeftButton);
         QTRY_COMPARE(server.roomCount(), 0);
+    }
+
+    void localPreviewDisplaysRealFramesAndStops()
+    {
+        MainWindow window("ws://127.0.0.1:8765", "demo", "Tester");
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto *button = window.findChild<QPushButton *>("previewButton");
+        auto *surface = dynamic_cast<VideoSurface *>(window.findChild<QOpenGLWidget *>());
+        QVERIFY(button && surface);
+        if (!button->isEnabled())
+            QSKIP("GStreamer is not enabled in this build");
+        QTRY_VERIFY(surface->isValid());
+        QTest::mouseClick(button, Qt::LeftButton);
+        QTRY_VERIFY_WITH_TIMEOUT(surface->hasFrame(), 10000);
+        QCOMPARE(button->text(), QStringLiteral("停止预览"));
+        const auto first = surface->grabFramebuffer();
+        QTest::qWait(200);
+        const auto second = surface->grabFramebuffer();
+        QVERIFY(!first.isNull());
+        QVERIFY(first != second);
+        QVERIFY(QDir().mkpath("output"));
+        window.raise();
+        QTest::qWait(100);
+        QVERIFY(window.screen()->grabWindow(window.winId()).save("output/ui-local-preview.png"));
+        QTest::mouseClick(button, Qt::LeftButton);
+        QTRY_COMPARE(button->text(), QStringLiteral("开始预览"));
+        QVERIFY(!surface->hasFrame());
+        QTest::mouseClick(button, Qt::LeftButton);
+        QTRY_VERIFY(surface->hasFrame());
     }
 };
 
