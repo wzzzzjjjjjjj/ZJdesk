@@ -1,5 +1,7 @@
 #include "session/session_coordinator.h"
 #include "signaling/room_server.h"
+#include <QDir>
+#include <QFile>
 #include <QThread>
 #include <QtTest>
 
@@ -9,6 +11,155 @@ class MediaTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void dataChannelTransportsBothDirectionsAndRejectsOldEpoch()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        zjdesk::ScreenShare sender, receiver;
+        QSignalSpy senderReady(&sender, &zjdesk::ScreenShare::controlChannelChanged);
+        QSignalSpy receiverReady(&receiver, &zjdesk::ScreenShare::controlChannelChanged);
+        QSignalSpy atSender(&sender, &zjdesk::ScreenShare::controlReceived);
+        QSignalSpy atReceiver(&receiver, &zjdesk::ScreenShare::controlReceived);
+        QString offeredSdp, answeredSdp;
+        connect(&sender, &zjdesk::ScreenShare::negotiationReady, &receiver,
+            [&](quint64, const QString &type, const QJsonObject &message) {
+                if (type == "offer")
+                    offeredSdp = message.value("sdp").toString();
+                receiver.negotiate(type, message, 9);
+            });
+        connect(&receiver, &zjdesk::ScreenShare::negotiationReady, &sender,
+            [&](quint64, const QString &type, const QJsonObject &message) {
+                if (type == "answer")
+                    answeredSdp = message.value("sdp").toString();
+                sender.negotiate(type, message, 7);
+            });
+        receiver.start(false, {}, 9);
+        sender.start(true, "test", 7);
+        QTRY_VERIFY_WITH_TIMEOUT(!senderReady.isEmpty() && !receiverReady.isEmpty(), 15000);
+        QVERIFY(senderReady.last().at(1).toBool());
+        QVERIFY(receiverReady.last().at(1).toBool());
+        for (const auto &sdp : {offeredSdp, answeredSdp})
+        {
+            QVERIFY2(sdp.contains("a=rtcp-fb:96 nack\r\n"), qPrintable(sdp));
+            QVERIFY2(sdp.contains("rtx/90000"), qPrintable(sdp));
+        }
+        sender.sendControl({{"action", "capabilities"}, {"control", true}}, 7);
+        QTRY_COMPARE(atReceiver.size(), 1);
+        QCOMPARE(atReceiver.last().at(0).toULongLong(), quint64(9));
+        QVERIFY(atReceiver.last().at(1).toJsonObject().value("control").toBool());
+        receiver.sendControl({{"action", "request"}}, 9);
+        QTRY_COMPARE(atSender.size(), 1);
+        QCOMPARE(atSender.last().at(1).toJsonObject().value("action").toString(), QString("request"));
+        sender.sendControl({{"action", "old-stream"}}, 6);
+        QTest::qWait(100);
+        QCOMPARE(atReceiver.size(), 1);
+        receiver.stop(10);
+        sender.stop(8);
+        QTest::qWait(100);
+    }
+
+    void temporaryStartupDisplayDelayKeepsNativeFrameRate()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator sender, receiver;
+        QVERIFY(sender.join(url, "warmup", "Sender"));
+        QVERIFY(receiver.join(url, "warmup", "Receiver"));
+        QTRY_COMPARE(sender.memberCount(), 2);
+        quint64 delivered = 0;
+        connect(&receiver, &zjdesk::SessionCoordinator::shareFrame, this,
+            [&](const QImage &image) { if (!image.isNull()) ++delivered; });
+        QVERIFY(sender.startScreenShare("test"));
+        QTRY_COMPARE_WITH_TIMEOUT(receiver.shareState(), Preview::Running, 15000);
+        QTimer display;
+        bool warmingUp = true;
+        bool displayActive = true;
+        connect(&display, &QTimer::timeout, &receiver,
+            [&] { receiver.reportSharePresentation(warmingUp ? 0 : delivered, displayActive); });
+        display.start(1000);
+        QTest::qWait(6500);
+        QCOMPARE(sender.shareStats().targetFps, 60);
+        warmingUp = false;
+        QTest::qWait(5000);
+        QCOMPARE(sender.shareStats().targetFps, 60);
+        QCOMPARE(receiver.shareStats().size, QSize(640, 480));
+        displayActive = false;
+        warmingUp = true;
+        QTest::qWait(6500);
+        QCOMPARE(sender.shareStats().targetFps, 60);
+        QCOMPARE(receiver.shareStats().size, QSize(640, 480));
+        QCOMPARE(receiver.shareStats().presentedFps, -1);
+        displayActive = true;
+        warmingUp = false;
+        QTest::qWait(2000);
+        QCOMPARE(sender.shareStats().targetFps, 60);
+        QTRY_VERIFY_WITH_TIMEOUT(receiver.shareStats().presentedFps > 50, 4000);
+        display.stop();
+        sender.stopScreenShare();
+        QTRY_COMPARE(receiver.shareState(), Preview::Stopped);
+    }
+
+    void slowReceiverChangesFrameRateAndResolutionWithoutRestart()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator sender, receiver;
+        QVERIFY(sender.join(url, "adaptive", "Sender"));
+        QVERIFY(receiver.join(url, "adaptive", "Receiver"));
+        QTRY_COMPARE(sender.memberCount(), 2);
+        QSize lastFrameSize;
+        quint64 delivered = 0;
+        QDir().mkpath("output");
+        QFile trace("output/share-resolution-recovery.txt");
+        QVERIFY(trace.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        QElapsedTimer elapsed;
+        elapsed.start();
+        QTimer sampling;
+        connect(&sampling, &QTimer::timeout, this, [&] {
+            const auto sent = sender.shareStats();
+            const auto received = receiver.shareStats();
+            trace.write(QString("%1 ms sender=%2x%3@%4 encoded=%5 receiver=%6x%7@%8 decoded=%9 frame=%10x%11 %12 | %13\n")
+                .arg(elapsed.elapsed()).arg(sent.size.width()).arg(sent.size.height()).arg(sent.targetFps)
+                .arg(sent.processedFps).arg(received.size.width()).arg(received.size.height())
+                .arg(received.targetFps).arg(received.processedFps).arg(lastFrameSize.width())
+                .arg(lastFrameSize.height()).arg(sender.shareDetail(), receiver.shareDetail()).toUtf8());
+            trace.flush();
+        });
+        sampling.start(1000);
+        connect(&receiver, &zjdesk::SessionCoordinator::shareFrame, this,
+            [&](const QImage &image) {
+                if (!image.isNull())
+                {
+                    lastFrameSize = image.size();
+                    ++delivered;
+                }
+            });
+        QVERIFY(sender.startScreenShare("test"));
+        QTRY_COMPARE_WITH_TIMEOUT(receiver.shareState(), Preview::Running, 20000);
+        QTimer slowDisplay;
+        connect(&slowDisplay, &QTimer::timeout, &receiver,
+            [&receiver] { receiver.reportSharePresentation(0); });
+        slowDisplay.start(1000);
+        QTRY_COMPARE_WITH_TIMEOUT(sender.shareStats().targetFps, 5, 20000);
+        QTRY_COMPARE(receiver.shareStats().targetFps, 5);
+        QCOMPARE(lastFrameSize, QSize(640, 480));
+        QTRY_VERIFY_WITH_TIMEOUT(lastFrameSize == QSize(480, 360), 30000);
+        QCOMPARE(sender.shareState(), Preview::Running);
+        QCOMPARE(receiver.shareState(), Preview::Running);
+        QVERIFY(sender.screenActive());
+        slowDisplay.stop();
+        QTimer healthyDisplay;
+        connect(&healthyDisplay, &QTimer::timeout, &receiver,
+            [&] { receiver.reportSharePresentation(delivered); });
+        healthyDisplay.start(1000);
+        QTRY_VERIFY_WITH_TIMEOUT(lastFrameSize == QSize(640, 480), 45000);
+        QCOMPARE(receiver.shareState(), Preview::Running);
+        healthyDisplay.stop();
+        sender.stopScreenShare();
+        QTRY_COMPARE(receiver.shareState(), Preview::Stopped);
+    }
+
     void cameraModeUsesResolutionBeforeFrameRate()
     {
         QVERIFY(zjdesk::MediaEnvironment::inspect().ready);

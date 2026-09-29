@@ -154,12 +154,34 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
     }
     if (protocol::isRelayType(message->type))
     {
+        if (message->type == "control")
+        {
+            const auto action = message->payload.value("action").toString();
+            if ((action != "capabilities" && action != "request" && action != "revoke")
+                || (action == "capabilities" && !message->payload.value("control").isBool())
+                || (action != "capabilities"
+                    && !protocol::isRoomIdValid(message->payload.value("requestId").toString())))
+                return reject(socket, "invalid_control");
+        }
         if (message->type == "share")
         {
             const auto action = message->payload.value("action").toString();
             const auto stream = message->payload.value("streamId").toString();
-            if ((action != "start" && action != "stop") || !protocol::isRoomIdValid(stream))
+            if (!protocol::isRoomIdValid(stream)
+                || (action != "start" && action != "stop" && action != "profile" && action != "stats"))
                 return reject(socket, "invalid_share");
+            if (action == "profile" || action == "stats")
+            {
+                const auto &payload = message->payload;
+                const double revision = payload.value("revision").toDouble(-1);
+                const double fps = payload.value("fps").toDouble(-1);
+                if (revision < 1 || revision > 1000000 || revision != int(revision) || fps < 0 || fps > 240)
+                    return reject(socket, "invalid_share");
+                if (action == "profile" && ((fps < 5 || fps != int(fps))
+                    || payload.value("width").toInt() < 2 || payload.value("width").toInt() > 16384
+                    || payload.value("height").toInt() < 2 || payload.value("height").toInt() > 16384))
+                    return reject(socket, "invalid_share");
+            }
         }
         if (peers_[socket].room.isEmpty())
             return reject(socket, "not_joined");

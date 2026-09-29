@@ -14,6 +14,8 @@
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QScrollArea>
+#include <QApplication>
+#include <QKeyEvent>
 #include <QVBoxLayout>
 
 namespace
@@ -74,9 +76,13 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
 
     auto *content = new QWidget;
     auto *contentLayout = new QVBoxLayout(content);
+    contentLayout_ = contentLayout;
     contentLayout->setContentsMargins(30, 26, 30, 22);
     contentLayout->setSpacing(18);
     auto *header = new QHBoxLayout;
+    header->setContentsMargins(0, 0, 0, 0);
+    auto *headerWidget = new QWidget;
+    headerWidget->setLayout(header);
     auto *titles = new QVBoxLayout;
     titles->addWidget(text(QStringLiteral("协作工作台"), "pageTitle"));
     titles->addWidget(text(QStringLiteral("双人会议 · 屏幕共享 · 远程协助"), "muted"));
@@ -84,13 +90,14 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     header->addStretch();
     statusLabel_ = text(QStringLiteral("未加入房间"), "statusBadge");
     header->addWidget(statusLabel_);
-    contentLayout->addLayout(header);
+    contentLayout->addWidget(headerWidget);
 
     auto *pages = new QStackedWidget;
     auto *workspace = new QWidget;
     auto *workspaceLayout = new QVBoxLayout(workspace);
+    workspaceLayout_ = workspaceLayout;
     workspaceLayout->setContentsMargins(0, 0, 0, 0);
-    workspaceLayout->setSpacing(16);
+    workspaceLayout->setSpacing(10);
 
     auto *connectionCard = card();
     auto *connectionLayout = new QHBoxLayout(connectionCard);
@@ -125,10 +132,12 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     sessionCard->setMinimumWidth(225);
     sessionCard->setMaximumWidth(270);
     auto *sessionLayout = new QVBoxLayout(sessionCard);
-    sessionLayout->setContentsMargins(20, 20, 20, 20);
-    sessionLayout->setSpacing(13);
+    sessionLayout->setContentsMargins(20, 14, 20, 14);
+    sessionLayout->setSpacing(6);
     sessionLayout->addWidget(text(QStringLiteral("房间成员"), "sectionTitle"));
     memberLabel_ = text(QStringLiteral("0 / 2 人"), "memberCount");
+    memberLabel_->ensurePolished();
+    memberLabel_->setMinimumHeight(memberLabel_->fontMetrics().height());
     sessionLayout->addWidget(memberLabel_);
     sessionLayout->addWidget(text(QStringLiteral("本机"), "fieldLabel"));
     sessionLayout->addWidget(text(name, "localName"));
@@ -173,8 +182,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     auto *controls = card();
     auto *controlLayout = new QHBoxLayout(controls);
     controlLayout->setContentsMargins(16, 12, 16, 12);
-    for (const auto &caption : {QStringLiteral("通话麦克风"), QStringLiteral("通话摄像头"),
-                                QStringLiteral("远程协助")})
+    for (const auto &caption : {QStringLiteral("通话麦克风"), QStringLiteral("通话摄像头")})
     {
         auto *button = new QPushButton(caption);
         button->setEnabled(false);
@@ -191,7 +199,26 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     shareLabel_->setWordWrap(true);
     controlLayout->addWidget(shareLabel_);
     workspaceLayout->addWidget(controls);
-    auto *notice = text(QStringLiteral("两人加入同一房间后可共享主屏幕，每次由一人共享。摄像头预览仅在本机显示。"), "muted");
+    auto *remoteLayout = new QHBoxLayout;
+    remoteLayout_ = remoteLayout;
+    controlButton_ = new QPushButton(QStringLiteral("请求控制 Linux"));
+    controlButton_->setObjectName("controlButton");
+    allowControlButton_ = new QPushButton(QStringLiteral("允许控制"));
+    allowControlButton_->setObjectName("allowControlButton");
+    stopControlButton_ = new QPushButton(QStringLiteral("停止控制"));
+    stopControlButton_->setObjectName("stopControlButton");
+    controlLabel_ = text(session_.remoteDetail(), "controlStatus");
+    controlLabel_->setWordWrap(true);
+    remoteLayout->addWidget(controlButton_);
+    remoteLayout->addWidget(allowControlButton_);
+    remoteLayout->addWidget(stopControlButton_);
+    remoteLayout->addWidget(controlLabel_, 1);
+    expandButton_ = new QPushButton(QStringLiteral("放大画面"));
+    expandButton_->setObjectName("expandVideoButton");
+    expandButton_->setCheckable(true);
+    remoteLayout->addWidget(expandButton_);
+    workspaceLayout->addLayout(remoteLayout);
+    auto *notice = text(QStringLiteral("两人加入同一房间后可直接请求控制 Linux，允许后自动连接桌面。摄像头预览仅在本机显示。"), "muted");
     notice->setWordWrap(true);
     workspaceLayout->addWidget(notice);
     pages->addWidget(workspace);
@@ -241,11 +268,18 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     pages->addWidget(diagnostics);
     contentLayout->addWidget(pages, 1);
     auto *footer = new QHBoxLayout;
+    footer->setContentsMargins(0, 0, 0, 0);
+    auto *footerWidget = new QWidget;
+    footerWidget->setLayout(footer);
     footer->addWidget(text(QStringLiteral("局域网双人协作"), "footer"));
     footer->addStretch();
     footer->addWidget(text(QString("ZJdesk %1").arg(zjdesk::build::Version), "footer"));
-    contentLayout->addLayout(footer);
+    contentLayout->addWidget(footerWidget);
     rootLayout->addWidget(content, 1);
+    normalWidgets_ = {sidebar, headerWidget, connectionCard, sessionCard, previewCard,
+        previewLabel_, controls, notice, footerWidget, controlButton_, stopControlButton_, controlLabel_};
+    connect(expandButton_, &QPushButton::toggled, this, &MainWindow::expandVideo);
+    qApp->installEventFilter(this);
 
     connect(workspaceButton, &QPushButton::clicked, pages, [pages] { pages->setCurrentIndex(0); });
     connect(diagnosticsButton, &QPushButton::clicked, pages, [pages] { pages->setCurrentIndex(1); });
@@ -273,6 +307,11 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     });
     connect(&session_, &zjdesk::SessionCoordinator::shareFrame, video_, &VideoSurface::setFrame);
     connect(&session_, &zjdesk::SessionCoordinator::shareChanged, this, &MainWindow::refreshShare);
+    connect(&session_, &zjdesk::SessionCoordinator::remoteChanged, this, &MainWindow::refreshControl);
+    connect(video_, &VideoSurface::remoteInput, &session_, &zjdesk::SessionCoordinator::sendRemoteInput);
+    connect(controlButton_, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::requestControl);
+    connect(allowControlButton_, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::grantControl);
+    connect(stopControlButton_, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::stopControl);
     connect(shareButton_, &QPushButton::clicked, this, [this] {
         if (session_.screenActive())
             session_.stopScreenShare();
@@ -296,6 +335,8 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     connect(refreshDevicesButton_, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::refreshDevices);
     auto *statsTimer = new QTimer(this);
     connect(statsTimer, &QTimer::timeout, this, [this] {
+        session_.reportSharePresentation(video_->presentedFrames(),
+            video_->isVisible() && !isMinimized() && isActiveWindow());
         const auto stats = session_.previewStats();
         previewStatsLabel_->setText(QStringLiteral("采集 %1 帧 · 丢弃 %2 帧 · 待显示 %3 帧")
             .arg(stats.capturedFrames).arg(stats.droppedFrames).arg(stats.pendingFrames));
@@ -347,6 +388,7 @@ void MainWindow::refreshPreview()
         ? QStringLiteral("测试声音") : QStringLiteral("停止声音"));
     audioLabel_->setText(session_.audioDetail());
     refreshShare();
+    refreshControl();
 }
 
 void MainWindow::refreshShare()
@@ -359,10 +401,74 @@ void MainWindow::refreshShare()
         : session_.receivingScreen() ? QStringLiteral("对方正在共享")
         : session_.screenActive() ? QStringLiteral("停止共享") : QStringLiteral("共享主屏幕"));
     shareLabel_->setText(session_.shareDetail());
-    statusDetail_->setText(session_.screenActive() ? session_.shareDetail() : session_.detail());
-    video_->setFrameCaption(session_.screenActive()
+    statusDetail_->setText(session_.screenActive()
+        ? session_.receivingScreen() ? QStringLiteral("正在接收对方屏幕") : QStringLiteral("正在共享主屏幕")
+        : session_.detail());
+    video_->setFrameCaption(expandButton_->isChecked() ? QString() : session_.screenActive()
         ? session_.receivingScreen() ? QStringLiteral("对方的屏幕") : QStringLiteral("主屏幕 · 正在共享给对方")
         : QStringLiteral("本地预览 · 尚未发送给对方"));
+    refreshControl();
+}
+
+void MainWindow::expandVideo(bool expanded)
+{
+    session_.sendRemoteInput({{"kind", "release"}});
+    for (auto *widget : normalWidgets_)
+        widget->setVisible(!expanded);
+    expandButton_->setText(expanded ? QStringLiteral("退出放大 (Esc)") : QStringLiteral("放大画面"));
+    contentLayout_->setContentsMargins(expanded ? QMargins() : QMargins(30, 26, 30, 22));
+    contentLayout_->setSpacing(expanded ? 0 : 18);
+    workspaceLayout_->setSpacing(expanded ? 0 : 10);
+    if (expanded)
+    {
+        normalWindowState_ = windowState();
+        remoteLayout_->removeWidget(expandButton_);
+        expandButton_->setParent(video_);
+        expandButton_->adjustSize();
+        expandButton_->show();
+        expandButton_->raise();
+        showFullScreen();
+    }
+    else
+    {
+        expandButton_->setParent(remoteLayout_->parentWidget());
+        remoteLayout_->addWidget(expandButton_);
+        expandButton_->show();
+        setWindowState(normalWindowState_);
+    }
+    refreshShare();
+    if (session_.remoteState() == zjdesk::SessionCoordinator::RemoteState::Controlling)
+        video_->setFocus();
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == video_ && event->type() == QEvent::Resize && expandButton_->isChecked())
+        expandButton_->move(qMax(0, video_->width() - expandButton_->width() - 12), 12);
+    if (event->type() == QEvent::KeyPress && expandButton_->isChecked()
+        && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)
+    {
+        auto *widget = qobject_cast<QWidget *>(watched);
+        if (widget && widget->window() == this)
+        {
+            expandButton_->setChecked(false);
+            event->accept();
+            return true;
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::refreshControl()
+{
+    using Remote = zjdesk::SessionCoordinator::RemoteState;
+    const auto state = session_.remoteState();
+    controlButton_->setEnabled(session_.canRequestControl());
+    allowControlButton_->setVisible(!expandButton_->isChecked() && state == Remote::Pending);
+    stopControlButton_->setEnabled(state != Remote::Idle);
+    stopControlButton_->setText(state == Remote::Pending ? QStringLiteral("拒绝控制") : QStringLiteral("停止控制"));
+    controlLabel_->setText(session_.remoteDetail());
+    video_->setControlEnabled(state == Remote::Controlling);
 }
 
 void MainWindow::refreshSession()

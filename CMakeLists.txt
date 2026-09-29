@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(ZJdesk VERSION 0.3.0 LANGUAGES CXX)
+project(ZJdesk VERSION 0.4.5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,13 +31,23 @@ add_library(zjdesk_client_core STATIC
     src/signaling/signaling_client.cpp src/signaling/signaling_client.h
     src/session/session_coordinator.cpp src/session/session_coordinator.h
     src/remote-control/control_session.cpp src/remote-control/control_session.h
+    src/remote-control/input_injector.cpp src/remote-control/input_injector.h
     src/diagnostics/event_log.cpp src/diagnostics/event_log.h
     src/media/media_environment.cpp src/media/media_environment.h
     src/media/media_engine.cpp src/media/media_engine.h
     src/media/camera_mode.cpp src/media/camera_mode.h
     src/media/screen_share.cpp src/media/screen_share.h
+    src/media/share_quality.cpp src/media/share_quality.h
     src/platform/platform_info.cpp src/platform/platform_info.h)
 target_link_libraries(zjdesk_client_core PUBLIC zjdesk_protocol Qt6::Gui Qt6::Network Qt6::WebSockets)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(X11 REQUIRED)
+    if(NOT TARGET X11::Xtst)
+        message(FATAL_ERROR "Install libxtst-dev for Linux remote control")
+    endif()
+    target_link_libraries(zjdesk_client_core PRIVATE X11::X11 X11::Xtst)
+    target_compile_definitions(zjdesk_client_core PRIVATE ZJDESK_HAS_XTEST=1)
+endif()
 if(ZJDESK_ENABLE_GSTREAMER)
     list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
     find_package(GStreamer 1.26.11 REQUIRED)

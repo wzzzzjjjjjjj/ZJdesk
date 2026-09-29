@@ -9,6 +9,8 @@ class QComboBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
+class QHBoxLayout;
+class QVBoxLayout;
 class VideoSurface;
 
 class MainWindow final : public QMainWindow
@@ -18,12 +20,24 @@ public:
     explicit MainWindow(const QString &serverUrl, const QString &roomId, const QString &name,
                         QWidget *parent = nullptr);
 
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
 private:
+    friend class WindowTests;
     void refreshSession();
     void exportEvents();
     void refreshPreview();
     void refreshDevices();
     void refreshShare();
+    void refreshControl();
+    void expandVideo(bool expanded);
+    QList<QWidget *> normalWidgets_;
+    Qt::WindowStates normalWindowState_;
+    QPushButton *expandButton_ = nullptr;
+    QVBoxLayout *contentLayout_ = nullptr;
+    QVBoxLayout *workspaceLayout_ = nullptr;
+    QHBoxLayout *remoteLayout_ = nullptr;
     zjdesk::SessionCoordinator session_;
     QLineEdit *serverEdit_ = nullptr;
     QLineEdit *roomEdit_ = nullptr;
@@ -46,4 +60,8 @@ private:
     QLabel *previewStatsLabel_ = nullptr;
     QPushButton *shareButton_ = nullptr;
     QLabel *shareLabel_ = nullptr;
+    QPushButton *controlButton_ = nullptr;
+    QPushButton *allowControlButton_ = nullptr;
+    QPushButton *stopControlButton_ = nullptr;
+    QLabel *controlLabel_ = nullptr;
 };

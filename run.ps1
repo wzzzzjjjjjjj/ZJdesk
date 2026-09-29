@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Run a local ZJdesk server and two client windows from PowerShell.
+Run one ZJdesk client, with an optional local signaling server.
 .EXAMPLE
 .\run.ps1
 .EXAMPLE
@@ -10,7 +10,10 @@ param(
     [string]$QtRoot = 'F:\Qt6\6.8.3\msvc2022_64',
     [ValidateSet('windows-debug', 'windows-release')]
     [string]$Preset = 'windows-debug',
-    [string]$GstRoot = ''
+    [string]$GstRoot = '',
+    [string]$ServerUrl = '',
+    [string]$Room = 'demo',
+    [string]$Name = $env:COMPUTERNAME
 )
 $ErrorActionPreference = 'Stop'
 $binaryRoot = Join-Path $PSScriptRoot "build\$Preset\bin"
@@ -45,26 +48,29 @@ function Start-DemoProcess([string]$Executable, [string[]]$Arguments, [bool]$Bac
         $startInfo.EnvironmentVariables['GST_PLUGIN_SCANNER'] = "$GstRoot\libexec\gstreamer-1.0\gst-plugin-scanner.exe"
         $startInfo.EnvironmentVariables['GST_REGISTRY_1_0'] = Join-Path $PSScriptRoot "build\gst-registry-$Preset.bin"
     }
-    $startInfo.Arguments = $Arguments -join ' '
+    $startInfo.Arguments = ($Arguments | ForEach-Object {
+        '"' + ([regex]::Replace($_, '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+    }) -join ' '
     [System.Diagnostics.Process]::Start($startInfo)
 }
 $demoServer = $null
-$demoAlice = $null
-$demoBob = $null
+$demoClient = $null
 try {
-    $demoServer = Start-DemoProcess 'zjdesk-server.exe' @('--port', '8765') $true
-    Start-Sleep -Milliseconds 400
-    if ($demoServer.HasExited) { throw 'Demo server could not start; check whether port 8765 is already in use.' }
-    $demoAlice = Start-DemoProcess 'zjdesk.exe' @('--name', 'Alice', '--room', 'demo') $false
-    $demoBob = Start-DemoProcess 'zjdesk.exe' @('--name', 'Bob', '--room', 'demo') $false
-    Write-Output "Server PID: $($demoServer.Id); Alice PID: $($demoAlice.Id); Bob PID: $($demoBob.Id)"
-    Write-Output 'Click Join in both clients. Close both windows, or press Ctrl+C here, to stop the demo.'
-    while (-not $demoAlice.HasExited -or -not $demoBob.HasExited) {
-        if ($demoServer.HasExited) { throw 'Demo server exited unexpectedly.' }
+    if (-not $ServerUrl) {
+        $ServerUrl = 'ws://127.0.0.1:8765'
+        $demoServer = Start-DemoProcess 'zjdesk-server.exe' @('--listen', '0.0.0.0', '--port', '8765') $true
+        Start-Sleep -Milliseconds 400
+        if ($demoServer.HasExited) { throw 'Server could not start; check whether port 8765 is already in use.' }
+    }
+    $demoClient = Start-DemoProcess 'zjdesk.exe' @('--server', $ServerUrl, '--display-name', $Name, '--room', $Room) $false
+    Write-Output "Client PID: $($demoClient.Id); server: $ServerUrl"
+    Write-Output 'Click Join. Close the client, or press Ctrl+C here, to stop.'
+    while (-not $demoClient.HasExited) {
+        if ($null -ne $demoServer -and $demoServer.HasExited) { throw 'Server exited unexpectedly.' }
         Start-Sleep -Milliseconds 200
     }
 } finally {
-    foreach ($demoProcess in @($demoAlice, $demoBob, $demoServer)) {
+    foreach ($demoProcess in @($demoClient, $demoServer)) {
         if ($null -ne $demoProcess) {
             if (-not $demoProcess.HasExited) { $demoProcess.Kill(); $demoProcess.WaitForExit() }
             $demoProcess.Dispose()

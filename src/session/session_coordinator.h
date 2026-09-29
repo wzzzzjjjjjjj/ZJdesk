@@ -4,7 +4,9 @@
 #include "media/media_engine.h"
 #include "media/screen_share.h"
 #include "remote-control/control_session.h"
+#include "remote-control/input_injector.h"
 #include "signaling/signaling_client.h"
+#include <QElapsedTimer>
 #include <QTimer>
 
 namespace zjdesk
@@ -41,12 +43,23 @@ public:
     QString previewDetail() const { return previewDetail_; }
     QString audioDetail() const { return audioDetail_; }
     PreviewStats previewStats() const { return media_.stats(); }
-    bool startScreenShare(const QString &source = "desktop");
+    bool startScreenShare(const QString &source = "desktop", int targetFps = 0);
+    ShareStats shareStats() const { return shareStats_; }
+    void reportSharePresentation(quint64 frames, bool active = true);
     void stopScreenShare();
     PreviewState shareState() const { return shareState_; }
     QString shareDetail() const { return shareDetail_; }
     bool receivingScreen() const { return receivingScreen_; }
     bool screenActive() const { return !streamId_.isEmpty(); }
+    enum class RemoteState { Idle, Requesting, Pending, Controlling, Controlled };
+    Q_ENUM(RemoteState)
+    RemoteState remoteState() const { return remoteState_; }
+    QString remoteDetail() const { return remoteDetail_; }
+    bool canRequestControl() const;
+    bool requestControl();
+    bool grantControl();
+    void stopControl();
+    void sendRemoteInput(const QJsonObject &input);
 
 signals:
     void stateChanged(zjdesk::SessionCoordinator::State state);
@@ -59,6 +72,10 @@ signals:
     void previewFrame(const QImage &image);
     void shareChanged();
     void shareFrame(const QImage &image);
+    void shareStatisticsChanged(const zjdesk::ShareStats &stats);
+    void remoteChanged();
+    void inputProbeInjected(quint64 sequence, qint64 injectUs, bool accepted);
+    void inputProbeAcknowledged(quint64 sequence, qint64 roundTripUs, qint64 injectUs, bool accepted);
 
 private:
     void receive(const protocol::Message &message);
@@ -67,10 +84,27 @@ private:
     void clearMembership();
     void receiveShare(const protocol::Message &message);
     void clearScreenShare(bool notifyPeer);
+    void receiveControl(const QJsonObject &message);
+    void receiveControlRequest(const QJsonObject &message);
+    void sendControlGrant();
+    void clearControl();
 
     SignalingClient signaling_;
     EventLog events_;
     ControlSession control_;
+    InputInjector input_;
+    RemoteState remoteState_ = RemoteState::Idle;
+    QString remoteDetail_ = QStringLiteral("远程控制未开启");
+    bool controlChannelReady_ = false;
+    bool peerControllable_ = false;
+    bool desktopSource_ = false;
+    bool controlStartedShare_ = false;
+    QString controlRequestId_;
+    quint64 remoteControlEpoch_ = 0;
+    quint64 inputSequence_ = 0;
+    quint64 pendingProbeSequence_ = 0;
+    QElapsedTimer inputProbeClock_;
+    QTimer controlDeadline_;
     QTimer deadline_;
     MediaEngine media_;
     ScreenShare screen_;
@@ -80,6 +114,7 @@ private:
     QString ownPeerId_;
     quint64 shareEpoch_ = 0;
     bool receivingScreen_ = false;
+    ShareStats shareStats_;
     QList<MediaDevice> devices_;
     PreviewState previewState_ = PreviewState::Stopped;
     PreviewState audioState_ = PreviewState::Stopped;

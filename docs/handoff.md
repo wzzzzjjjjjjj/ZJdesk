@@ -1,9 +1,136 @@
 # ZJdesk 项目交接
 
-更新日期：2026-09-29。项目目录：`F:\projects\ZJdesk`。
+更新日期：2026-09-30。项目目录：`F:\projects\ZJdesk`。
 本文是交接时的状态快照；后续接手应以最新代码、工作区和实际验证为准。
 
-## 2026-09-29 最新状态：0.3.0
+## 2026-09-30 最新状态：0.4.5 远控延迟测量
+
+针对“键鼠操作后等待画面响应”，新增跨机输入探针：Linux 完成 XTest 注入后通过原 DataChannel 回执，
+Windows 记录回执往返、首个包含结果的解码帧及 OpenGL 画面交换；同时采集 RTP 收发量、累计丢包、抖动和实际码率。
+WebRTC 接收缓冲对照 30、50、100、150、200 ms，短测均为 12 次点击，100 / 150 / 200 ms 追加长测。
+200 ms 首轮点击到画面反馈中位 64.9 ms、最大 106 ms；最终部署后复跑为中位 78.0 ms、最大 686.3 ms，
+仍有一次启动阶段波动。复跑 1080p 连续 30 秒显示平均 57.8 fps，后续 60 秒 235 次采样零颜色异常，
+单像素颜色最大误差 2。
+100 ms 启动时出现 1.28 秒停顿；150 ms 出现 3.83 秒停顿并降至 1280×720；30 / 50 ms 也出现数秒停顿。
+默认缓冲因此仍为 200 ms，诊断覆盖值为 `ZJDESK_WEBRTC_LATENCY_MS`（30 / 50 / 100 / 150 / 200）。
+WebRTC 自身 RTT 在本次环境未返回可靠值，输入 DataChannel 回执往返约 11～12 ms。具体数据与构建验证见 [validation.md](validation.md)。
+最终跨机测试结束后，Linux 保留一个信令服务和一个正常客户端窗口，Windows 保留一个正常客户端窗口；
+两端预填 `demo`，需要分别点击入会，再由 Windows 请求控制并在 Linux 本地允许。
+
+## 2026-09-29 历史快照：0.4.4 文字细节与全屏像素
+
+用户反馈 Linux 远程文字和字母粗细不均；Linux 新地址为 `192.168.3.13`，SSH 用户仍为 `orbbec`，
+源码位于 `/home/orbbec/ZJdesk/zjdesk`。旧地址仅保留在历史快照中。
+编码改为 VP9 / Y444 / 零量化，并显式传递完整范围 BT.709 至编码器及解码器，保留细字与单像素彩色线。
+VP9 关闭默认 25 帧缓存；低分辨率稳定后优先恢复上一分辨率的 5 fps，再提高帧率。
+后台 / 最小化窗口不使用暂停重绘后的显示帧率降档；返回前台重新建立计数基线。
+全屏隐藏普通面板、去掉外围留白，退出按钮覆盖在画面上，保留同一个 VideoSurface；
+两端物理像素尺寸相同时可一对一显示，普通窗口按比例平滑缩放。
+零量化增加 CPU 与带宽需求，实际速度以测量为准，RGB 转换仍有少量舍入误差。
+两端完整 Release 与真实桌面回归零失败，实际跨机细线、持续画面与键鼠也通过。
+本次保持 1920×1080，稳定约 30 fps；480 列单像素彩线最大通道误差 2，
+60 秒采样 235 次，零颜色异常。最终构建、跨机验证和部署状态见 [validation.md](validation.md)。
+
+启动 Linux：在该机 X11 桌面终端中 `cd ~/ZJdesk/zjdesk && bash ./run.sh '' demo Linux`。
+启动 Windows：`./run.ps1 -Preset windows-release -ServerUrl 'ws://192.168.3.13:8765' -Room demo -Name Windows`。
+两端加入同一房间后 Windows 请求控制，Linux 本地允许即可自动连接桌面；不需要手动共享。
+
+## 2026-09-29 历史快照：0.4.3 清晰度优先
+
+用户要求清晰度优先，并尽量达到电脑可支持的最高帧率。自动模式从主屏幕物理像素尺寸及刷新率开始，
+原尺寸内选择更细的帧率档位，降到 5 fps 仍持续落后才降低分辨率。连续不足使用两次测量的均值，
+启动保留 10 秒稳定时间，后续切换保留 4 秒；持续稳定后仍试探恢复。
+降低帧率时保留文字画面码率，VP8 使用八个 token 分区及最大量化值 32，采样 / 交付改为 4 ms。
+信令 profile 支持 5～240 的整数帧率；摄像头最高模式、两人限制、Linux 本地允许与画面放大约定不变。
+两端实际结果、跨机接收 / 显示帧率和花屏检查见 [validation.md](validation.md) 0.4.3 记录。
+240 fps 是自动目标上限，本次 Linux 被控屏幕约 60 Hz，没有验收超过 60 fps 的跨机传输、硬件编码或公网网络。
+
+## 2026-09-29 历史快照：0.4.2 直接请求远控与画面放大
+
+用户要求画面可放大，Windows 控制 Linux 不再依赖 Linux 手动共享。
+同房间能力与请求走信令，Linux 本地允许后自动建立桌面 WebRTC，授权与键鼠仍走 DataChannel。
+requestId 绑定当前请求；未允许 / 拒绝不采集桌面，结束控制关闭本次自动启动的传输。
+手动共享仍独立可用。放大在同一窗口中隐藏普通面板、保留同一个 VideoSurface，
+点击“放大画面”进入全屏，Esc / “退出放大”恢复，切换前释放远端按键。
+两端完整 Release 与 desktop 回归零失败；真实跨机直接申请、拒绝 / 允许、放大后的原生键鼠、
+Ctrl + Esc 退出、双方撤销与退会释放全部通过。放大下 60 秒采样 232 次，零颜色异常、222 次更新。
+两端构建、真实桌面及跨机验收以 [validation.md](validation.md) 0.4.2 记录为准。
+
+## 2026-09-29 历史快照：0.4.1 花屏修复
+
+用户在 Windows 接收 Linux 桌面时遇到大面积花屏。已用真实跨机、持续变化的色块复现，
+接收日志包含 RTP Lost timer / Discontinuity / missing first packet。
+旧 rtpvp8depay 没有启用请求 / 等待关键帧，transceiver 默认未开 NACK，损坏参考帧影响后续解码。
+screen_share.cpp 增加已有和新建 transceiver 的 do-nack 配置，接收侧启用 request-keyframe / wait-for-keyframe。
+新的媒体回归检查双方实际 SDP 包含 NACK 和 RTX；跨机回归可显式启用 ZJDESK_VIDEO_QUALITY_TEST=1，
+持续 60 秒检查 Windows OpenGL framebuffer 的已知颜色与画面更新，避免只用 FPS 判断成功。
+原版本同场景 236 次采样有 63 次颜色异常；首次修复后 237 次采样均正常。
+最终完整跨机用例再次检查 237 次，零颜色异常、223 次画面更新，键鼠与双方撤销 / 退会释放全部通过。
+Windows / Linux Release 和实际桌面 GUI 回归零失败，0.4.1 部署完成；默认测试仍不弹出 GUI。
+最终回归、部署与实际重启结果以 [validation.md](validation.md) 最新记录为准。
+
+## 2026-09-29 历史快照：0.4.0
+
+用户要求先在已连接的 Linux 电脑部署运行，两端各打开一个项目窗口，先实现 Windows 控制 Linux。
+已完成 Ubuntu 22.04.5 / GCC 11 实机构建、真实 X11 桌面共享、DataChannel 和 XTest 键鼠输入。
+两人房间、摄像头最高分辨率优先、语音转写 / 纪要暂缓保持不变。
+
+Linux SSH：`orbbec@10.11.47.137`；实际源码目录为 `/home/orbbec/ZJdesk/zjdesk`。
+覆盖同步前备份源码到 `/home/orbbec/ZJdesk/source-before-linux-control-20260929.tgz`。
+用户在 Linux 本地安装 apt 编译依赖；没有索取密码，没有替换系统 Qt / GStreamer。
+Qt 6.8.3 的 qtbase / qtwebsockets 与 GStreamer 1.26.11 在该机源码构建，安装前缀：
+
+- `~/.local/opt/zjdesk-deps/qt-6.8.3`
+- `~/.local/opt/zjdesk-deps/gstreamer-1.26.11`
+- CMake 3.31.6 / Meson 1.5.2 位于 `~/.local/bin`；构建日志及依赖源码保留在前述 deps 目录。
+
+GStreamer 精简构建需要显式启用根 `webrtc=enabled`、`tools=enabled`、
+`libnice:gstreamer=enabled` 和 `gst-plugins-base:videorate=enabled`；仅装 webrtc 库不代表插件齐备。
+`build.sh` / `run.sh` 为子进程设置 Qt / Gst 库、插件、scanner 和独立 registry，避免混用系统 1.20。
+Qt 在 Linux 上会提前处理 --name，运行脚本改用 --display-name；Windows 保留 --name 别名。
+跨电脑复制源码后应重新确认文件时间戳；本次 tar 保留旧时间戳曾导致 Ninja 没有重新编译测试，
+已更新源码时间戳并完成重建，不能使用此前失败报告作为最新结果。
+
+在 Linux 的 X11 桌面终端运行 `bash ./run.sh`，后台启动 0.0.0.0:8765 服务并打开一个客户端。
+Windows 运行 `./run.ps1 -Preset windows-release -ServerUrl 'ws://10.11.47.137:8765' -Room demo -Name Windows`。
+两端加入 demo → Linux 共享主屏幕 → Windows 请求控制 → Linux 允许 → Windows 在共享画面内操作。
+Linux 的当前桌面为 DISPLAY=:1、XAUTHORITY=/run/user/1000/gdm/Xauthority；SSH 启动 GUI 时必须使用实际会话，
+不能假设 :0。桌面终端自身的环境应优先于这些本机快照。
+
+新增 InputInjector 仅在 Linux X11 / XTest 可用时声明被控能力。
+SessionCoordinator 处理请求、30 秒待确认超时、拒绝、授权和撤销；ControlSession 校验代次与序号。
+ScreenShare 管理同一 WebRTC 连接的可靠有序 DataChannel；VideoSurface 只收集归一化输入和失焦释放。
+准备远端 DataChannel 时 label 尚未赋值，必须在 on-open / 收消息时检查名称。
+
+Windows 与 Linux Release 的 core / signaling / media / desktop 均通过；跨机两端专用回归也通过。
+真实输入结果：点击 1 次、文字 zjdesk123、滚轮 10→11、拖动滑块到 99。
+拒绝首个请求、Windows 撤销、Linux 撤销、撤销后禁止输入，以及控制端退会释放 Ctrl 均通过。
+跨机用例只在显式 ZJDESK_REMOTE_FIXTURE / ZJDESK_REMOTE_CONTROLLER 环境下执行，默认测试跳过它们。
+结果见最新 [validation.md](validation.md)；Linux 本机 60 fps 接收约 58.8 / 绘制 56.9，不代表跨机稳定帧率。
+
+当前边界：Windows → Linux X11；没有 Windows 被控、Wayland、剪贴板、中文输入法同步、STUN / TURN、
+远端声音或无人值守控制。所有授权仍需被控端本地确认。未做长时间与所有硬件验收。
+生成物仍在 build/ / dist/；源码和此前 0.3.1 工作区改动均未自动提交。
+本次结束时两端正式客户端各一个，房间预填 demo，Linux 信令服务后台监听 0.0.0.0:8765。
+界面等待用户加入与本地批准；没有设置无人值守授权或开机自启动。
+
+## 2026-09-29 历史快照：0.3.1
+
+用户进一步要求验证屏幕共享 30 / 60 fps，并自动适配不同电脑的分辨率和帧率。
+已增加实际编码 / 解码计数和显示绘制计数；共享默认自动档，不再固定 15 fps。
+先试原尺寸 60 / 30 / 15，再按比例降低尺寸；双端速度持续不足时降档，持续稳定后试探恢复。
+每档稳定期和升降迟滞、revision 反馈隔离的规则见 architecture.md；核心实现为 share_quality.* / screen_share.*。
+摄像头最高模式约定、两人房间、语音转写 / 纪要暂缓均保持不变。
+
+本机 i7-11800H / 16 逻辑线程、D3D11 / VP8 的首轮实际对比：1080p 30 fps 接收约 30，
+60 fps 接收约 38，自动档选择 1080p / 30；最终数据及本次回归以最新 validation.md 为准。
+CPU 数字是含两个端点与动画桌面的同一测试进程占整机逻辑 CPU 的比例，不是单客户端开销。
+默认 build.ps1 仍不显示桌面或采集屏幕；-GuiTests 增加 30 / 60 / 自动三组真实桌面性能用例。
+报告在 build/<preset>/output/share-30fps.json、share-60fps.json、share-0fps.json；最后一份包含初始试探阶段。
+双方客户端及信令服务需一同更新，因为 share 增加 profile / stats 动作。
+本次只能验证本机及模拟慢显示；没有其他物理电脑或 Ubuntu 实机验收，不把自动规则当成全硬件保证。
+
+## 2026-09-29 历史快照：0.3.0
 
 用户最新指示：暂缓语音转写和会议纪要，房间先保持两人；先提高摄像头采集模式并实现屏幕共享。
 摄像头优先级已明确为“最高分辨率优先，再取对应最高帧率”，不要再询问这个选择。

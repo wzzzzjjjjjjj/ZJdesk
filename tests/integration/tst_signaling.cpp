@@ -145,6 +145,59 @@ private slots:
         QCOMPARE(server.roomCount(), 1);
     }
 
+    void controlRequestsRequireRoomAndBindSender()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SignalingClient alice, bob;
+        QSignalSpy aConnected(&alice, &zjdesk::SignalingClient::connected);
+        QSignalSpy bConnected(&bob, &zjdesk::SignalingClient::connected);
+        QSignalSpy atAlice(&alice, &zjdesk::SignalingClient::messageReceived);
+        QSignalSpy atBob(&bob, &zjdesk::SignalingClient::messageReceived);
+        alice.open(url);
+        bob.open(url);
+        QTRY_COMPARE(aConnected.count(), 1);
+        QTRY_COMPARE(bConnected.count(), 1);
+        QVERIFY(alice.send({"control", {{"action", "request"}, {"requestId", "request1"}}}));
+        QTRY_COMPARE(atAlice.count(), 1);
+        QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(atAlice.takeFirst().at(0))
+            .payload.value("code").toString(), "not_joined");
+        QVERIFY(alice.send({"join", {{"roomId", "control"}, {"name", "Alice"}}}));
+        QTRY_COMPARE(atAlice.count(), 1);
+        const auto identity = qvariant_cast<zjdesk::protocol::Message>(atAlice.first().at(0))
+            .payload.value("peerId").toString();
+        QVERIFY(bob.send({"join", {{"roomId", "control"}, {"name", "Bob"}}}));
+        QTRY_COMPARE(atBob.count(), 1);
+        QTRY_COMPARE(atAlice.count(), 2);
+        atAlice.clear();
+        atBob.clear();
+        QVERIFY(alice.send({"control", {{"action", "request"}, {"requestId", "request1"}, {"fromPeerId", "forged"}}}));
+        QTRY_COMPARE(atBob.count(), 1);
+        const auto request = qvariant_cast<zjdesk::protocol::Message>(atBob.takeFirst().at(0));
+        QCOMPARE(request.payload.value("fromPeerId").toString(), identity);
+        QCOMPARE(request.payload.value("requestId").toString(), "request1");
+        for (const auto &action : {"grant", "input"})
+        {
+            QVERIFY(alice.send({"control", {{"action", action}, {"requestId", "request1"}}}));
+            QTRY_COMPARE(atAlice.count(), 1);
+            QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(atAlice.takeFirst().at(0))
+                .payload.value("code").toString(), "invalid_control");
+        }
+        QCOMPARE(atBob.count(), 0);
+        QVERIFY(bob.send({"control", {{"action", "revoke"}, {"requestId", "request1"}}}));
+        QTRY_COMPARE(atAlice.count(), 1);
+        QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(atAlice.takeFirst().at(0))
+            .payload.value("action").toString(), "revoke");
+        bob.close();
+        QTRY_COMPARE(atAlice.count(), 1);
+        atAlice.clear();
+        QVERIFY(alice.send({"control", {{"action", "request"}, {"requestId", "request2"}}}));
+        QTRY_COMPARE(atAlice.count(), 1);
+        QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(atAlice.takeFirst().at(0))
+            .payload.value("code").toString(), "peer_unavailable");
+    }
+
     void shareMessagesValidateActionAndBindSender()
     {
         zjdesk::RoomServer server;
@@ -178,6 +231,34 @@ private slots:
         const auto message = qvariant_cast<zjdesk::protocol::Message>(bMessages.first().at(0));
         QCOMPARE(message.payload.value("fromPeerId").toString(), identity);
         QCOMPARE(message.payload.value("streamId").toString(), "stream");
+        bMessages.clear();
+        QVERIFY(alice.send({"share", {{"action", "stats"}, {"streamId", "stream"},
+            {"revision", 1}, {"fps", -10}}}));
+        QTRY_COMPARE(aMessages.count(), 1);
+        QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(aMessages.takeFirst().at(0))
+            .payload.value("code").toString(), "invalid_share");
+        QVERIFY(alice.send({"share", {{"action", "profile"}, {"streamId", "stream"},
+            {"revision", 2}, {"fps", 30}, {"width", 1280}, {"height", 720}}}));
+        QTRY_COMPARE(bMessages.count(), 1);
+        QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(bMessages.first().at(0))
+            .payload.value("revision").toInt(), 2);
+        for (int fps : {5, 10, 20, 24, 50, 75, 144, 240})
+        {
+            bMessages.clear();
+            QVERIFY(alice.send({"share", {{"action", "profile"}, {"streamId", "stream"},
+                {"revision", 3}, {"fps", fps}, {"width", 1920}, {"height", 1080}}}));
+            QTRY_COMPARE(bMessages.count(), 1);
+            QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(bMessages.first().at(0))
+                .payload.value("fps").toInt(), fps);
+        }
+        for (double fps : {0.0, 4.0, 30.5, 241.0})
+        {
+            QVERIFY(alice.send({"share", {{"action", "profile"}, {"streamId", "stream"},
+                {"revision", 3}, {"fps", fps}, {"width", 1920}, {"height", 1080}}}));
+            QTRY_COMPARE(aMessages.count(), 1);
+            QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(aMessages.takeFirst().at(0))
+                .payload.value("code").toString(), "invalid_share");
+        }
     }
 };
 

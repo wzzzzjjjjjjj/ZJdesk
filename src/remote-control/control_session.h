@@ -5,7 +5,7 @@
 
 namespace zjdesk
 {
-// Authorization gate only. Transport and OS input injection are not implemented yet.
+// Authorization gate; transport and native input are coordinated by SessionCoordinator.
 // The controlled device owns this state and grants only after local user consent.
 class ControlSession
 {

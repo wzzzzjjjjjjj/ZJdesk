@@ -3,6 +3,7 @@
 #include "protocol/message.h"
 #include "remote-control/control_session.h"
 #include "session/session_coordinator.h"
+#include "media/share_quality.h"
 #include <QFile>
 #include <QJsonDocument>
 #include <QTemporaryDir>
@@ -12,6 +13,112 @@ class CoreTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void shareQualityPreservesResolutionAndAvoidsOscillation()
+    {
+        zjdesk::ShareQuality quality(QSize(3840, 2160));
+        QCOMPARE(quality.profile().size, QSize(3840, 2160));
+        QCOMPARE(quality.profile().fps, 60);
+        QVERIFY(!quality.observe(60, 60));
+        QVERIFY(!quality.observe(60, 20));
+        QVERIFY(!quality.observe(60, 60));
+        QVERIFY(!quality.observe(60, 20));
+        QVERIFY(quality.observe(60, 20));
+        QCOMPARE(quality.profile().fps, 20);
+        QCOMPARE(quality.profile().size, QSize(3840, 2160));
+        QVERIFY(!quality.observe(10, 30));
+        QVERIFY(quality.observe(10, 30));
+        QCOMPARE(quality.profile().fps, 10);
+        QVERIFY(!quality.observe(5, 5));
+        QVERIFY(quality.observe(5, 5));
+        QCOMPARE(quality.profile().size, QSize(3840, 2160));
+        QCOMPARE(quality.profile().fps, 5);
+        QVERIFY(!quality.observe(1, 1));
+        QVERIFY(quality.observe(1, 1));
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        QCOMPARE(quality.profile().fps, 60);
+        for (int i = 0; i < 29; ++i)
+            QVERIFY(!quality.observe(60, 60));
+        QVERIFY(quality.observe(60, 60));
+        QCOMPARE(quality.profile().size, QSize(3840, 2160));
+        QCOMPARE(quality.profile().fps, 5);
+    }
+
+    void shareQualityRestoresResolutionFromLowerFrameRate()
+    {
+        zjdesk::ShareQuality quality(QSize(1920, 1080));
+        for (int i = 0; i < 4; ++i)
+            quality.observe(1, 1);
+        quality.observe(20, 20);
+        QVERIFY(quality.observe(20, 20));
+        QCOMPARE(quality.profile().size, QSize(1280, 720));
+        QCOMPARE(quality.profile().fps, 20);
+        for (int i = 0; i < 29; ++i)
+            QVERIFY(!quality.observe(20, 20));
+        QVERIFY(quality.observe(20, 20));
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        QCOMPARE(quality.profile().fps, 5);
+    }
+
+    void shareQualityHandlesSmallAndUltrawideDisplays()
+    {
+        zjdesk::ShareQuality small(QSize(320, 240));
+        for (int i = 0; i < 20; ++i)
+            small.observe(1, 1);
+        QCOMPARE(small.profile().size, QSize(320, 240));
+        QCOMPARE(small.profile().fps, 5);
+        zjdesk::ShareQuality wide(QSize(3440, 1440));
+        for (int i = 0; i < 4; ++i)
+            wide.observe(1, 1);
+        QCOMPARE(wide.profile().size.width(), 1920);
+        QCOMPARE(wide.profile().size.height() % 2, 0);
+        QVERIFY(qAbs(double(wide.profile().size.width()) / wide.profile().size.height() - 3440.0 / 1440) < 0.01);
+    }
+
+    void slowScreenShareKeepsEnoughBitrateForText()
+    {
+        const zjdesk::ShareProfile slow{QSize(1920, 1080), 5};
+        const zjdesk::ShareProfile normal{QSize(1920, 1080), 30};
+        const zjdesk::ShareProfile uhd{QSize(3840, 2160), 60};
+        QCOMPARE(slow.bitrate(), normal.bitrate());
+        QVERIFY(slow.bitrate() >= 4000000);
+        QVERIFY(uhd.bitrate() > 12000000);
+        QVERIFY(uhd.bitrate() <= 40000000);
+    }
+
+    void shareQualityStartsAtDisplayRefreshRate()
+    {
+        zjdesk::ShareQuality quality(QSize(2560, 1440), 144);
+        QCOMPARE(quality.profile().fps, 144);
+        QVERIFY(!quality.observe(144, 55));
+        QVERIFY(quality.observe(144, 55));
+        QCOMPARE(quality.profile().fps, 50);
+        QCOMPARE(quality.profile().size, QSize(2560, 1440));
+        QCOMPARE(zjdesk::ShareQuality(QSize(1920, 1080), 0).profile().fps, 60);
+        QCOMPARE(zjdesk::ShareQuality(QSize(1920, 1080), 500).profile().fps, 240);
+    }
+
+    void shareQualityUsesBothSlowSamplesForFrameRate()
+    {
+        zjdesk::ShareQuality quality(QSize(1920, 1080));
+        QVERIFY(!quality.observe(60, 45));
+        QVERIFY(quality.observe(60, 35));
+        QCOMPARE(quality.profile().fps, 40);
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+    }
+
+    void shareQualityRestoresResolutionBeforeChasingFrameRate()
+    {
+        zjdesk::ShareQuality quality(QSize(1920, 1080));
+        for (int i = 0; i < 4; ++i)
+            quality.observe(1, 1);
+        QCOMPARE(quality.profile().size, QSize(1280, 720));
+        QCOMPARE(quality.profile().fps, 60);
+        for (int i = 0; i < 29; ++i)
+            QVERIFY(!quality.observe(52, 52));
+        QVERIFY(quality.observe(52, 52));
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        QCOMPARE(quality.profile().fps, 5);
+    }
     void messageRoundTrip()
     {
         const zjdesk::protocol::Message original{"join", {{"roomId", "demo"}, {"name", QStringLiteral("测试用户")}}};

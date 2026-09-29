@@ -25,9 +25,9 @@ int main(int argc, char **argv)
     parser.addVersionOption();
     parser.addOption({"server", "Signaling URL", "url", "ws://127.0.0.1:8765"});
     parser.addOption({"room", "Room ID", "room", "demo"});
-    parser.addOption({"name", "Display name", "name", QHostInfo::localHostName()});
+    parser.addOption({{"display-name", "name"}, "Display name", "name", QHostInfo::localHostName()});
     parser.process(app);
-    MainWindow window(parser.value("server"), parser.value("room"), parser.value("name"));
+    MainWindow window(parser.value("server"), parser.value("room"), parser.value("display-name"));
     window.show();
     return app.exec();
 }
