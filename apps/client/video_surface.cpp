@@ -40,31 +40,44 @@ void VideoSurface::paintGL()
         return;
     }
     QLinearGradient background(0, 0, width(), height());
-    background.setColorAt(0, QColor("#172740"));
-    background.setColorAt(1, QColor("#263b59"));
+    background.setColorAt(0, QColor("#102735"));
+    background.setColorAt(1, QColor("#203e4b"));
     painter.fillRect(rect(), background);
-    const QPointF center(width() / 2.0, height() / 2.0 - 24);
-    painter.setPen(QPen(QColor("#344e70"), 1));
-    painter.setBrush(QColor("#263e60"));
-    painter.drawEllipse(center, 45, 45);
+    painter.setPen(QPen(QColor(148, 195, 199, 14), 1));
+    for (int x = 24; x < width(); x += 40)
+        painter.drawLine(x, 0, x, height());
+    for (int y = 24; y < height(); y += 40)
+        painter.drawLine(0, y, width(), y);
+    const QPointF center(width() / 2.0, height() / 2.0 - 34);
+    QRadialGradient glow(center, 160);
+    glow.setColorAt(0, QColor(57, 164, 145, 45));
+    glow.setColorAt(1, QColor(57, 164, 145, 0));
+    painter.fillRect(rect(), glow);
+    painter.setPen(QPen(QColor("#3a6c75"), 1));
+    painter.setBrush(QColor("#1a3946"));
+    painter.drawRoundedRect(QRectF(center.x() - 58, center.y() - 44, 116, 82), 12, 12);
+    painter.setPen(QPen(QColor("#83cbbd"), 2));
+    painter.setBrush(QColor("#244b55"));
+    painter.drawRoundedRect(QRectF(center.x() - 34, center.y() - 26, 68, 44), 5, 5);
+    painter.drawLine(QPointF(center.x(), center.y() + 19), QPointF(center.x(), center.y() + 27));
+    painter.drawLine(QPointF(center.x() - 14, center.y() + 27), QPointF(center.x() + 14, center.y() + 27));
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor("#83cbbd"));
+    painter.drawEllipse(QPointF(center.x() + 46, center.y() - 32), 3, 3);
     auto font = painter.font();
-    font.setPixelSize(30);
-    font.setBold(true);
+    font.setPointSize(13);
+    font.setWeight(QFont::DemiBold);
     painter.setFont(font);
-    painter.setPen(QColor("#dbe9ff"));
-    painter.drawText(QRectF(center.x() - 45, center.y() - 45, 90, 90), Qt::AlignCenter,
-                     name_.isEmpty() ? "Z" : name_.left(1).toUpper());
-    font.setPixelSize(16);
-    painter.setFont(font);
-    painter.drawText(QRect(12, int(center.y()) + 58, width() - 24, 28), Qt::AlignCenter, name_);
-    font.setPixelSize(12);
+    painter.setPen(QColor("#e3f2f4"));
+    const QRect titleRect(24, int(center.y()) + 56, width() - 48, 30);
+    painter.drawText(titleRect, Qt::AlignCenter,
+        painter.fontMetrics().elidedText(name_, Qt::ElideRight, titleRect.width()));
+    font.setPointSize(9);
     font.setBold(false);
     painter.setFont(font);
-    painter.setPen(QColor("#a4b7d1"));
-    painter.drawText(QRect(12, int(center.y()) + 92, width() - 24, 38),
+    painter.setPen(QColor("#a9c3ce"));
+    painter.drawText(QRect(28, int(center.y()) + 94, width() - 56, 52),
                      Qt::AlignHCenter | Qt::TextWordWrap, caption_);
-    painter.setPen(QColor("#7790b3"));
-    painter.drawText(QRect(20, 18, width() - 40, 22), Qt::AlignLeft, QStringLiteral("远端画面"));
 }
 
 void VideoSurface::setFrame(const QImage &frame)

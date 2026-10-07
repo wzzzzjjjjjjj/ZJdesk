@@ -19,6 +19,8 @@
 #include <QFocusEvent>
 #include <QSpinBox>
 #include <QSlider>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <ctime>
 #include <algorithm>
 #include <QtTest>
@@ -581,7 +583,9 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(surface->grabFramebuffer().size(),
             window.screen()->size() * window.screen()->devicePixelRatio(), 5000);
         const auto displayed = surface->grabFramebuffer();
-        QCOMPARE(displayed.copy(detail).convertToFormat(QImage::Format_RGB32), frame.copy(detail));
+        auto displayedDetail = displayed.copy(detail).convertToFormat(QImage::Format_RGB32);
+        displayedDetail.setDevicePixelRatio(frame.devicePixelRatio());
+        QCOMPARE(displayedDetail, frame.copy(detail));
         QCOMPARE(displayed.pixelColor(displayed.rect().center()), QColor("#176ee8"));
         QVERIFY(QDir().mkpath("output"));
         QVERIFY(window.grab().save("output/ui-expanded-video.png"));
@@ -815,6 +819,65 @@ private slots:
         QTRY_COMPARE(aliceStatus->text(), QStringLiteral("等待成员"));
         QTest::mouseClick(aliceJoin, Qt::LeftButton);
         QTRY_COMPARE(server.roomCount(), 0);
+    }
+
+    void workspaceFitsSmallWindowAndLongNames()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const auto url = QString("ws://127.0.0.1:%1").arg(server.port());
+        const QString longName(40, QChar(0x534f));
+        MainWindow window(url, "demo", longName);
+        window.resize(1040, 720);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QCOMPARE(window.size(), QSize(1040, 720));
+        auto *surface = window.findChild<VideoSurface *>();
+        QVERIFY(surface->width() >= 450);
+        QVERIFY(surface->height() >= 300);
+        for (auto *widget : {static_cast<QWidget *>(surface),
+                 window.findChild<QWidget *>("previewSource"),
+                 window.findChild<QWidget *>("previewButton"),
+                 window.findChild<QWidget *>("audioTestButton"),
+                 window.findChild<QWidget *>("primaryButton")})
+        {
+            QVERIFY(widget);
+            const QRect bounds(widget->mapTo(&window, QPoint()), widget->size());
+            QVERIFY2(window.rect().contains(bounds), qPrintable(widget->objectName()));
+        }
+        auto *panel = window.findChild<QScrollArea *>("sessionPanel");
+        auto *stop = window.findChild<QPushButton *>("stopControlButton");
+        panel->ensureWidgetVisible(stop);
+        QTest::qWait(100);
+        QVERIFY(panel->viewport()->rect().contains(QRect(stop->mapTo(panel->viewport(), QPoint()), stop->size())));
+        panel->verticalScrollBar()->setValue(0);
+        QTest::qWait(100);
+        QVERIFY(QDir().mkpath("output"));
+        QVERIFY(window.screen()->grabWindow(window.winId()).save("output/ui-workspace-small.png"));
+        window.findChild<QLineEdit *>("serverAddress")->setText("http://invalid");
+        QTest::mouseClick(window.findChild<QPushButton *>("primaryButton"), Qt::LeftButton);
+        QTRY_COMPARE(window.findChild<QLabel *>("statusBadge")->text(), QStringLiteral("连接失败"));
+        QVERIFY(window.findChild<QLineEdit *>("serverAddress")->isEnabled());
+        QTest::qWait(200);
+        QVERIFY(window.screen()->grabWindow(window.winId()).save("output/ui-connection-error.png"));
+        window.findChild<QLineEdit *>("serverAddress")->setText(url);
+        QTest::mouseClick(window.findChild<QPushButton *>("primaryButton"), Qt::LeftButton);
+        QTRY_COMPARE(window.findChild<QLabel *>("statusBadge")->text(), QStringLiteral("等待成员"));
+        zjdesk::SessionCoordinator peer;
+        QVERIFY(peer.join(QUrl(url), "demo", longName));
+        QTRY_COMPARE(window.session_.memberCount(), 2);
+        QCOMPARE(window.size(), QSize(1040, 720));
+        window.resize(1280, 820);
+        QTest::qWait(200);
+        QVERIFY(window.screen()->grabWindow(window.winId()).save("output/ui-workspace-large.png"));
+        const auto nav = window.findChildren<QPushButton *>("navButton");
+        nav.at(1)->setFocus();
+        QTest::keyClick(nav.at(1), Qt::Key_Space);
+        QTRY_COMPARE(window.findChild<QLabel *>("pageTitle")->text(), QStringLiteral("运行诊断"));
+        QTest::qWait(100);
+        QVERIFY(window.screen()->grabWindow(window.winId()).save("output/ui-diagnostics-large.png"));
+        QTest::mouseClick(nav.at(0), Qt::LeftButton);
+        QTRY_COMPARE(window.findChild<QLabel *>("pageTitle")->text(), QStringLiteral("协作工作台"));
     }
 
     void localPreviewDisplaysRealFramesAndStops()

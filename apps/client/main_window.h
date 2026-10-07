@@ -11,6 +11,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QHBoxLayout;
 class QVBoxLayout;
+class QPropertyAnimation;
 class VideoSurface;
 
 class MainWindow final : public QMainWindow
@@ -44,6 +45,7 @@ private:
     QLineEdit *nameEdit_ = nullptr;
     QPushButton *joinButton_ = nullptr;
     QLabel *statusLabel_ = nullptr;
+    QPropertyAnimation *statusAnimation_ = nullptr;
     QLabel *statusDetail_ = nullptr;
     QLabel *memberLabel_ = nullptr;
     QLabel *peerLabel_ = nullptr;

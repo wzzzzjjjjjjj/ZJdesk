@@ -1,5 +1,59 @@
 # 验证记录
 
+## 0.4.5：2026-10-07 同步回主目录
+
+按用户要求，后续工作使用 `F:\projects\ZJdesk`（分支 `ZJ-desk`）。同步前两目录 HEAD 相同，
+主目录无未提交修改；同步的 8 个文件逐一核对 SHA256，原文件、校验清单及补丁保存于
+`build/backups/ui-before-sync-20261007-231915`。修改保留为未提交状态，可在 VS Code 源代码管理中查看。
+
+- 主目录执行 `build.ps1 -Preset windows-release -Deploy`，core / signaling / media 三组通过，
+  总耗时 88.42 秒；对应 JUnit 为 22 / 9 / 13 项，零失败 / 错误，media 跳过 1 项物理摄像头用例。
+- 在真实桌面运行小窗口与长昵称、两窗口入退会、全屏恢复、本地预览四项 GUI 回归，
+  `build/windows-release/test-results/ui-sync.xml` 为 6 项（含初始化与清理），零失败 / 错误 / 跳过，9.593 秒。
+- 从主目录执行 `run.ps1 -Preset windows-release -Name Windows`，客户端窗口可见且响应正常。
+  构建与部署客户端 SHA256 一致：`23A98554E82147D8C1B835CFC804AF808DA89395EFF5D8E74E0608F97FEB67C7`。
+
+下面的完整 desktop 与 125% 缩放结果来自 `C:\Users\29822\.codex\worktrees\9fba\ZJdesk`；
+同步回主目录后只复跑上述四项 GUI 回归，未重新验收跨机或 Ubuntu 部署。
+
+## 0.4.5：2026-10-07 工作台界面优化
+
+本次在 Windows 独立工作区优化 Qt Widgets 布局与样式，保留原有会话、媒体和远控逻辑。
+构建环境为 Qt 6.8.3 / MSVC2022 x64 / GStreamer 1.26.11，使用真实 Windows 桌面和 OpenGL，未使用 offscreen。
+
+- 修改前 Debug 的 core / signaling / media 三组通过，零失败。
+- 修改后 `build.ps1` 的 Debug 三组通过；相关七个 GUI 用例通过，报告为
+  `build/windows-debug/test-results/ui-design.xml`（9 项含初始化与清理，零失败 / 错误 / 跳过）。
+- 最终执行 `build.ps1 -Preset windows-release -GstRoot <本机 SDK> -GuiTests -Deploy`，
+  core / signaling / media / desktop 四组全部通过，总耗时 175.65 秒，完成 `dist/windows-release` 部署。
+
+Release JUnit 记录如下，项数包括初始化和清理：
+
+| 报告 | 项数 | 失败 / 错误 | 跳过 | 用例耗时 |
+| --- | ---: | --- | ---: | ---: |
+| core.xml | 22 | 0 / 0 | 0 | 18.117 秒 |
+| signaling.xml | 9 | 0 / 0 | 0 | 3.638 秒 |
+| media.xml | 13 | 0 / 0 | 1 | 84.088 秒 |
+| desktop.xml | 14 | 0 / 0 | 2 | 69.145 秒 |
+
+新增 GUI 回归覆盖 1040×720 小窗口、40 字中文昵称、右侧滚动访问操作、错误后重新入会、
+1280×820 布局，以及键盘切换诊断页。已有用例继续验证同一画面控件的全屏放大 / Esc 恢复、
+键鼠黑边与失焦释放、本地动态测试源、真实桌面共享及单像素文字细节。
+普通 QWidget 抓图曾出现 OpenGL 组合截图异常，新增截图改用 `QScreen::grabWindow`；实际原生窗口和 framebuffer 检查正常。
+
+以 `QT_SCALE_FACTOR=1.25` 重新运行 Release 的小窗口 / 长昵称及全屏恢复两项用例，全部通过。
+报告为 `build/windows-release/test-results/ui-scale125.xml`（4 项含初始化 / 清理，零失败 / 错误 / 跳过）。
+全屏像素断言先统一 QImage 的 DPR 元数据，再逐像素比较，避免把 1.25 与 1 的元数据差异当作像素错误。
+本次检查了工作台、诊断页、错误状态、本地预览和 125% 缩放的真实截图。
+
+通过 `run.ps1 -Preset windows-release -Name Windows` 冷启动新版客户端，原生窗口可见、位于前台且响应正常；
+最终保留一个正常客户端及脚本创建的本地信令服务，未替用户加入房间或授权远控。
+截图为 `build/windows-release/output/ui-client-startup.png`；其他截图在同目录及 `scale125/output/`。
+部署与构建客户端 SHA256 一致：`20CF60985247E7448530FAE25573E892A4FA88FCD8B4B1B348376F3221FD7CAF`。
+
+跳过项为显式跨机远控的两个专用用例及物理摄像头释放用例。本次未重新验收 Ubuntu / 跨机远控、
+物理摄像头、扬声器或干净电脑部署，也未同步远端 Linux。Release 部署生成与本机启动不代表这些场景已通过。
+
 ## 0.4.5：2026-09-30 远控延迟和 WebRTC 缓冲对照
 
 Windows 11 控制 `192.168.3.13` 上的 Ubuntu 22.04 / X11；Linux 仍发送原始 1920×1080 VP9 4:4:4 零量化画面。
