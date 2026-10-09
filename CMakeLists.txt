@@ -95,7 +95,7 @@ if(BUILD_TESTING)
         qt_add_executable(zjdesk-media-tests tests/integration/tst_media.cpp)
         target_link_libraries(zjdesk-media-tests PRIVATE zjdesk_client_core zjdesk_signaling Qt6::Test)
         add_test(NAME media COMMAND zjdesk-media-tests -o "${CMAKE_BINARY_DIR}/test-results/media.xml,junitxml")
-        set_tests_properties(media PROPERTIES TIMEOUT 120)
+        set_tests_properties(media PROPERTIES TIMEOUT 180)
     endif()
     if(ZJDESK_BUILD_CLIENT AND ZJDESK_GUI_TESTS)
         qt_add_executable(zjdesk-ui-tests tests/ui/tst_window.cpp

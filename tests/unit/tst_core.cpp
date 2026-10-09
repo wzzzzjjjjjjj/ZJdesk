@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QTemporaryDir>
+#include <limits>
 #include <QtTest>
 
 class CoreTests : public QObject
@@ -23,15 +24,15 @@ private slots:
         QVERIFY(!quality.observe(60, 60));
         QVERIFY(!quality.observe(60, 20));
         QVERIFY(quality.observe(60, 20));
-        QCOMPARE(quality.profile().fps, 20);
+        QCOMPARE(quality.profile().fps, 50);
         QCOMPARE(quality.profile().size, QSize(3840, 2160));
-        QVERIFY(!quality.observe(10, 30));
-        QVERIFY(quality.observe(10, 30));
-        QCOMPARE(quality.profile().fps, 10);
-        QVERIFY(!quality.observe(5, 5));
-        QVERIFY(quality.observe(5, 5));
+        for (int i = 0; i < 4; ++i)
+        {
+            QVERIFY(!quality.observe(1, 1));
+            QVERIFY(quality.observe(1, 1));
+        }
         QCOMPARE(quality.profile().size, QSize(3840, 2160));
-        QCOMPARE(quality.profile().fps, 5);
+        QCOMPARE(quality.profile().fps, zjdesk::ShareQuality::MinimumFps);
         QVERIFY(!quality.observe(1, 1));
         QVERIFY(quality.observe(1, 1));
         QCOMPARE(quality.profile().size, QSize(1920, 1080));
@@ -40,23 +41,21 @@ private slots:
             QVERIFY(!quality.observe(60, 60));
         QVERIFY(quality.observe(60, 60));
         QCOMPARE(quality.profile().size, QSize(3840, 2160));
-        QCOMPARE(quality.profile().fps, 5);
+        QCOMPARE(quality.profile().fps, zjdesk::ShareQuality::MinimumFps);
     }
 
     void shareQualityRestoresResolutionFromLowerFrameRate()
     {
         zjdesk::ShareQuality quality(QSize(1920, 1080));
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 34; ++i)
             quality.observe(1, 1);
-        quality.observe(20, 20);
-        QVERIFY(quality.observe(20, 20));
         QCOMPARE(quality.profile().size, QSize(1280, 720));
-        QCOMPARE(quality.profile().fps, 20);
+        QCOMPARE(quality.profile().fps, zjdesk::ShareQuality::MinimumFps);
         for (int i = 0; i < 29; ++i)
-            QVERIFY(!quality.observe(20, 20));
-        QVERIFY(quality.observe(20, 20));
-        QCOMPARE(quality.profile().size, QSize(1920, 1080));
-        QCOMPARE(quality.profile().fps, 5);
+            QVERIFY(!quality.observe(24, 24));
+        QVERIFY(quality.observe(24, 24));
+        QCOMPARE(quality.profile().size, QSize(1600, 900));
+        QCOMPARE(quality.profile().fps, zjdesk::ShareQuality::MinimumFps);
     }
 
     void shareQualityHandlesSmallAndUltrawideDisplays()
@@ -67,7 +66,7 @@ private slots:
         QCOMPARE(small.profile().size, QSize(320, 240));
         QCOMPARE(small.profile().fps, 5);
         zjdesk::ShareQuality wide(QSize(3440, 1440));
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 12; ++i)
             wide.observe(1, 1);
         QCOMPARE(wide.profile().size.width(), 1920);
         QCOMPARE(wide.profile().size.height() % 2, 0);
@@ -91,33 +90,73 @@ private slots:
         QCOMPARE(quality.profile().fps, 144);
         QVERIFY(!quality.observe(144, 55));
         QVERIFY(quality.observe(144, 55));
-        QCOMPARE(quality.profile().fps, 50);
+        QCOMPARE(quality.profile().fps, 120);
         QCOMPARE(quality.profile().size, QSize(2560, 1440));
         QCOMPARE(zjdesk::ShareQuality(QSize(1920, 1080), 0).profile().fps, 60);
         QCOMPARE(zjdesk::ShareQuality(QSize(1920, 1080), 500).profile().fps, 240);
     }
 
-    void shareQualityUsesBothSlowSamplesForFrameRate()
+    void shareQualityChangesOnlyOneFrameRateStep()
     {
         zjdesk::ShareQuality quality(QSize(1920, 1080));
         QVERIFY(!quality.observe(60, 45));
         QVERIFY(quality.observe(60, 35));
-        QCOMPARE(quality.profile().fps, 40);
+        QCOMPARE(quality.profile().fps, 50);
         QCOMPARE(quality.profile().size, QSize(1920, 1080));
     }
 
     void shareQualityRestoresResolutionBeforeChasingFrameRate()
     {
         zjdesk::ShareQuality quality(QSize(1920, 1080));
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 12; ++i)
             quality.observe(1, 1);
-        QCOMPARE(quality.profile().size, QSize(1280, 720));
+        QCOMPARE(quality.profile().size, QSize(1600, 900));
         QCOMPARE(quality.profile().fps, 60);
         for (int i = 0; i < 29; ++i)
             QVERIFY(!quality.observe(52, 52));
         QVERIFY(quality.observe(52, 52));
         QCOMPARE(quality.profile().size, QSize(1920, 1080));
-        QCOMPARE(quality.profile().fps, 5);
+        QCOMPARE(quality.profile().fps, zjdesk::ShareQuality::MinimumFps);
+    }
+
+    void networkLossReducesBitrateWithoutReducingResolution()
+    {
+        zjdesk::ShareQuality quality(QSize(1920, 1080));
+        const int initial = quality.profile().bitrate();
+        QVERIFY(!quality.observeNetwork(-1, -1));
+        QVERIFY(!quality.observeNetwork(1000, 0));
+        QVERIFY(!quality.observeNetwork(1980, 20));
+        QVERIFY(quality.observeNetwork(2960, 40));
+        QCOMPARE(quality.profile().bitrate(), initial * 85 / 100);
+        QCOMPARE(quality.profile().fps, 60);
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        const int reduced = quality.profile().bitrate();
+        for (int i = 1; i <= 14; ++i)
+            QVERIFY(!quality.observeNetwork(2960 + i * 1000, 40));
+        QVERIFY(quality.observeNetwork(17960, 40));
+        QVERIFY(quality.profile().bitrate() > reduced);
+        QVERIFY(quality.profile().bitrate() < initial);
+    }
+
+    void networkCountersResetAndSparseTrafficDoNotTriggerCongestion()
+    {
+        zjdesk::ShareQuality quality(QSize(1920, 1080));
+        const int initial = quality.profile().bitrate();
+        const auto maximum = std::numeric_limits<qint64>::max();
+        QVERIFY(!quality.observeNetwork(maximum, maximum));
+        QVERIFY(!quality.observeNetwork(1000, 10));
+        QVERIFY(!quality.observeNetwork(1980, 30));
+        QVERIFY(!quality.observeNetwork(1981, 31));
+        QVERIFY(!quality.observeNetwork(2961, 51));
+        QCOMPARE(quality.profile().bitrate(), initial);
+        QVERIFY(!quality.observeNetwork(10, 0));
+        QVERIFY(!quality.observeNetwork(990, 20));
+        QCOMPARE(quality.profile().bitrate(), initial);
+        QVERIFY(quality.observeNetwork(1970, 40));
+        qint64 received = 1970, lost = 40;
+        for (int i = 0; i < 100; ++i)
+            quality.observeNetwork(received += 900, lost += 100);
+        QCOMPARE(quality.profile().bitrate(), 2000000);
     }
     void messageRoundTrip()
     {

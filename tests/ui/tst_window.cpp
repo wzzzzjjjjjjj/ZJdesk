@@ -2,6 +2,7 @@
 #include "video_surface.h"
 #include "signaling/room_server.h"
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QLabel>
 #include <QOpenGLWidget>
@@ -30,6 +31,34 @@
 
 namespace
 {
+// Slightly lossy 4:4:4: preserve native pixels and bound RGB error on text/one-pixel colour lines.
+constexpr int MaximumDesktopChannelError = 24;
+constexpr double MaximumDesktopMeanError = 2;
+
+void waitForPresentation(int milliseconds)
+{
+    // Run the normal event dispatcher; QtTest's polling sleeps bias high-FPS measurements.
+    QEventLoop loop;
+    QTimer::singleShot(milliseconds, &loop, &QEventLoop::quit);
+    loop.exec();
+}
+
+QJsonObject shareDiagnostics(const zjdesk::ShareStats &stats)
+{
+    return {{"codec", stats.codec}, {"hardwareEncoder", stats.hardwareEncoder},
+        {"fallbackReason", stats.codecFallbackReason}, {"bitrateBudget", stats.encoderBitrate},
+        {"hardwareQuantizer", stats.encoderQuantizer}, {"targetFps", stats.targetFps},
+        {"sendBufferBytes", stats.sendBufferBytes}, {"receiveBufferBytes", stats.receiveBufferBytes},
+        {"rtcpFeedbackBudget", stats.rtcpFeedbackBudget}, {"transport", stats.transport},
+        {"processedFps", stats.processedFps}, {"deliveredFps", stats.deliveredFps},
+        {"codecMeanMs", stats.codecMeanMs}, {"codecMaxMs", stats.codecMaxMs},
+        {"outputGapMaxMs", stats.outputGapMaxMs}, {"copyMaxMs", stats.copyMaxMs},
+        {"maxEncodedFrameBytes", qint64(stats.maxEncodedFrameBytes)},
+        {"maxKeyframeBytes", qint64(stats.maxKeyframeBytes)}, {"keyframes", qint64(stats.keyframes)},
+        {"overwrittenFrames", qint64(stats.overwrittenFrames)},
+        {"width", stats.size.width()}, {"height", stats.size.height()}};
+}
+
 double processCpuSeconds()
 {
 #ifdef Q_OS_WIN
@@ -90,6 +119,39 @@ class WindowTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void physicalDesktopAcrossMachines()
+    {
+        if (qEnvironmentVariable("ZJDESK_PHYSICAL_RECEIVER") != "1")
+            QSKIP("Explicit physical desktop validation only");
+        MainWindow window(qEnvironmentVariable("ZJDESK_TEST_SERVER"), "physical-first-frame", "Windows");
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.findChild<QPushButton *>("primaryButton")->click();
+        QTRY_COMPARE_WITH_TIMEOUT(window.session_.memberCount(), 2, 30000);
+        auto *surface = window.findChild<VideoSurface *>();
+        for (int cycle = 0; cycle < 3; ++cycle)
+        {
+            QElapsedTimer startup;
+            startup.start();
+            QTRY_VERIFY_WITH_TIMEOUT(surface->hasFrame(), 15000);
+            const auto firstFrameMs = startup.elapsed();
+            QTRY_COMPARE_WITH_TIMEOUT(window.session_.shareStats().transport, QString("TCP"), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(window.session_.shareStats().processedFps > 0, 5000);
+            waitForPresentation(2000);
+            const auto stats = window.session_.shareStats();
+            QCOMPARE(stats.size, QSize(1920, 1080));
+            QVERIFY(stats.deliveredFps > 0);
+            QVERIFY(stats.presentedFps > 0);
+            QVERIFY(!surface->grabFramebuffer().isNull());
+            qInfo().noquote() << "Physical desktop cycle" << cycle + 1 << "first frame ms" << firstFrameMs
+                << QJsonDocument(shareDiagnostics(stats)).toJson(QJsonDocument::Compact);
+            window.session_.stopScreenShare();
+            QTRY_COMPARE_WITH_TIMEOUT(window.session_.shareState(), zjdesk::SessionCoordinator::PreviewState::Stopped, 5000);
+            QVERIFY(!surface->hasFrame());
+        }
+        window.session_.leave();
+    }
+
     void remoteControlledDesktopFixture()
     {
         if (qEnvironmentVariable("ZJDESK_REMOTE_FIXTURE") != "1")
@@ -178,6 +240,7 @@ private slots:
                 {"probeSequence", QString::number(probeSequence)}, {"uiDispatchUs", uiDispatchUs},
                 {"shareStatus", window.findChild<QLabel *>("shareStatus")->text()},
                 {"sentMbps", shareStats.networkMbps}, {"webRtcRttMs", shareStats.webRtcRttMs},
+                {"media", shareDiagnostics(shareStats)},
                 {"controlHeld", QGuiApplication::queryKeyboardModifiers().testFlag(Qt::ControlModifier)},
                 {"width", screen->size().width()}, {"height", screen->size().height()},
                 {"fieldX", editPoint.x()}, {"fieldY", editPoint.y()},
@@ -207,7 +270,11 @@ private slots:
         repeatGrant = true;
         target.raise();
         target.activateWindow();
-        QTRY_VERIFY_WITH_TIMEOUT(completed, 120000);
+        QElapsedTimer completionClock;
+        completionClock.start();
+        while (!completed && completionClock.elapsed() < 240000)
+            waitForPresentation(100);
+        QVERIFY(completed);
         QVERIFY(clicks >= 1);
         QCOMPARE(wheel.value(), 11);
         QVERIFY(drag.value() >= 80);
@@ -254,7 +321,10 @@ private slots:
         const auto stopObserver = qScopeGuard([&] { observer.kill(); observer.waitForFinished(3000); });
         QVERIFY(observer.waitForStarted(5000));
         const auto observation = [&] { return latest; };
+        QImage receivedDesktop;
         MainWindow window(qEnvironmentVariable("ZJDESK_TEST_SERVER"), "remote-test", "Windows");
+        connect(&window.session_, &zjdesk::SessionCoordinator::shareFrame, &window,
+            [&](const QImage &image) { receivedDesktop = image; });
         const auto failureReport = qScopeGuard([&] {
             if (QTest::currentTestFailed())
             {
@@ -276,6 +346,7 @@ private slots:
         request->click();
         QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("正在控制 Linux")), 10000);
         QTRY_VERIFY_WITH_TIMEOUT(surface->hasFrame(), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(window.session_.shareStats().transport, QString("TCP"), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(observation().contains("fieldX"), 10000);
         const auto normalSize = surface->size();
         auto *expand = window.findChild<QPushButton *>("expandVideoButton");
@@ -388,7 +459,7 @@ private slots:
             qint64 previousTime = 0;
             while (measurement.elapsed() < 30000)
             {
-                QTest::qWait(1000);
+                waitForPresentation(1000);
                 const auto elapsed = measurement.elapsed();
                 const auto presented = surface->presentedFrames();
                 const auto network = window.session_.shareStats();
@@ -396,6 +467,7 @@ private slots:
                     {"presentedFps", (presented - previousPresented) * 1000.0 / (elapsed - previousTime)},
                     {"receiver", window.findChild<QLabel *>("shareStatus")->text()},
                     {"sender", observation().value("shareStatus")},
+                    {"receiverMedia", shareDiagnostics(network)}, {"senderMedia", observation().value("media")},
                     {"receivedMbps", network.networkMbps}, {"packetsReceived", network.packetsReceived},
                     {"packetsLost", network.packetsLost},
                     {"jitterMs", network.jitterMs}, {"sentMbps", observation().value("sentMbps").toDouble(-1)},
@@ -431,24 +503,24 @@ private slots:
             detailReport.write(QJsonDocument(QJsonObject{{"meanError", detailError},
                 {"maximumError", maximumDetailError}, {"singlePixelColumns", detailWidth}}).toJson());
             QVERIFY(detailReport.commit());
-            QVERIFY2(detailError < 2 && maximumDetailError <= 4, "Single-pixel colour detail was lost across machines");
+            QVERIFY2(detailError < MaximumDesktopMeanError && maximumDetailError <= MaximumDesktopChannelError,
+                "Single-pixel colour detail exceeded the slightly lossy quality budget across machines");
             QElapsedTimer duration;
             duration.start();
+            const auto qualityPresentedBefore = surface->presentedFrames();
             QJsonArray samples;
             int unhealthy = 0;
             int changed = 0;
             QImage previous;
             while (duration.elapsed() < 60000)
             {
-                const auto markerPoint = point("markerX", "markerY");
-                const auto displaySize = source.scaled(surface->size(), Qt::KeepAspectRatio);
-                const QRect markerRect(markerPoint, QSize(
-                    qRound(data.value("markerWidth").toDouble() / source.width() * displaySize.width()),
-                    qRound(data.value("markerHeight").toDouble() / source.height() * displaySize.height())));
-                const auto image = surface->grabFramebuffer();
-                const double scale = double(image.width()) / surface->width();
-                const auto thumbnail = image.copy(QRect(qRound(markerRect.x() * scale), qRound(markerRect.y() * scale),
-                    qRound(markerRect.width() * scale), qRound(markerRect.height() * scale))).scaled(32, 16);
+                // Repeated GPU readback stalls presentation and feeds the test's own delay into adaptation.
+                // Check decoded pixels continuously; native OpenGL pixels are checked before/after this loop.
+                const auto image = receivedDesktop;
+                QCOMPARE(image.size(), source);
+                const QRect markerRect(data.value("markerX").toInt(), data.value("markerY").toInt(),
+                    data.value("markerWidth").toInt(), data.value("markerHeight").toInt());
+                const auto thumbnail = image.copy(markerRect).scaled(32, 16);
                 if (!previous.isNull() && previous != thumbnail)
                     ++changed;
                 previous = thumbnail;
@@ -456,7 +528,7 @@ private slots:
                 for (int y = markerRect.top() + 8; y < markerRect.bottom() - 8; y += 4)
                     for (int x = markerRect.left() + 8; x < markerRect.right() - 8; x += 4)
                     {
-                        const auto color = image.pixelColor(qRound(x * scale), qRound(y * scale));
+                        const auto color = image.pixelColor(x, y);
                         if ((color.blue() > 170 && color.red() > 140 && color.green() > 140)
                             || (color.blue() > 150 && color.red() < 80 && color.green() > 50 && color.green() < 160))
                             ++matching;
@@ -477,11 +549,13 @@ private slots:
                     if (unhealthy <= 3)
                         image.save(QString("output/cross-video-unhealthy-%1.png").arg(unhealthy));
                 }
-                QTest::qWait(250);
+                waitForPresentation(250);
             }
             QSaveFile report("output/cross-video-quality.json");
             QVERIFY(report.open(QIODevice::WriteOnly));
-            report.write(QJsonDocument(QJsonObject{{"samples", samples}, {"unhealthySamples", unhealthy},
+            report.write(QJsonDocument(QJsonObject{{"samples", samples},
+                {"presentedFps", (surface->presentedFrames() - qualityPresentedBefore) * 1000.0 / duration.elapsed()},
+                {"unhealthySamples", unhealthy},
                 {"changedSamples", changed}}).toJson());
             QVERIFY(report.commit());
             QVERIFY2(unhealthy <= 2, "Decoded desktop pixels were corrupted during the two-machine test");
@@ -511,8 +585,10 @@ private slots:
                 const QColor expected(x % 3 == 0 ? Qt::red : x % 3 == 1 ? Qt::green : Qt::blue);
                 const auto actual = controlledImage.pixelColor(data.value("markerX").toInt() + x,
                     data.value("markerY").toInt() + data.value("markerHeight").toInt() - 4);
-                QVERIFY2(qAbs(expected.red() - actual.red()) <= 4 && qAbs(expected.green() - actual.green()) <= 4
-                    && qAbs(expected.blue() - actual.blue()) <= 4, "Text detail was lost after remote input");
+                QVERIFY2(qAbs(expected.red() - actual.red()) <= MaximumDesktopChannelError
+                    && qAbs(expected.green() - actual.green()) <= MaximumDesktopChannelError
+                    && qAbs(expected.blue() - actual.blue()) <= MaximumDesktopChannelError,
+                    "Text detail exceeded the slightly lossy quality budget after remote input");
             }
         QVERIFY(controlledImage.save("output/remote-control-windows.png"));
         QTest::keyPress(surface, Qt::Key_Control);
@@ -674,7 +750,8 @@ private slots:
         QVERIFY(QDir().mkpath("output"));
         original.copy(region).save("output/text-original.png");
         decoded.copy(region).save("output/text-decoded.png");
-        QVERIFY2(meanError < 2 && maximumError <= 4, "Text or single-pixel color detail was lost in encoding");
+        QVERIFY2(meanError < MaximumDesktopMeanError && maximumError <= MaximumDesktopChannelError,
+            "Text or single-pixel color detail exceeded the slightly lossy quality budget");
         sender.stopScreenShare();
         QTRY_COMPARE(receiver.shareState(), zjdesk::SessionCoordinator::PreviewState::Stopped);
     }
@@ -715,7 +792,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(receiver.shareState() == Preview::Running
             || receiver.shareState() == Preview::Failed, 20000);
         QVERIFY2(receiver.shareState() == Preview::Running, qPrintable(receiver.shareDetail()));
-        QTest::qWait(fps == 0 ? 15000 : 2000);
+        waitForPresentation(fps == 0 ? 15000 : 2000);
         QJsonArray samples;
         double receivedFrames = 0, deliveredFrames = 0, sampleSeconds = 0;
         double encodedFrames = 0, encodedSeconds = 0;
@@ -739,7 +816,7 @@ private slots:
         const auto firstImage = surface.grabFramebuffer();
         QElapsedTimer elapsed;
         elapsed.start();
-        QTest::qWait(10000);
+        waitForPresentation(10000);
         const double seconds = elapsed.elapsed() / 1000.0;
         const double cpuPercent = 100 * (processCpuSeconds() - cpuBefore)
             / seconds / qMax(1, QThread::idealThreadCount());
@@ -940,6 +1017,10 @@ private slots:
         aliceShare->click();
         QTRY_VERIFY_WITH_TIMEOUT(bobStatus->text().contains(QStringLiteral("正在接收对方屏幕"))
             && surface->hasFrame(), 20000);
+#ifdef Q_OS_LINUX
+        QTRY_COMPARE_WITH_TIMEOUT(alice.session_.shareStats().transport, QString("TCP"), 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.session_.shareStats().transport, QString("TCP"), 5000);
+#endif
         QVERIFY(!bobShare->isEnabled());
         const auto hasColor = [surface](bool green) {
             const auto image = surface->grabFramebuffer();

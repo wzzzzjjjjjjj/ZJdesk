@@ -6,14 +6,16 @@ ShareQuality::ShareQuality(const QSize &nativeSize, int maximumFps)
 {
     const auto native = nativeSize.isEmpty() ? QSize(1920, 1080) : nativeSize;
     maximumFps = maximumFps > 0 ? qBound(5, maximumFps, 240) : 60;
-    QList<int> frameRates{maximumFps};
-    for (int fps : {240, 165, 144, 120, 90, 60, 50, 40, 30, 24, 20, 15, 10, 5})
-        if (fps < maximumFps)
+    QList<int> frameRates;
+    frameRates.append(maximumFps);
+    // 原分辨率内只保留手感可用的帧率；低于 MinimumFps 的档位只留到最后一级尺寸。
+    for (int fps : {240, 165, 144, 120, 90, 60, 50, 45, 40, 30, MinimumFps})
+        if (fps < maximumFps && !frameRates.contains(fps))
             frameRates.append(fps);
-    for (int fps : frameRates)
-        profiles_.append({native, fps});
+    QList<QSize> sizes{native};
     QSize previous = native;
-    for (const QSize &limit : {QSize(1920, 1080), QSize(1280, 720), QSize(640, 360)})
+    for (const QSize &limit : {QSize(1920, 1080), QSize(1600, 900), QSize(1280, 720),
+             QSize(960, 540), QSize(640, 360)})
     {
         if (native.width() <= limit.width() && native.height() <= limit.height())
             continue;
@@ -21,9 +23,18 @@ ShareQuality::ShareQuality(const QSize &nativeSize, int maximumFps)
         size = {qMax(2, size.width() / 2 * 2), qMax(2, size.height() / 2 * 2)};
         if (size == previous)
             continue;
-        for (int fps : frameRates)
-            profiles_.append({size, fps});
+        sizes.append(size);
         previous = size;
+    }
+    for (int i = 0; i < sizes.size(); ++i)
+    {
+        for (int fps : frameRates)
+            profiles_.append({sizes.at(i), fps});
+        if (i + 1 != sizes.size())
+            continue;
+        for (int fps : {20, 15, 10, 5})
+            if (fps < frameRates.last())
+                profiles_.append({sizes.at(i), fps});
     }
 }
 
@@ -32,27 +43,56 @@ bool ShareQuality::observe(double encodedFps, double receivedFps)
     const int fps = profile().fps;
     const double actual = receivedFps < 0 ? encodedFps : qMin(encodedFps, receivedFps);
     slowWindows_ = actual < fps * 0.85 ? slowWindows_ + 1 : 0;
-    slowFpsTotal_ = slowWindows_ ? slowFpsTotal_ + actual : 0;
     int higherResolution = index_ - 1;
-    while (higherResolution >= 0 && profiles_[higherResolution].size == profile().size)
+    while (higherResolution >= 0 && profiles_.at(higherResolution).size == profile().size)
         --higherResolution;
     stableWindows_ = actual >= fps * (higherResolution >= 0 ? 0.85 : 0.95) ? stableWindows_ + 1 : 0;
     if (slowWindows_ >= 2 && index_ + 1 < profiles_.size())
-    {
-        const auto size = profile().size;
-        const double sustainable = slowFpsTotal_ / slowWindows_ / 0.95;
         ++index_;
-        // Skip unsustainable frame rates, but exhaust this resolution first.
-        while (index_ + 1 < profiles_.size() && profiles_[index_].size == size
-            && profiles_[index_].fps > sustainable && profiles_[index_ + 1].size == size)
-            ++index_;
-    }
     else if (stableWindows_ >= 30 && index_ > 0)
         index_ = higherResolution >= 0 ? higherResolution : index_ - 1;
     else
         return false;
     slowWindows_ = stableWindows_ = 0;
-    slowFpsTotal_ = 0;
+    return true;
+}
+
+bool ShareQuality::observeNetwork(qint64 receivedPackets, qint64 lostPackets)
+{
+    if (receivedPackets < 0 || lostPackets < 0)
+        return false;
+    const auto received = receivedPackets - qMax(qint64(0), previousReceived_);
+    const auto lost = lostPackets - qMax(qint64(0), previousLost_);
+    const bool baseline = previousReceived_ < 0 || received < 0 || lost < 0;
+    previousReceived_ = receivedPackets;
+    previousLost_ = lostPackets;
+    if (baseline)
+    {
+        congestedWindows_ = healthyNetworkWindows_ = 0;
+        return false;
+    }
+    // Sparse/static desktop traffic is not a bandwidth estimate.
+    const double packets = double(received) + double(lost);
+    if (packets < 100)
+    {
+        congestedWindows_ = healthyNetworkWindows_ = 0;
+        return false;
+    }
+    const double loss = double(lost) / packets;
+    congestedWindows_ = loss >= 0.02 ? congestedWindows_ + 1 : 0;
+    healthyNetworkWindows_ = loss < 0.005 ? healthyNetworkWindows_ + 1 : 0;
+    const int current = profile().bitrate();
+    int next = current;
+    if (congestedWindows_ >= 2)
+        next = qMax(2000000, current * 85 / 100);
+    else if (healthyNetworkWindows_ >= 15 && bitrateLimit_ > 0)
+        next = qMin(profiles_.at(index_).bitrate(), current + qMax(100000, current / 20));
+    else
+        return false;
+    congestedWindows_ = healthyNetworkWindows_ = 0;
+    if (next == current)
+        return false;
+    bitrateLimit_ = next;
     return true;
 }
 } // namespace zjdesk

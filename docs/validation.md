@@ -1,5 +1,152 @@
 # 验证记录
 
+## 2026-10-09：正常客户端首帧空白修复
+
+现场 Windows 已入会并显示“正在接收对方屏幕”，但没有首帧。Windows 为用户手动关闭，未发现本次客户端崩溃证据。
+`build/normal-windows-media-debug.log` 确认 ICE / PeerConnection connected、媒体包到达，
+随后持续 `Dropping inter-frame before intra-frame` 与大量 expired NACKS，最终 15 秒启动超时。
+Linux 物理桌面为 1920×1080 / 60 Hz；只读采集探针首个 VA CQP 8 关键帧为 627988 字节，
+软件编码探针为 428021 字节。探针记录在 Linux `build/physical-va-frames.log` / `physical-sw-frames.log`。
+当前直连 UDP 缓冲生效值为 425984 字节；现场 UDP SndbufErrors 从之前的 376068 增至 513602。
+帧大小超过缓冲本身不能单独证明每次丢包，但与持续首帧缺失和发送错误一起构成此次修复依据。
+
+修复限定在屏幕传输：Linux 真实桌面发送在候选收集前仅启用 ICE-TCP，使用可靠传输和背压，
+测试源 / Windows 发送保留原候选策略；未实现自动回退或 UDP pacer。ShareStats 与界面显示实际 TCP / UDP。
+统计及接收端零帧 / 丢包反馈不再等待首帧。新增 `receiverReportsFeedbackBeforeFirstFrame`：
+修复前反馈断言失败，修复后 3 项零失败、3.046 秒；报告为 Linux `first-frame-before.txt` / `first-frame-after.txt`。
+
+双端最终 core / signaling / media 全部通过，Windows 总计 116.27 秒，Linux 109.91 秒。
+media 的物理摄像头与需显式开启的物理发送器默认跳过；后者另外实际执行，不将跳过当作验收。
+Windows 构建日志 `build/first-frame-final-windows-build.log`；Linux `build/first-frame-linux-ctest.log`。
+Linux TCP 桌面改动后的完整后台图形回归为 12 项通过、2 项显式跨机跳过、57.596 秒；
+确认双端选中 TCP、真实 OpenGL 呈现与小字误差检查通过。其后新增的物理桌面专用用例按下表单独跨机执行。
+
+物理桌面验证使用 Linux `zjdesk-media-tests physicalDesktopSenderWithoutWindow`，实际采集物理 X11 `:1`，
+不创建任何测试窗口；Windows 使用未切换的独立 Win32 桌面接收与实际 OpenGL 绘制。
+信令经本轮 SSH 18765 转发，媒体经实际跨机 ICE-TCP。连续停止 / 重开三次：
+
+| 次数 | Windows 首帧等待 | 传输 | 实际图像尺寸 |
+| --- | ---: | --- | --- |
+| 1 | 4937 ms | TCP | 1920×1080 |
+| 2 | 6369 ms | TCP | 1920×1080 |
+| 3 | 1380 ms | TCP | 1920×1080 |
+
+两端各 3 项零失败，Windows 31.709 秒、Linux 42.642 秒。验证实际解码、交付和呈现帧数为正，
+每次停止均清空画面。报告为 Windows `test-results/background-physical-tcp.txt` 与 Linux `test-results/physical-tcp-sender.txt`。
+该短测存在追赶帧与约 517 ms 最大解码输出间隔，不把某次瞬时超过 60 的计数称为稳定 60 fps。
+`physical-tcp-udp-before.txt` / `physical-tcp-udp-after.txt` 中 Linux UDP SndbufErrors 均为 513602，无新增。
+
+另行以隐藏 Xephyr / Win32 桌面回归远控：Linux 17.149 秒、Windows 9.911 秒，各 3 项零失败。
+通过首帧 TCP 断言、点击、文字 `zjdesk123`、滚轮、拖动、拒绝 / 允许、双方撤销、Ctrl 释放及退会 / 重入。
+报告为 Windows `test-results/background-tcp-input.txt` 与 Linux `test-results/hidden-fixture.txt`。
+未显示测试窗口、未改系统代理 / Clash / 路由 / sysctl / 防火墙，未绕过本地授权门禁。
+当前验证解决本次 Linux 画面启动问题；TCP 拥塞延迟、任意网络、Wayland 与持续稳定 1080p / 60 fps 仍未验收。
+修复版已部署并重新打开两端正常客户端；用户两端入会、Linux 共享后明确回复“已经显示画面”。
+Windows 构建 / 部署客户端 SHA256 均为 `4C30D8A7D4F2D3801C2C8AF6065C58F3C51377133C3FA1A94B68C34D7EFD065E`；
+Linux 构建 / 安装 ELF Build ID 均为 `9a7e9fbfec2056ec1d5bbbda37480b09c57a5c08`。
+本轮隐藏测试与 SSH 18765 转发已关闭，保留正常客户端与原信令服务。
+
+## 2026-10-09：高画质远控基础改造，稳定 60 fps 尚未验收通过
+
+本轮在原目录 `F:\projects\ZJdesk` 完成轻微有损 VP9 4:4:4、Linux VA 编码探测 / 软件回退、
+丢包预算反馈、RED / ULPFEC、会话 UDP 缓冲与 RTCP 反馈预算，以及映射帧交接。
+保留任务开始时已有的 24 fps 下限和逐档尺寸策略。未保留任何阻塞发包等待试验，未实现完整 GCC / 异步 pacer。
+ToDesk Windows 包的只读线索仅用于安排排查方向，不能证明其 Linux 管线、默认参数或实测表现。
+静态检查报告位于 `build/analysis/todesk-static-20261009/report.md`。
+
+### 最终构建与本机回归
+
+Windows 使用 Qt 6.8.3 / MSVC2022 x64 / GStreamer 1.26.11；Linux 为 Ubuntu 22.04 / GCC11、
+同版 Qt / GStreamer、libnice 0.1.22，Intel iHD 22.3.1 / libva 1.14。
+Linux 私有 GStreamer SDK 补充构建了 VA 插件；探测实际 `vavp9lpenc` profile 1 编码与尺寸切换后才启用。
+
+| 最终测试 | Windows | Linux |
+| --- | --- | --- |
+| core | 24 项，零失败，9.776 秒 | 24 项，零失败，0.014 秒 |
+| signaling | 9 项，零失败，3.567 秒 | 9 项，零失败，3.407 秒 |
+| media | 15 项，零失败，跳过 1 项，107.619 秒 | 15 项，零失败，跳过 1 项，102.750 秒 |
+| 后台图形回归 | 5 个相关用例，共 7 项，零失败，17.171 秒 | 完整界面回归，共 14 项，零失败，跳过 2 项，56.964 秒 |
+| 无 VA 插件的软件回退 | 软件编码由 Windows media 回归覆盖 | 全屏 / 恢复与文字细节共 4 项，零失败，2.188 秒 |
+
+项数包含初始化与清理。media 跳过物理摄像头；Linux 界面跳过需显式连接另一台机器的两个专用用例。
+两端非 GUI CTest 总耗时分别为 121.16 / 106.21 秒。
+新回归覆盖映射图像跨三次管线重启仍有效、写图像时分离、旧档位反馈拒绝、实际编码预算变化、
+硬编 QP 调整、SDP 中 NACK / RTX / RED / ULPFEC，以及不重建连接的尺寸降低与恢复。
+
+Windows 图形测试在未切换的独立 Win32 桌面中运行，仅执行全屏恢复、黑边 / 失焦释放、入退会、
+小窗口 / 长昵称和本地预览五项，不将其称为物理 Windows 桌面采集的完整验收。
+Linux 使用未映射父窗口中的 Xephyr `:77`、独立 Openbox 和实际 OpenGL / X11 采集；
+父窗口状态为 `IsUnMapped`。未使用 offscreen 或 Xvfb，未显示测试窗口到用户活动桌面。
+软件回退检查使用私有插件目录排除 `libgstva.so`，没有卸载或修改系统插件。
+
+Linux 本机回环结果如下，不能当作 Windows 接收端或物理桌面的性能结果：
+
+| 模式 | 编码 fps | 解码 fps | 显示 fps | 最终目标 |
+| --- | ---: | ---: | ---: | ---: |
+| 固定 30 | 30.05 | 30.05 | 29.98 | 30 |
+| 固定 60 | 60.11 | 51.22 | 51.08 | 60 |
+| 自动 | 50.00 | 49.01 | 49.13 | 50 |
+
+硬编文字区域 RGB 平均通道误差 0.978、最大 5；软件回退平均 1.005、最大 6。
+允许的轻微有损预算为平均小于 2、最大不超过 24，来自独立量化参数对照；仍检查原生像素尺寸。
+CBR 硬编在当前驱动的小字误差较大，最终使用 CQP 8～16；这不是线路码率硬上限。
+Windows profile 1 仍使用软件解码，RGB 转换和 OpenGL 上传仍存在，不能称为端到端 GPU 零拷贝。
+
+### 跨机结果与失败记录
+
+Windows `10.11.48.34` 控制 Linux `10.11.47.137`，两端使用 WLAN；信令经仅本轮创建的 SSH 转发访问，
+媒体为实际 WebRTC 直连 UDP。Linux 采集上述隐藏 X11 桌面，Windows 在隐藏 Win32 桌面实际呈现。
+接收缓冲保持 200 ms，保留原生 4:4:4 像素的验收断言。
+
+- 加入 UDP 缓冲与 FEC 后的一次完整跨机通过：30 秒平均编码 60.04、解码 60.00、显示 60.10 fps；
+  累计丢包为 0，Linux UDP SndbufErrors 增量为 0。480 列单像素彩线平均误差 0.700、最大 4；
+  随后 60 秒共 228 次采样，零异常、227 次更新。但后段出现 60 / 50 fps 两种目标，不能称为全程稳定 60。
+  12 次点击的画面反馈中位数 63.24 ms、最大 143.08 ms。此轮尚未加入最终 RTCP 预算设置。
+- 相同产品配置复跑失败：30 秒平均编码 42.52、解码 35.46、显示 34.34 fps，丢包从 106 增至 220，
+  解码输出最大间隔 880 ms，随后降到 1600×900，原生尺寸断言失败。一次通过不足以证明持续稳定。
+- 逐包按平均码率等待、允许 64 KiB 突发的平均码率调度、40 Mbps 峰值限制三个候选均未通过跨机高清验收，
+  已全部撤回；实验代码和报告仅保存在忽略目录，产品管线没有加入 sleep 或阻塞式 pacer。
+- 重传跟踪实际观察到请求至到达约 466 ms，以及更长迟到；RTCP 日志存在反馈被几百毫秒的调度间隔抑制。
+  单改 `rtcp-min-interval` 在 SAVPF 中无效，已撤回；明确 64 kbps 反馈预算后，调度日志约 16～25 ms。
+  这是调度改善的证据，不能当作最终重传耗时或稳定帧率的保证。
+- 最终代码关闭额外 GStreamer 调试后复测仍未通过高清性能验收：30 秒平均编码 50.02、解码 47.79、
+  显示 46.78 fps，目标依次出现 60 / 50 / 45；这段保持 1920×1080，累计丢包由 0 增至 15，
+  解码最大输出间隔 557 ms。480 列彩线平均误差 0.682、最大 4；12 次点击反馈中位数 78.02 ms、最大 142.51 ms。
+  后续持续采样时仍降到 1600×900，95.270 秒处原生尺寸断言失败，未产生本轮完整 60 秒画质报告。
+
+Linux 独立 ICMP 探测曾出现约 909 ms 往返，1500 字节不分片探测能通过；最终跨机过程 UDP
+SndbufErrors 从 376068 到 376068，增量为 0。说明发送 socket 缓冲错误已非该轮全部迟到的解释，
+不能因此排除应用传输问题，也不能把所有网络波动算成编码性能问题。未改 sysctl、系统代理、Clash 或路由。
+本轮未通过“持续稳定原生 1080p / 60 fps”验收，后续需要可控链路与重复实验，再验证完整拥塞控制和异步发送调度。
+
+原始产物：`build/stability-boundary-final-build.log`、`build/windows-release/test-results/`、
+`build/analysis/stability-20261009/`；Linux 对应 `build/stability-boundary-final-build.log`、
+`build/linux-release/test-results/hidden-all.txt`、`hidden-software.txt`。
+最终高清失败快照为 `build/analysis/stability-20261009/final-capacity-failed/`；
+其中 summary 将早于本轮帧率报告的旧画质文件标记为 stale，不作为本轮通过证据。
+
+另行关闭高清 / 延迟附加采样，计数边界修复后的跨机功能回归两端各 3 项通过，Windows 20.231 秒、Linux 26.927 秒。
+实际验证点击、文字输入、滚轮、拖动、拒绝 / 允许、双方撤销、Ctrl 释放及退会 / 重入；
+这次通过用于证明远控功能和清理流程，不作为稳定 60 fps 或持续高清的证据。
+报告为 `build/windows-release/test-results/background-boundary-final-input.xml` 及 Linux `hidden-fixture.txt`。
+
+收尾用 UBSan 复现首次 RTP 计数为 qint64 上限时与初始 -1 相减的有符号溢出，
+已将初始差计算的基数限制为非负，并扩充现有计数复位用例；修复后同一 UBSan 探针零报错。
+该探针与修复前 / 后输出在 `build/analysis/stability-20261009/counter-boundary*`，不改变普通 RTP 计数下的档位策略。
+图形与性能采样在该极端计数保护修复前完成；修复后重新完整构建、部署并通过双端 core / signaling / media。
+
+### 部署与剩余范围
+
+Windows 已通过 `build.ps1 -Preset windows-release -Deploy` 更新 `dist/windows-release`，
+构建 / 部署客户端 SHA256 均为 `D1E616754A3DD1078B4A5D22CC9EECCBC1E64785DFE80BF37D9A93BD2F212254`。
+Linux 已安装到原项目 `dist/linux-release`；构建 / 安装 ELF Build ID 均为
+`4442beca990a6147019443603e26794d70aa35ff`，安装时改变 RPATH，两个整文件 SHA256 因此不同。
+旧 Linux 部署客户端备份为 `build/backups/stability-20261009/zjdesk-before-final-install`。
+没有启动或显示正常客户端。安装成功不代表干净电脑运行、物理桌面采集、任意 GPU / 网络或长期稳定性已验收。
+公网 / TURN、Wayland、硬件解码、全程 GPU 纹理传递、物理摄像头与声音仍未验收。
+本轮测试进程、Xephyr / Openbox 与 SSH 18765 转发已清理；已有信令服务保留，
+最后观测为远控未开启、共享已停止、Ctrl 未按住。
+
 ## 0.4.5：2026-10-07 同步回主目录
 
 按用户要求，后续工作使用 `F:\projects\ZJdesk`（分支 `ZJ-desk`）。同步前两目录 HEAD 相同，

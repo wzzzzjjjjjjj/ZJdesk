@@ -45,6 +45,8 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
                 shareDetail_ += QStringLiteral(" · 对方 %1 fps").arg(stats.peerFps, 0, 'f', 1);
             if (receivingScreen_ && stats.presentedFps >= 0)
                 shareDetail_ += QStringLiteral(" · 显示 %1 fps").arg(stats.presentedFps, 0, 'f', 1);
+            if (!stats.transport.isEmpty())
+                shareDetail_ += QStringLiteral(" · %1").arg(stats.transport);
             emit shareChanged();
         }
     });

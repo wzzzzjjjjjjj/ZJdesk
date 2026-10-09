@@ -25,6 +25,23 @@ struct ShareStats
     qint64 packetsLost = -1;
     double jitterMs = -1;
     double webRtcRttMs = -1;
+    int encoderBitrate = 0; // Software bitrate target; hardware CQP uses this as a feedback budget, not a wire cap.
+    int encoderQuantizer = -1;
+    int sendBufferBytes = -1;
+    int receiveBufferBytes = -1;
+    int rtcpFeedbackBudget = -1;
+    quint64 maxEncodedFrameBytes = 0;
+    quint64 maxKeyframeBytes = 0;
+    quint64 keyframes = 0;
+    double codecMeanMs = -1;
+    double codecMaxMs = -1;
+    double outputGapMaxMs = -1;
+    double copyMaxMs = -1;
+    quint64 overwrittenFrames = 0;
+    QString codec;
+    QString codecFallbackReason;
+    QString transport;
+    bool hardwareEncoder = false;
 };
 
 struct ShareMailbox

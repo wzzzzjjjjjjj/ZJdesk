@@ -5,14 +5,24 @@
 #include <QGuiApplication>
 #include <QScreen>
 #include <QJsonDocument>
+#include <QHash>
 #include <atomic>
 #include <functional>
 #include <memory>
 #ifdef ZJDESK_HAS_GSTREAMER
+#ifdef Q_OS_WIN
+#include <winsock2.h>
+#else
+#include <sys/socket.h>
+#endif
 #define GST_USE_UNSTABLE_API
 #include <gst/app/gstappsink.h>
 #include <gst/video/video.h>
 #include <gst/webrtc/webrtc.h>
+#pragma push_macro("signals")
+#undef signals
+#include <agent.h>
+#pragma pop_macro("signals")
 #endif
 
 namespace zjdesk
@@ -63,7 +73,7 @@ public:
         }
         sender_ = sender;
         automatic_ = targetFps == 0;
-        quality_ = ShareQuality(nativeSize, maximumFps);
+        quality_ = ShareQuality(nativeSize, automatic_ ? maximumFps : targetFps);
         profile_ = quality_.profile();
         if (!automatic_)
             profile_.fps = targetFps;
@@ -80,11 +90,24 @@ public:
         networkMbps_ = jitterMs_ = webRtcRttMs_ = -1;
         packetsReceived_ = packetsLost_ = -1;
         statsPending_ = false;
+        sendBufferBytes_ = receiveBufferBytes_ = -1;
+        transport_.clear();
+        rtcpFeedbackBudget_ = -1;
+        {
+            QMutexLocker lock(&codecMutex_);
+            codecInputs_.clear();
+            codecWindow_ = {};
+            codecTotalMs_ = 0;
+            codecSamples_ = 0;
+            lastCodecOutputNs_ = 0;
+        }
+        copyMaxMs_ = -1;
         remoteReady_ = running_ = firstFrame_ = false;
         pendingIce_.clear();
         QString description;
         if (sender)
         {
+            selectEncoder();
             QString capture;
             if (source == "test")
                 capture = "videotestsrc is-live=true pattern=ball ! "
@@ -104,16 +127,14 @@ public:
             }
 #endif
             description = capture + QString("videoscale add-borders=false ! "
-                "capsfilter name=quality caps=\"video/x-raw,width=%1,height=%2,framerate=%3/1,pixel-aspect-ratio=1/1\" ! ")
-                .arg(profile_.size.width()).arg(profile_.size.height()).arg(targetFps_) + "tee name=split "
+                "capsfilter name=quality caps=\"video/x-raw,width=%1,height=%2,framerate=%3/1,pixel-aspect-ratio=1/1%4\" ! ")
+                .arg(profile_.size.width()).arg(profile_.size.height()).arg(targetFps_)
+                .arg(hardwareEncoder_ ? ",format=RGB" : "") + "tee name=split "
                 "split. ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! "
                 "videoconvert ! video/x-raw,format=RGB ! "
                 "appsink name=frames max-buffers=1 drop=true sync=false wait-on-eos=false "
-                "split. ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! "
-                "videoconvert ! video/x-raw,format=Y444,colorimetry=1:3:5:1 ! "
-                "vp9enc name=encoder deadline=1 cpu-used=8 threads=4 row-mt=true tile-columns=2 lag-in-frames=0 "
-                "min-quantizer=0 max-quantizer=0 "
-                "target-bitrate=8000000 keyframe-max-dist=60 ! "
+                "split. ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! " +
+                encoderPipeline() + " ! video/x-vp9,profile=(string)1 ! " +
                 "rtpvp9pay pt=96 picture-id-mode=15-bit ! "
                 "application/x-rtp,media=video,encoding-name=VP9,payload=96 ! "
                 "webrtcbin name=rtc bundle-policy=max-bundle";
@@ -141,6 +162,39 @@ public:
             return;
         }
         rtc_ = gst_bin_get_by_name(GST_BIN(pipeline_), "rtc");
+        g_signal_connect_data(rtc_, "deep-element-added", G_CALLBACK(configureRtcp),
+            new ShareCallback{guard_, epoch, {}}, destroySignal, GConnectFlags(0));
+        auto *elements = gst_bin_iterate_recurse(GST_BIN(rtc_));
+        GValue element = G_VALUE_INIT;
+        ShareCallback callback{guard_, epoch, {}};
+        while (gst_iterator_next(elements, &element) == GST_ITERATOR_OK)
+        {
+            configureRtcp(nullptr, nullptr, GST_ELEMENT(g_value_get_object(&element)), &callback);
+            g_value_reset(&element);
+        }
+        g_value_unset(&element);
+        gst_iterator_free(elements);
+        GObject *ice = nullptr;
+        g_object_get(rtc_, "ice-agent", &ice, nullptr);
+        if (ice && g_object_class_find_property(G_OBJECT_GET_CLASS(ice), "agent"))
+        {
+            NiceAgent *agent = nullptr;
+            g_object_get(ice, "agent", &agent, nullptr);
+            if (agent)
+            {
+#ifdef Q_OS_LINUX
+                // Desktop keyframes exceed the effective UDP send buffer on this host.
+                // ICE-TCP provides backpressure and reliable delivery without blocking capture.
+                if (sender && source != "test")
+                    g_object_set(agent, "ice-udp", FALSE, "ice-tcp", TRUE, nullptr);
+#endif
+                g_signal_connect_data(agent, "new-selected-pair-full", G_CALLBACK(selectedPair),
+                    new ShareCallback{guard_, epoch, {}}, destroySignal, GConnectFlags(0));
+                g_object_unref(agent);
+            }
+        }
+        if (ice)
+            g_object_unref(ice);
         g_signal_connect(rtc_, "on-new-transceiver", G_CALLBACK(configureTransceiver), nullptr);
         GArray *transceivers = nullptr;
         g_signal_emit_by_name(rtc_, "get-transceivers", &transceivers);
@@ -153,15 +207,55 @@ public:
         sink_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "frames"));
         bus_ = gst_element_get_bus(pipeline_);
         auto *codec = gst_bin_get_by_name(GST_BIN(pipeline_), sender ? "encoder" : "decoder");
-        if (sender)
+        if (sender && !hardwareEncoder_)
             g_object_set(codec, "threads", guint(qBound(1, QThread::idealThreadCount() / 2, 8)),
-                "target-bitrate", profile_.bitrate(), nullptr);
+                "target-bitrate", profile_.bitrate(), "keyframe-max-dist", targetFps_ * 5, nullptr);
+        auto *inputPad = gst_element_get_static_pad(codec, "sink");
+        gst_pad_add_probe(inputPad, GST_PAD_PROBE_TYPE_BUFFER,
+            [](GstPad *, GstPadProbeInfo *info, gpointer data) {
+                auto *worker = static_cast<ScreenShareWorker *>(data);
+                const auto pts = GST_BUFFER_PTS(GST_PAD_PROBE_INFO_BUFFER(info));
+                QMutexLocker lock(&worker->codecMutex_);
+                if (worker->codecInputs_.size() >= 64)
+                    worker->codecInputs_.clear();
+                if (GST_CLOCK_TIME_IS_VALID(pts))
+                    worker->codecInputs_.insert(pts, gst_util_get_timestamp());
+                return GST_PAD_PROBE_OK;
+            }, this, nullptr);
+        gst_object_unref(inputPad);
         auto *codecPad = gst_element_get_static_pad(codec, "src");
         gst_pad_add_probe(codecPad, GST_PAD_PROBE_TYPE_BUFFER,
-            [](GstPad *, GstPadProbeInfo *, gpointer data) {
-                static_cast<std::atomic<quint64> *>(data)->fetch_add(1, std::memory_order_relaxed);
+            [](GstPad *, GstPadProbeInfo *info, gpointer data) {
+                auto *worker = static_cast<ScreenShareWorker *>(data);
+                worker->processedFrames_.fetch_add(1, std::memory_order_relaxed);
+                auto *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+                const auto now = gst_util_get_timestamp();
+                QMutexLocker lock(&worker->codecMutex_);
+                auto &window = worker->codecWindow_;
+                if (worker->lastCodecOutputNs_)
+                    window.outputGapMaxMs = qMax(window.outputGapMaxMs, (now - worker->lastCodecOutputNs_) / 1e6);
+                worker->lastCodecOutputNs_ = now;
+                const auto input = worker->codecInputs_.find(GST_BUFFER_PTS(buffer));
+                if (input != worker->codecInputs_.end())
+                {
+                    const double elapsed = (now - input.value()) / 1e6;
+                    worker->codecTotalMs_ += elapsed;
+                    ++worker->codecSamples_;
+                    window.codecMaxMs = qMax(window.codecMaxMs, elapsed);
+                    worker->codecInputs_.erase(input);
+                }
+                if (worker->sender_)
+                {
+                    const auto bytes = quint64(gst_buffer_get_size(buffer));
+                    window.maxEncodedFrameBytes = qMax(window.maxEncodedFrameBytes, bytes);
+                    if (!GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT))
+                    {
+                        ++window.keyframes;
+                        window.maxKeyframeBytes = qMax(window.maxKeyframeBytes, bytes);
+                    }
+                }
                 return GST_PAD_PROBE_OK;
-            }, &processedFrames_, nullptr);
+            }, this, nullptr);
         gst_object_unref(codecPad);
         gst_object_unref(codec);
         g_signal_connect_data(rtc_, "on-ice-candidate", G_CALLBACK(iceCandidate),
@@ -238,6 +332,17 @@ public:
             {
                 peerFps_ = payload.value("fps").toDouble();
                 feedbackClock_.restart();
+                if (quality_.observeNetwork(payload.value("packetsReceived").toInteger(-1),
+                        payload.value("packetsLost").toInteger(-1)))
+                {
+                    profile_ = quality_.profile();
+                    auto *encoder = gst_bin_get_by_name(GST_BIN(pipeline_), "encoder");
+                    if (hardwareEncoder_)
+                        g_object_set(encoder, "qp", guint(hardwareQuantizer()), nullptr);
+                    else
+                        g_object_set(encoder, "target-bitrate", profile_.bitrate(), nullptr);
+                    gst_object_unref(encoder);
+                }
             }
             return;
         }
@@ -382,6 +487,121 @@ private:
             g_signal_connect_data(channel, signal.first, signal.second,
                 new ShareCallback(callback), destroySignal, GConnectFlags(0));
     }
+    static void configureRtcp(GstBin *, GstBin *, GstElement *element, gpointer data)
+    {
+        auto *factory = gst_element_get_factory(element);
+        if (!factory || QByteArray(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory))) != "rtpsession")
+            return;
+        // A receive-only session's automatic RTCP budget can start at 3.2 kbps,
+        // delaying repeated NACKs beyond the 200 ms jitter deadline.
+        g_object_set(element, "rtcp-fraction", 64000.0, nullptr);
+        double budget = 0;
+        g_object_get(element, "rtcp-fraction", &budget, nullptr);
+        queue(*static_cast<ShareCallback *>(data), [budget](auto *worker) {
+            worker->rtcpFeedbackBudget_ = int(budget);
+        });
+    }
+    static void selectedPair(NiceAgent *agent, guint stream, guint component,
+        NiceCandidate *local, NiceCandidate *, gpointer data)
+    {
+        const auto retained = std::shared_ptr<NiceAgent>(NICE_AGENT(g_object_ref(agent)),
+            [](NiceAgent *value) { g_object_unref(value); });
+        const auto transport = local->transport == NICE_CANDIDATE_TRANSPORT_UDP ? QString("UDP") : QString("TCP");
+        queue(*static_cast<ShareCallback *>(data), [retained, stream, component, transport](auto *worker) {
+            worker->transport_ = transport;
+            // Only this session's selected direct UDP socket; never change system-wide limits.
+            auto *socket = nice_agent_get_selected_socket(retained.get(), stream, component);
+            if (!socket)
+                return;
+            for (const int option : {SO_SNDBUF, SO_RCVBUF})
+            {
+                GError *error = nullptr;
+                g_socket_set_option(socket, SOL_SOCKET, option, 1024 * 1024, &error);
+                g_clear_error(&error);
+            }
+            g_socket_get_option(socket, SOL_SOCKET, SO_SNDBUF, &worker->sendBufferBytes_, nullptr);
+            g_socket_get_option(socket, SOL_SOCKET, SO_RCVBUF, &worker->receiveBufferBytes_, nullptr);
+            g_object_unref(socket);
+        });
+    }
+    int hardwareQuantizer() const
+    {
+        auto unconstrained = profile_;
+        unconstrained.bitrateLimit = 0;
+        return 8 + qBound(0, (unconstrained.bitrate() - profile_.bitrate()) * 8 / unconstrained.bitrate(), 8);
+    }
+    QString encoderPipeline() const
+    {
+        if (hardwareEncoder_)
+            return QString("videoconvert ! video/x-raw,format=VUYA,colorimetry=1:3:5:1 ! "
+                "vavp9lpenc name=encoder rate-control=cqp qp=%1 min-qp=8 max-qp=16 "
+                "hierarchical-level=1 gf-group-size=1 key-int-max=%2 target-usage=4 "
+                "min-force-key-unit-interval=500000000")
+                .arg(hardwareQuantizer())
+                .arg(qMin(1024, profile_.fps * 5));
+        return QString("videoconvert ! video/x-raw,format=Y444,colorimetry=1:3:5:1 ! "
+            "vp9enc name=encoder deadline=1 cpu-used=8 threads=4 row-mt=true tile-columns=2 lag-in-frames=0 "
+            "end-usage=cbr min-quantizer=0 max-quantizer=8 "
+            "buffer-size=300 buffer-initial-size=150 buffer-optimal-size=150 max-intra-bitrate=1000 "
+            "min-force-key-unit-interval=500000000 target-bitrate=%1 keyframe-max-dist=%2")
+            .arg(profile_.bitrate()).arg(profile_.fps * 5);
+    }
+    void selectEncoder()
+    {
+        hardwareEncoder_ = false;
+        codecFallbackReason_.clear();
+#ifdef Q_OS_LINUX
+        auto *factory = gst_element_factory_find("vavp9lpenc");
+        if (!factory)
+        {
+            codecFallbackReason_ = QStringLiteral("未安装 VA-API VP9 编码插件，使用软件 4:4:4 编码");
+            return;
+        }
+        gst_object_unref(factory);
+        hardwareEncoder_ = true;
+        const auto input = [&](const QSize &size) {
+            return QString("videotestsrc num-buffers=2 ! "
+                "video/x-raw,format=RGB,width=%1,height=%2,framerate=%3/1 ! ")
+                .arg(size.width()).arg(size.height()).arg(profile_.fps);
+        };
+        // RGB input makes the converter allocate fresh VA-backed VUYA buffers on caps changes,
+        // avoiding the encoder's stale internal upload pool. Prove downscaling before selecting it.
+        const auto description = automatic_
+            ? "concat name=probe ! identity drop-allocation=true ! " + encoderPipeline()
+                + " ! video/x-vp9,profile=(string)1 ! fakesink "
+                + input(profile_.size) + "probe. "
+                + input(QSize(qMax(2, profile_.size.width() / 4 * 2), qMax(2, profile_.size.height() / 4 * 2))) + "probe."
+            : input(profile_.size) + encoderPipeline() + " ! video/x-vp9,profile=(string)1 ! fakesink";
+        GError *error = nullptr;
+        auto *probe = gst_parse_launch(description.toUtf8().constData(), &error);
+        bool ready = false;
+        if (probe && !error)
+        {
+            auto *bus = gst_element_get_bus(probe);
+            if (gst_element_set_state(probe, GST_STATE_PLAYING) != GST_STATE_CHANGE_FAILURE)
+            {
+                auto *message = gst_bus_timed_pop_filtered(bus, 2 * GST_SECOND,
+                    GstMessageType(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+                ready = message && GST_MESSAGE_TYPE(message) == GST_MESSAGE_EOS;
+                if (message)
+                    gst_message_unref(message);
+            }
+            gst_object_unref(bus);
+        }
+        if (probe)
+        {
+            gst_element_set_state(probe, GST_STATE_NULL);
+            gst_object_unref(probe);
+        }
+        if (error)
+            g_error_free(error);
+        hardwareEncoder_ = ready;
+        if (!ready)
+            codecFallbackReason_ = automatic_
+                ? QStringLiteral("VA-API VP9 4:4:4 启动或尺寸切换探测失败，使用软件编码")
+                : QStringLiteral("VA-API VP9 4:4:4 启动探测失败，使用软件编码");
+#endif
+    }
     void announceProfile()
     {
         emit negotiationReady(epoch_, "share", {{"action", "profile"}, {"revision", revision_},
@@ -399,11 +619,17 @@ private:
         auto *caps = gst_caps_new_simple("video/x-raw", "width", G_TYPE_INT, profile_.size.width(),
             "height", G_TYPE_INT, profile_.size.height(), "framerate", GST_TYPE_FRACTION, profile_.fps, 1,
             "pixel-aspect-ratio", GST_TYPE_FRACTION, 1, 1, nullptr);
+        if (hardwareEncoder_)
+            gst_caps_set_simple(caps, "format", G_TYPE_STRING, "RGB", nullptr);
         g_object_set(filter, "caps", caps, nullptr);
         gst_caps_unref(caps);
         gst_object_unref(filter);
         auto *encoder = gst_bin_get_by_name(GST_BIN(pipeline_), "encoder");
-        g_object_set(encoder, "target-bitrate", profile_.bitrate(), nullptr);
+        if (hardwareEncoder_)
+            g_object_set(encoder, "qp", guint(hardwareQuantizer()),
+                "key-int-max", guint(qMin(1024, profile_.fps * 5)), nullptr);
+        else
+            g_object_set(encoder, "target-bitrate", profile_.bitrate(), "keyframe-max-dist", profile_.fps * 5, nullptr);
         gst_object_unref(encoder);
         ++revision_;
         peerFps_ = -1;
@@ -413,7 +639,8 @@ private:
     }
     static void configureTransceiver(GstElement *, GstWebRTCRTPTransceiver *transceiver, gpointer)
     {
-        g_object_set(transceiver, "do-nack", TRUE, nullptr);
+        g_object_set(transceiver, "do-nack", TRUE,
+            "fec-type", GST_WEBRTC_FEC_TYPE_ULP_RED, "fec-percentage", guint(20), nullptr);
     }
     static void incomingPad(GstElement *, GstPad *pad, gpointer data)
     {
@@ -627,20 +854,31 @@ private:
         if (auto *sample = gst_app_sink_try_pull_sample(sink_, 0))
         {
             GstVideoInfo info;
-            GstVideoFrame frame;
+            auto frame = std::make_unique<GstVideoFrame>();
             if (gst_video_info_from_caps(&info, gst_sample_get_caps(sample))
-                && gst_video_frame_map(&frame, &info, gst_sample_get_buffer(sample), GST_MAP_READ))
+                && gst_video_frame_map(frame.get(), &info, gst_sample_get_buffer(sample), GST_MAP_READ))
             {
-                const QImage image(static_cast<const uchar *>(GST_VIDEO_FRAME_PLANE_DATA(&frame, 0)),
-                    info.width, info.height, GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0), QImage::Format_RGB888);
+                // The map retains the GstBuffer until the last implicitly shared QImage is released.
+                QImage image(static_cast<const uchar *>(GST_VIDEO_FRAME_PLANE_DATA(frame.get(), 0)),
+                    info.width, info.height, GST_VIDEO_FRAME_PLANE_STRIDE(frame.get(), 0), QImage::Format_RGB888,
+                    [](void *data) {
+                        auto *mapped = static_cast<GstVideoFrame *>(data);
+                        gst_video_frame_unmap(mapped);
+                        delete mapped;
+                    }, frame.get());
+                frame.release();
+                size_ = image.size();
+                copyMaxMs_ = 0;
                 {
                     QMutexLocker lock(&mailbox_->mutex);
                     if (mailbox_->epoch == epoch_)
-                        mailbox_->image = image.copy();
+                    {
+                        if (!mailbox_->image.isNull())
+                            ++mailbox_->stats.overwrittenFrames;
+                        mailbox_->image = std::move(image);
+                    }
                 }
-                size_ = image.size();
                 firstFrame_ = true;
-                gst_video_frame_unmap(&frame);
             }
             gst_sample_unref(sample);
         }
@@ -657,16 +895,47 @@ private:
                 .arg(sender_ ? QStringLiteral("正在共享主屏幕") : QStringLiteral("正在接收对方屏幕"))
                 .arg(size_.width()).arg(size_.height()).arg(targetFps_));
         }
-        if (running_ && statisticsClock_.elapsed() >= 1000)
+        // Loss and zero decoded FPS must reach the sender even while waiting for the first keyframe.
+        if (statisticsClock_.elapsed() >= 1000)
         {
             const double seconds = statisticsClock_.restart() / 1000.0;
             const auto processed = processedFrames_.load(std::memory_order_relaxed);
             ShareStats stats;
             {
+                QMutexLocker lock(&codecMutex_);
+                stats = codecWindow_;
+                if (codecSamples_)
+                    stats.codecMeanMs = codecTotalMs_ / codecSamples_;
+                codecWindow_ = {};
+                codecTotalMs_ = 0;
+                codecSamples_ = 0;
+            }
+            int quantizer = -1;
+            if (sender_ && hardwareEncoder_)
+            {
+                auto *encoder = gst_bin_get_by_name(GST_BIN(pipeline_), "encoder");
+                guint actual = 0;
+                g_object_get(encoder, "qp", &actual, nullptr);
+                quantizer = int(actual);
+                gst_object_unref(encoder);
+            }
+            {
                 QMutexLocker lock(&mailbox_->mutex);
                 if (mailbox_->epoch != epoch_)
                     return;
-                stats = mailbox_->stats;
+                stats.deliveredFrames = mailbox_->stats.deliveredFrames;
+                stats.presentedFps = mailbox_->stats.presentedFps;
+                stats.overwrittenFrames = mailbox_->stats.overwrittenFrames;
+                stats.copyMaxMs = copyMaxMs_;
+                stats.encoderBitrate = sender_ ? profile_.bitrate() : 0;
+                stats.sendBufferBytes = sendBufferBytes_;
+                stats.receiveBufferBytes = receiveBufferBytes_;
+                stats.rtcpFeedbackBudget = rtcpFeedbackBudget_;
+                stats.encoderQuantizer = quantizer;
+                stats.hardwareEncoder = sender_ && hardwareEncoder_;
+                stats.codec = sender_ && hardwareEncoder_ ? "vavp9lpenc / VP9 profile 1" : sender_ ? "vp9enc / VP9 profile 1" : "vp9dec";
+                stats.codecFallbackReason = sender_ ? codecFallbackReason_ : QString();
+                stats.transport = transport_;
                 stats.size = size_;
                 stats.intervalSeconds = seconds;
                 stats.targetFps = targetFps_;
@@ -681,7 +950,9 @@ private:
                 stats.jitterMs = jitterMs_;
                 stats.webRtcRttMs = webRtcRttMs_;
                 mailbox_->stats = stats;
+                mailbox_->stats.overwrittenFrames = 0;
             }
+            copyMaxMs_ = -1;
             previousProcessed_ = processed;
             previousDelivered_ = stats.deliveredFrames;
             emit statisticsReady(epoch_, stats);
@@ -699,7 +970,8 @@ private:
                 double actual = qMin(stats.processedFps, stats.deliveredFps);
                 if (stats.presentedFps >= 0)
                     actual = qMin(actual, stats.presentedFps);
-                emit negotiationReady(epoch_, "share", {{"action", "stats"}, {"revision", revision_}, {"fps", actual}});
+                emit negotiationReady(epoch_, "share", {{"action", "stats"}, {"revision", revision_}, {"fps", actual},
+                    {"packetsReceived", stats.packetsReceived}, {"packetsLost", stats.packetsLost}});
             }
         }
         if (!running_ && startup_.elapsed() > 15000)
@@ -723,6 +995,15 @@ private:
     QSize size_;
     int targetFps_ = 60;
     std::atomic<quint64> processedFrames_{0};
+    bool hardwareEncoder_ = false;
+    QString codecFallbackReason_;
+    QMutex codecMutex_;
+    QHash<quint64, quint64> codecInputs_;
+    ShareStats codecWindow_;
+    double codecTotalMs_ = 0;
+    quint64 codecSamples_ = 0;
+    quint64 lastCodecOutputNs_ = 0;
+    double copyMaxMs_ = -1;
     quint64 previousProcessed_ = 0;
     quint64 previousDelivered_ = 0;
     QElapsedTimer statisticsClock_;
@@ -741,6 +1022,10 @@ private:
     double jitterMs_ = -1;
     double webRtcRttMs_ = -1;
     bool statsPending_ = false;
+    int sendBufferBytes_ = -1;
+    int receiveBufferBytes_ = -1;
+    int rtcpFeedbackBudget_ = -1;
+    QString transport_;
 #endif
     ShareMailbox *mailbox_;
 };

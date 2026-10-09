@@ -7,6 +7,7 @@ if(WIN32)
     find_path(GStreamer_INCLUDE_DIR gst/gst.h PATHS "${GST_ROOT}/include/gstreamer-1.0" NO_DEFAULT_PATH)
     find_path(GStreamer_GLIB_INCLUDE_DIR glib.h PATHS "${GST_ROOT}/include/glib-2.0" NO_DEFAULT_PATH)
     find_path(GStreamer_GLIB_CONFIG_DIR glibconfig.h PATHS "${GST_ROOT}/lib/glib-2.0/include" NO_DEFAULT_PATH)
+    find_path(GStreamer_NICE_INCLUDE_DIR agent.h PATHS "${GST_ROOT}/include/nice" NO_DEFAULT_PATH)
     find_library(GStreamer_LIBRARY NAMES gstreamer-1.0 libgstreamer-1.0 PATHS "${GST_ROOT}/lib" NO_DEFAULT_PATH)
     find_library(GStreamer_GLIB_LIBRARY NAMES glib-2.0 libglib-2.0 PATHS "${GST_ROOT}/lib" NO_DEFAULT_PATH)
     find_library(GStreamer_GOBJECT_LIBRARY NAMES gobject-2.0 libgobject-2.0 PATHS "${GST_ROOT}/lib" NO_DEFAULT_PATH)
@@ -14,6 +15,8 @@ if(WIN32)
     find_library(GStreamer_VIDEO_LIBRARY NAMES gstvideo-1.0 PATHS "${GST_ROOT}/lib" NO_DEFAULT_PATH)
     find_library(GStreamer_WEBRTC_LIBRARY NAMES gstwebrtc-1.0 PATHS "${GST_ROOT}/lib" NO_DEFAULT_PATH)
     find_library(GStreamer_SDP_LIBRARY NAMES gstsdp-1.0 PATHS "${GST_ROOT}/lib" NO_DEFAULT_PATH)
+    find_library(GStreamer_NICE_LIBRARY NAMES nice PATHS "${GST_ROOT}/lib" NO_DEFAULT_PATH)
+    find_library(GStreamer_GIO_LIBRARY NAMES gio-2.0 PATHS "${GST_ROOT}/lib" NO_DEFAULT_PATH)
     if(EXISTS "${GStreamer_INCLUDE_DIR}/gst/gstversion.h")
         file(STRINGS "${GStreamer_INCLUDE_DIR}/gst/gstversion.h" version_lines REGEX "^#define GST_VERSION_(MAJOR|MINOR|MICRO)")
         foreach(part MAJOR MINOR MICRO)
@@ -26,16 +29,17 @@ if(WIN32)
     find_package_handle_standard_args(GStreamer REQUIRED_VARS GStreamer_INCLUDE_DIR
         GStreamer_GLIB_INCLUDE_DIR GStreamer_GLIB_CONFIG_DIR GStreamer_LIBRARY
         GStreamer_GLIB_LIBRARY GStreamer_GOBJECT_LIBRARY GStreamer_APP_LIBRARY
-        GStreamer_VIDEO_LIBRARY GStreamer_WEBRTC_LIBRARY GStreamer_SDP_LIBRARY VERSION_VAR GStreamer_VERSION)
+        GStreamer_VIDEO_LIBRARY GStreamer_WEBRTC_LIBRARY GStreamer_SDP_LIBRARY
+        GStreamer_NICE_INCLUDE_DIR GStreamer_NICE_LIBRARY GStreamer_GIO_LIBRARY VERSION_VAR GStreamer_VERSION)
     if(GStreamer_FOUND AND NOT TARGET GStreamer::GStreamer)
         add_library(GStreamer::GStreamer INTERFACE IMPORTED)
         set_target_properties(GStreamer::GStreamer PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "${GStreamer_INCLUDE_DIR};${GStreamer_GLIB_INCLUDE_DIR};${GStreamer_GLIB_CONFIG_DIR}"
-            INTERFACE_LINK_LIBRARIES "${GStreamer_LIBRARY};${GStreamer_GLIB_LIBRARY};${GStreamer_GOBJECT_LIBRARY};${GStreamer_APP_LIBRARY};${GStreamer_VIDEO_LIBRARY};${GStreamer_WEBRTC_LIBRARY};${GStreamer_SDP_LIBRARY}")
+            INTERFACE_INCLUDE_DIRECTORIES "${GStreamer_INCLUDE_DIR};${GStreamer_GLIB_INCLUDE_DIR};${GStreamer_GLIB_CONFIG_DIR};${GStreamer_NICE_INCLUDE_DIR}"
+            INTERFACE_LINK_LIBRARIES "${GStreamer_LIBRARY};${GStreamer_GLIB_LIBRARY};${GStreamer_GOBJECT_LIBRARY};${GStreamer_APP_LIBRARY};${GStreamer_VIDEO_LIBRARY};${GStreamer_WEBRTC_LIBRARY};${GStreamer_SDP_LIBRARY};${GStreamer_NICE_LIBRARY};${GStreamer_GIO_LIBRARY}")
     endif()
 else()
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(GStreamer REQUIRED IMPORTED_TARGET gstreamer-1.0>=1.26.11 gstreamer-app-1.0>=1.26.11 gstreamer-video-1.0>=1.26.11 gstreamer-webrtc-1.0>=1.26.11 gstreamer-sdp-1.0>=1.26.11)
+    pkg_check_modules(GStreamer REQUIRED IMPORTED_TARGET gstreamer-1.0>=1.26.11 gstreamer-app-1.0>=1.26.11 gstreamer-video-1.0>=1.26.11 gstreamer-webrtc-1.0>=1.26.11 gstreamer-sdp-1.0>=1.26.11 nice>=0.1.22 gio-2.0)
     if(NOT TARGET GStreamer::GStreamer)
         add_library(GStreamer::GStreamer ALIAS PkgConfig::GStreamer)
     endif()

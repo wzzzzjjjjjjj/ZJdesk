@@ -11,6 +11,142 @@ class MediaTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void physicalDesktopSenderWithoutWindow()
+    {
+#ifndef Q_OS_LINUX
+        QSKIP("Linux physical desktop sender only");
+#else
+        if (qEnvironmentVariable("ZJDESK_PHYSICAL_SENDER") != "1")
+            QSKIP("Explicit physical desktop validation only; opens no test windows");
+        zjdesk::SessionCoordinator sender;
+        QVERIFY(sender.join(QUrl(qEnvironmentVariable("ZJDESK_TEST_SERVER")), "physical-first-frame", "Linux"));
+        QTRY_COMPARE_WITH_TIMEOUT(sender.memberCount(), 2, 60000);
+        for (int cycle = 0; cycle < 3; ++cycle)
+        {
+            QVERIFY(sender.startScreenShare());
+            QTRY_COMPARE_WITH_TIMEOUT(sender.shareState(), Preview::Running, 15000);
+            QTRY_COMPARE_WITH_TIMEOUT(sender.shareStats().transport, QString("TCP"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(sender.shareState(), Preview::Stopped, 45000);
+            QTest::qWait(500);
+        }
+        sender.leave();
+#endif
+    }
+
+    void receiverReportsFeedbackBeforeFirstFrame()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        zjdesk::ScreenShare receiver;
+        QSignalSpy frames(&receiver, &zjdesk::ScreenShare::frameReady);
+        QSignalSpy statistics(&receiver, &zjdesk::ScreenShare::statisticsReady);
+        QSignalSpy feedback(&receiver, &zjdesk::ScreenShare::negotiationReady);
+        receiver.start(false, {}, 9);
+        receiver.negotiate("share", {{"action", "profile"}, {"revision", 7}, {"fps", 60}}, 9);
+        QTRY_VERIFY_WITH_TIMEOUT(!feedback.isEmpty(), 4000);
+        QVERIFY(frames.isEmpty());
+        QVERIFY(!statistics.isEmpty());
+        const auto message = feedback.last().at(2).toJsonObject();
+        QCOMPARE(feedback.last().at(1).toString(), QString("share"));
+        QCOMPARE(message.value("action").toString(), QString("stats"));
+        QCOMPARE(message.value("revision").toInt(), 7);
+        QCOMPARE(message.value("fps").toDouble(), 0.0);
+        receiver.stop(10);
+    }
+
+    void sharedFramesSurvivePipelineRestartAndDetachOnWrite()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        zjdesk::ScreenShare sender, receiver;
+        quint64 senderEpoch = 1, receiverEpoch = 10;
+        QImage latest;
+        QList<QImage> retained, snapshots;
+        connect(&receiver, &zjdesk::ScreenShare::frameReady, this,
+            [&](quint64 epoch, const QImage &image) {
+                if (epoch == receiverEpoch)
+                    latest = image;
+            });
+        connect(&sender, &zjdesk::ScreenShare::negotiationReady, &receiver,
+            [&](quint64, const QString &type, const QJsonObject &message) {
+                receiver.negotiate(type, message, receiverEpoch);
+            });
+        connect(&receiver, &zjdesk::ScreenShare::negotiationReady, &sender,
+            [&](quint64, const QString &type, const QJsonObject &message) {
+                sender.negotiate(type, message, senderEpoch);
+            });
+        for (int restart = 0; restart < 3; ++restart)
+        {
+            receiver.start(false, {}, receiverEpoch);
+            sender.start(true, "test", senderEpoch, 60);
+            QTRY_VERIFY_WITH_TIMEOUT(!latest.isNull(), 15000);
+            for (int sample = 0; sample < 4; ++sample)
+            {
+                retained.append(latest);
+                snapshots.append(latest.copy());
+                QTest::qWait(100);
+            }
+            sender.stop(++senderEpoch);
+            receiver.stop(++receiverEpoch);
+            QTest::qWait(200);
+            latest = {};
+            for (int i = 0; i < retained.size(); ++i)
+                QCOMPARE(retained.at(i), snapshots.at(i));
+            auto writable = retained.last();
+            writable.fill(Qt::magenta);
+            QCOMPARE(retained.last(), snapshots.last());
+            QVERIFY(writable != retained.last());
+        }
+    }
+
+    void lossFeedbackChangesEncoderBudgetAndRejectsStaleRevision()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        zjdesk::ScreenShare sender, receiver;
+        zjdesk::ShareStats sent, received;
+        connect(&sender, &zjdesk::ScreenShare::statisticsReady, this,
+            [&](quint64, const zjdesk::ShareStats &stats) { sent = stats; });
+        connect(&receiver, &zjdesk::ScreenShare::statisticsReady, this,
+            [&](quint64, const zjdesk::ShareStats &stats) { received = stats; });
+        connect(&sender, &zjdesk::ScreenShare::negotiationReady, &receiver,
+            [&](quint64, const QString &type, const QJsonObject &message) { receiver.negotiate(type, message, 9); });
+        connect(&receiver, &zjdesk::ScreenShare::negotiationReady, &sender,
+            [&](quint64, const QString &type, const QJsonObject &message) {
+                if (type != "share")
+                    sender.negotiate(type, message, 7);
+            });
+        receiver.start(false, {}, 9);
+        sender.start(true, "test", 7, 120);
+        QTRY_VERIFY_WITH_TIMEOUT(sent.maxEncodedFrameBytes > 0 && received.codecMeanMs >= 0, 15000);
+        QVERIFY(sent.codecMeanMs >= 0);
+        QVERIFY(sent.codecMaxMs >= sent.codecMeanMs);
+        QVERIFY(received.outputGapMaxMs > 0);
+        QCOMPARE(received.copyMaxMs, 0.0);
+        QVERIFY(sent.sendBufferBytes > 0);
+        QVERIFY(received.receiveBufferBytes > 0);
+        QCOMPARE(sent.rtcpFeedbackBudget, 64000);
+        QCOMPARE(received.rtcpFeedbackBudget, 64000);
+        QCOMPARE(received.size, QSize(640, 480));
+        const int initial = sent.encoderBitrate;
+        const int initialQuantizer = sent.encoderQuantizer;
+        QVERIFY(initial > 2000000);
+        auto feedback = [&](int revision, qint64 packets, qint64 lost) {
+            sender.negotiate("share", {{"action", "stats"}, {"revision", revision}, {"fps", 60},
+                {"packetsReceived", packets}, {"packetsLost", lost}}, 7);
+        };
+        feedback(sent.revision, 1000, 0);
+        feedback(sent.revision, 1980, 20);
+        feedback(sent.revision - 1, 2960, 40);
+        QTest::qWait(1100);
+        QCOMPARE(sent.encoderBitrate, initial);
+        feedback(sent.revision, 2960, 40);
+        QTRY_COMPARE_WITH_TIMEOUT(sent.encoderBitrate, qMax(2000000, initial * 85 / 100), 4000);
+        if (sent.hardwareEncoder)
+            QVERIFY(sent.encoderQuantizer > initialQuantizer && sent.encoderQuantizer <= 16);
+        QCOMPARE(sent.targetFps, 120);
+        QCOMPARE(received.size, QSize(640, 480));
+        sender.stop(8);
+        receiver.stop(10);
+    }
+
     void dataChannelTransportsBothDirectionsAndRejectsOldEpoch()
     {
         QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
@@ -41,6 +177,7 @@ private slots:
         {
             QVERIFY2(sdp.contains("a=rtcp-fb:96 nack\r\n"), qPrintable(sdp));
             QVERIFY2(sdp.contains("rtx/90000"), qPrintable(sdp));
+            QVERIFY2(sdp.contains("red/90000") && sdp.contains("ulpfec/90000"), qPrintable(sdp));
         }
         sender.sendControl({{"action", "capabilities"}, {"control", true}}, 7);
         QTRY_COMPARE(atReceiver.size(), 1);
@@ -141,8 +278,8 @@ private slots:
         connect(&slowDisplay, &QTimer::timeout, &receiver,
             [&receiver] { receiver.reportSharePresentation(0); });
         slowDisplay.start(1000);
-        QTRY_COMPARE_WITH_TIMEOUT(sender.shareStats().targetFps, 5, 20000);
-        QTRY_COMPARE(receiver.shareStats().targetFps, 5);
+        QTRY_COMPARE_WITH_TIMEOUT(sender.shareStats().targetFps, 24, 45000);
+        QTRY_COMPARE(receiver.shareStats().targetFps, 24);
         QCOMPARE(lastFrameSize, QSize(640, 480));
         QTRY_VERIFY_WITH_TIMEOUT(lastFrameSize == QSize(480, 360), 30000);
         QCOMPARE(sender.shareState(), Preview::Running);
