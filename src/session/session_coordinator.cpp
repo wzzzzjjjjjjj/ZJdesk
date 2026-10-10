@@ -1,6 +1,10 @@
 #include "session_coordinator.h"
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QUuid>
+#include <QBuffer>
+#include <QImageReader>
+#include <cmath>
 
 namespace zjdesk
 {
@@ -8,6 +12,10 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
 {
     qRegisterMetaType<State>();
     qRegisterMetaType<PreviewState>();
+    qRegisterMetaType<RemoteCursor>();
+    cursorTimer_.setInterval(16);
+    cursorTimer_.setTimerType(Qt::PreciseTimer);
+    connect(&cursorTimer_, &QTimer::timeout, this, &SessionCoordinator::sendCursor);
     connect(&screen_, &ScreenShare::controlChannelChanged, this, [this](quint64 epoch, bool ready) {
         if (epoch != shareEpoch_ || !screenActive())
             return;
@@ -32,6 +40,16 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
     connect(&screen_, &ScreenShare::statisticsReady, this, [this](quint64 epoch, const ShareStats &stats) {
         if (epoch != shareEpoch_ || !screenActive())
             return;
+        if (stats.size != shareStats_.size || stats.targetFps != shareStats_.targetFps
+            || stats.encoderQuantizer != shareStats_.encoderQuantizer
+            || stats.transportExcessMs >= 80 || stats.presentedGapMaxMs > 200 || stats.outputGapMaxMs > 200)
+            events_.append("screen-performance", QString::fromUtf8(QJsonDocument(QJsonObject{
+                {"revision", stats.revision}, {"width", stats.size.width()}, {"height", stats.size.height()},
+                {"targetFps", stats.targetFps}, {"processedFps", stats.processedFps}, {"presentedFps", stats.presentedFps},
+                {"codec", stats.codec}, {"bitrateBudget", stats.encoderBitrate}, {"quantizer", stats.encoderQuantizer},
+                {"controlRttMs", stats.controlRttMs}, {"transportExcessMs", stats.transportExcessMs},
+                {"outputGapMaxMs", stats.outputGapMaxMs}, {"presentedGapMaxMs", stats.presentedGapMaxMs},
+                {"packetsLost", stats.packetsLost}, {"transport", stats.transport}}).toJson(QJsonDocument::Compact)));
         shareStats_ = stats;
         emit shareStatisticsChanged(stats);
         if (shareState_ == PreviewState::Running)
@@ -64,7 +82,9 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
                 return;
             if (status == "failed")
             {
+                const auto failedStreamId = streamId_;
                 stopScreenShare();
+                failedStreamId_ = failedStreamId;
                 shareState_ = PreviewState::Failed;
             }
             else
@@ -167,6 +187,7 @@ bool SessionCoordinator::join(const QUrl &url, const QString &roomId, const QStr
 void SessionCoordinator::clearMembership()
 {
     stopScreenShare();
+    failedStreamId_.clear();
     clearControl();
     peerControllable_ = false;
     ownPeerId_.clear();
@@ -287,6 +308,7 @@ bool SessionCoordinator::startScreenShare(const QString &source, int targetFps)
         return false;
     if (state_ != State::PeerAvailable || screenActive() || shareState_ == PreviewState::Stopping)
         return false;
+    failedStreamId_.clear();
     if (!media_.environment().ready)
     {
         shareState_ = PreviewState::Failed;
@@ -315,10 +337,10 @@ void SessionCoordinator::stopScreenShare()
     clearScreenShare(true);
 }
 
-void SessionCoordinator::reportSharePresentation(quint64 frames, bool active)
+void SessionCoordinator::reportSharePresentation(quint64 frames, bool active, double gapMaxMs)
 {
     if (screenActive())
-        screen_.reportPresentation(frames, shareEpoch_, active);
+        screen_.reportPresentation(frames, shareEpoch_, active, gapMaxMs);
 }
 
 void SessionCoordinator::clearScreenShare(bool notifyPeer)
@@ -359,7 +381,7 @@ bool SessionCoordinator::requestControl()
     }
     remoteState_ = RemoteState::Requesting;
     remoteDetail_ = QStringLiteral("等待 Linux 端允许控制");
-    controlDeadline_.start(30000);
+    controlDeadline_.start(60000);
     emit remoteChanged();
     return true;
 }
@@ -371,6 +393,7 @@ bool SessionCoordinator::grantControl()
         return false;
     remoteState_ = RemoteState::Controlled;
     remoteDetail_ = QStringLiteral("已允许控制，正在建立桌面连接");
+    controlDeadline_.start(60000);
     if (!screenActive())
     {
         controlStartedShare_ = true;
@@ -392,13 +415,20 @@ void SessionCoordinator::sendControlGrant()
     controlDeadline_.stop();
     remoteDetail_ = QStringLiteral("对方正在控制本机，点击停止控制可立即收回");
     screen_.sendControl({{"action", "grant"}, {"epoch", QString::number(control_.epoch())},
-        {"requestId", controlRequestId_}}, shareEpoch_);
+        {"requestId", controlRequestId_}, {"cursorSync", true}}, shareEpoch_);
     emit remoteChanged();
 }
 
 void SessionCoordinator::clearControl()
 {
     controlDeadline_.stop();
+    cursorTimer_.stop();
+    if (cursorSyncActive_)
+        screen_.setCursorEmbedded(true, shareEpoch_);
+    cursorSyncActive_ = false;
+    sentCursor_ = remoteCursor_ = {};
+    cursorSequence_ = remoteCursorSequence_ = 0;
+    emit remoteCursorChanged({});
     control_.revoke();
     input_.releaseAll();
     remoteState_ = RemoteState::Idle;
@@ -409,6 +439,68 @@ void SessionCoordinator::clearControl()
     controlStartedShare_ = false;
     remoteDetail_ = QStringLiteral("远程控制未开启");
     emit remoteChanged();
+}
+
+void SessionCoordinator::sendCursor()
+{
+    if (remoteState_ != RemoteState::Controlled || !controlChannelReady_ || !cursorTimer_.isActive())
+        return;
+    const auto cursor = input_.cursor();
+    QJsonObject message{{"action", "cursor"}, {"epoch", QString::number(control_.epoch())},
+        {"sequence", QString::number(cursorSequence_ + 1)}, {"visible", cursor.visible}};
+    QByteArray png;
+    const bool newShape = cursor.serial != sentCursor_.serial || sentCursor_.image.isNull();
+    if (!cursor.image.isNull() && newShape)
+    {
+        QBuffer buffer(&png);
+        buffer.open(QIODevice::WriteOnly);
+        cursor.image.save(&buffer, "PNG");
+    }
+    if (cursor.image.isNull() || (newShape && png.isEmpty()) || png.size() > 2400)
+    {
+        if (cursorSyncActive_)
+        {
+            screen_.setCursorEmbedded(true, shareEpoch_);
+            message.insert("visible", false);
+            screen_.sendControl(message, shareEpoch_);
+            ++cursorSequence_;
+            cursorSyncActive_ = false;
+            sentCursor_ = {};
+        }
+        return;
+    }
+    if (!cursor.visible)
+    {
+        if (cursorSyncActive_ && sentCursor_.visible)
+        {
+            screen_.sendControl(message, shareEpoch_);
+            ++cursorSequence_;
+            sentCursor_.visible = false;
+        }
+        return;
+    }
+    if (cursorSyncActive_ && cursor.serial == sentCursor_.serial && cursor.position == sentCursor_.position
+        && cursor.visible == sentCursor_.visible)
+        return;
+    if (!cursorSyncActive_)
+    {
+        screen_.setCursorEmbedded(false, shareEpoch_);
+        cursorSyncActive_ = true;
+    }
+    message.insert("serial", QString::number(cursor.serial));
+    message.insert("x", cursor.position.x());
+    message.insert("y", cursor.position.y());
+    if (!png.isEmpty())
+    {
+        message.insert("image", QString::fromLatin1(png.toBase64()));
+        message.insert("hotX", cursor.hotspot.x());
+        message.insert("hotY", cursor.hotspot.y());
+        message.insert("width", cursor.screenSize.width());
+        message.insert("height", cursor.screenSize.height());
+    }
+    screen_.sendControl(message, shareEpoch_);
+    ++cursorSequence_;
+    sentCursor_ = cursor;
 }
 
 void SessionCoordinator::stopControl()
@@ -461,10 +553,64 @@ void SessionCoordinator::receiveControl(const QJsonObject &message)
         inputProbeClock_.invalidate();
         remoteState_ = RemoteState::Controlling;
         remoteDetail_ = QStringLiteral("正在控制 Linux；点击共享画面后操作键鼠");
+        if (message.value("cursorSync").toBool())
+            screen_.sendControl({{"action", "cursor_ready"}, {"epoch", QString::number(epoch)}}, shareEpoch_);
         emit remoteChanged();
     }
     else if (action == "revoke")
         stopControl();
+    else if (action == "cursor_ready" && remoteState_ == RemoteState::Controlled && !receivingScreen_)
+    {
+        if (message.value("epoch").toString() == QString::number(control_.epoch()))
+        {
+            cursorTimer_.start();
+            sendCursor();
+        }
+    }
+    else if (action == "cursor" && remoteState_ == RemoteState::Controlling && receivingScreen_)
+    {
+        bool valid = false;
+        const auto sequence = message.value("sequence").toString().toULongLong(&valid);
+        if (!valid || sequence <= remoteCursorSequence_
+            || message.value("epoch").toString() != QString::number(remoteControlEpoch_)
+            || !message.value("visible").isBool())
+            return;
+        auto cursor = remoteCursor_;
+        cursor.visible = message.value("visible").toBool();
+        if (cursor.visible)
+        {
+            const double x = message.value("x").toDouble(-1), y = message.value("y").toDouble(-1);
+            const auto serial = message.value("serial").toString().toULongLong(&valid);
+            if (!valid || !std::isfinite(x) || !std::isfinite(y) || x < 0 || x > 1 || y < 0 || y > 1)
+                return;
+            if (serial != cursor.serial || cursor.image.isNull())
+            {
+                const auto encoded = message.value("image").toString().toLatin1();
+                if (encoded.isEmpty() || encoded.size() > 3200)
+                    return;
+                auto png = QByteArray::fromBase64(encoded);
+                QBuffer buffer(&png);
+                buffer.open(QIODevice::ReadOnly);
+                QImageReader reader(&buffer, "PNG");
+                const auto size = reader.size();
+                const QSize screen(message.value("width").toInt(), message.value("height").toInt());
+                const QPoint hotspot(message.value("hotX").toInt(-1), message.value("hotY").toInt(-1));
+                if (size.isEmpty() || size.width() > 128 || size.height() > 128 || screen.isEmpty()
+                    || screen.width() > 32768 || screen.height() > 32768 || !QRect(QPoint(), size).contains(hotspot))
+                    return;
+                cursor.image = reader.read();
+                if (cursor.image.isNull())
+                    return;
+                cursor.hotspot = hotspot;
+                cursor.screenSize = screen;
+                cursor.serial = serial;
+            }
+            cursor.position = QPointF(x, y);
+        }
+        remoteCursorSequence_ = sequence;
+        remoteCursor_ = cursor;
+        emit remoteCursorChanged(cursor);
+    }
     else if (action == "probe_ack" && remoteState_ == RemoteState::Controlling && receivingScreen_)
     {
         bool epochValid = false, sequenceValid = false;
@@ -500,6 +646,7 @@ void SessionCoordinator::receiveControl(const QJsonObject &message)
             }
             else
                 input_.inject(message);
+            sendCursor();
         }
     }
 }
@@ -541,12 +688,22 @@ void SessionCoordinator::receiveShare(const protocol::Message &message)
         {
             clearScreenShare(false);
         }
+        else if (action == "stop" && id == failedStreamId_ && shareState_ == PreviewState::Failed)
+        {
+            // ICE can fail before the peer's normal stop reaches signaling.
+            failedStreamId_.clear();
+            shareState_ = PreviewState::Stopped;
+            shareDetail_ = QStringLiteral("屏幕共享已停止");
+            events_.append("screen", shareDetail_);
+            emit shareChanged();
+        }
         else if (action == "start" && id != streamId_)
         {
             // Simultaneous clicks choose the same sender at both ends.
             if (screenActive() && !receivingScreen_ && ownPeerId_ < peerId_)
                 return;
             stopScreenShare();
+            failedStreamId_.clear();
             streamId_ = id;
             receivingScreen_ = true;
             shareState_ = PreviewState::Starting;

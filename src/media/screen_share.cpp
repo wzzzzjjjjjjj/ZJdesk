@@ -6,6 +6,7 @@
 #include <QScreen>
 #include <QJsonDocument>
 #include <QHash>
+#include <QNetworkInterface>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -18,6 +19,8 @@
 #define GST_USE_UNSTABLE_API
 #include <gst/app/gstappsink.h>
 #include <gst/video/video.h>
+#include <gst/video/video-event.h>
+#include <gst/rtp/gstrtphdrext.h>
 #include <gst/webrtc/webrtc.h>
 #pragma push_macro("signals")
 #undef signals
@@ -92,7 +95,22 @@ public:
         statsPending_ = false;
         sendBufferBytes_ = receiveBufferBytes_ = -1;
         transport_.clear();
+        localAddress_.clear();
+        remoteAddress_.clear();
         rtcpFeedbackBudget_ = -1;
+        latencyClock_.restart();
+        probeSequence_ = pendingProbe_ = 0;
+        probeSentMs_ = lastProbeMs_ = -1000;
+        controlRttMs_ = transportExcessMs_ = -1;
+        probeSamples_.clear();
+        const auto gccMode = qEnvironmentVariable("ZJDESK_WEBRTC_GCC");
+        gccEnabled_ = sender && (gccMode == "1" || gccMode == "tcp");
+        gccMinimumBitrate_ = qMin(8000000, profile_.bitrate());
+        gccBitrate_ = 40000000;
+        pacedBytes_ = 0;
+        droppedBeforeEncode_ = 0;
+        offeredTwccId_ = 0;
+        encoderBudgetClock_.restart();
         {
             QMutexLocker lock(&codecMutex_);
             codecInputs_.clear();
@@ -103,6 +121,8 @@ public:
         }
         copyMaxMs_ = -1;
         remoteReady_ = running_ = firstFrame_ = false;
+        sendReady_ = false;
+        waitingForKeyframe_ = true;
         pendingIce_.clear();
         QString description;
         if (sender)
@@ -118,7 +138,7 @@ public:
                     "d3d11download ! videoconvert ! ";
 #else
             else if (qEnvironmentVariable("XDG_SESSION_TYPE") != "wayland")
-                capture = "ximagesrc use-damage=false show-pointer=true ! videoconvert ! "
+                capture = "ximagesrc name=desktopcapture use-damage=false show-pointer=true ! videoconvert ! "
                     "videorate drop-only=true ! ";
             else
             {
@@ -135,7 +155,7 @@ public:
                 "appsink name=frames max-buffers=1 drop=true sync=false wait-on-eos=false "
                 "split. ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! " +
                 encoderPipeline() + " ! video/x-vp9,profile=(string)1 ! " +
-                "rtpvp9pay pt=96 picture-id-mode=15-bit ! "
+                "rtpvp9pay name=pay pt=96 picture-id-mode=15-bit ! "
                 "application/x-rtp,media=video,encoding-name=VP9,payload=96 ! "
                 "webrtcbin name=rtc bundle-policy=max-bundle";
         }
@@ -162,6 +182,24 @@ public:
             return;
         }
         rtc_ = gst_bin_get_by_name(GST_BIN(pipeline_), "rtc");
+        if (gccEnabled_)
+        {
+            auto *factory = gst_element_factory_find("rtpgccbwe");
+            if (!factory)
+                return fail(QStringLiteral("GCC 对照需要 rtpgccbwe 插件"));
+            gst_object_unref(factory);
+            auto *extension = gst_rtp_header_extension_create_from_uri(
+                "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01");
+            if (!extension)
+                return fail(QStringLiteral("GCC 对照缺少 TWCC 扩展"));
+            gst_rtp_header_extension_set_id(extension, 1);
+            auto *pay = gst_bin_get_by_name(GST_BIN(pipeline_), "pay");
+            g_signal_emit_by_name(pay, "add-extension", extension);
+            gst_object_unref(extension);
+            gst_object_unref(pay);
+            g_signal_connect_data(rtc_, "request-aux-sender", G_CALLBACK(requestAuxSender),
+                new ShareCallback{guard_, epoch, {}}, destroySignal, GConnectFlags(0));
+        }
         g_signal_connect_data(rtc_, "deep-element-added", G_CALLBACK(configureRtcp),
             new ShareCallback{guard_, epoch, {}}, destroySignal, GConnectFlags(0));
         auto *elements = gst_bin_iterate_recurse(GST_BIN(rtc_));
@@ -182,10 +220,24 @@ public:
             g_object_get(ice, "agent", &agent, nullptr);
             if (agent)
             {
+                const auto address = qEnvironmentVariable("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+                if (!address.isEmpty())
+                {
+                    NiceAddress local;
+                    nice_address_init(&local);
+                    if (!QNetworkInterface::allAddresses().contains(QHostAddress(address))
+                        || !nice_address_set_from_string(&local, address.toUtf8().constData())
+                        || !nice_agent_add_local_address(agent, &local))
+                    {
+                        g_object_unref(agent);
+                        g_object_unref(ice);
+                        return fail(QStringLiteral("指定的媒体本地地址不可用"));
+                    }
+                }
 #ifdef Q_OS_LINUX
-                // Desktop keyframes exceed the effective UDP send buffer on this host.
-                // ICE-TCP provides backpressure and reliable delivery without blocking capture.
-                if (sender && source != "test")
+                // The LAN desktop path avoids UDP keyframe bursts exceeding the host buffer.
+                // libnice may still reject RTP under TCP congestion; this is not a cross-network guarantee.
+                if (sender && source != "test" && (!gccEnabled_ || gccMode == "tcp"))
                     g_object_set(agent, "ice-udp", FALSE, "ice-tcp", TRUE, nullptr);
 #endif
                 g_signal_connect_data(agent, "new-selected-pair-full", G_CALLBACK(selectedPair),
@@ -214,6 +266,13 @@ public:
         gst_pad_add_probe(inputPad, GST_PAD_PROBE_TYPE_BUFFER,
             [](GstPad *, GstPadProbeInfo *info, gpointer data) {
                 auto *worker = static_cast<ScreenShareWorker *>(data);
+                // Drop complete raw frames only when the pacer has over 100 ms of data.
+                // Encoded reference frames and their RTP fragments are never discarded here.
+                if (worker->gccEnabled_ && worker->pacedBytes_.load() > qint64(worker->gccBitrate_.load()) / 80)
+                {
+                    ++worker->droppedBeforeEncode_;
+                    return GST_PAD_PROBE_DROP;
+                }
                 const auto pts = GST_BUFFER_PTS(GST_PAD_PROBE_INFO_BUFFER(info));
                 QMutexLocker lock(&worker->codecMutex_);
                 if (worker->codecInputs_.size() >= 64)
@@ -252,6 +311,15 @@ public:
                     {
                         ++window.keyframes;
                         window.maxKeyframeBytes = qMax(window.maxKeyframeBytes, bytes);
+                    }
+                    // Do not queue stale RTP or compete with ICE/DTLS/SCTP setup.
+                    if (!worker->sendReady_.load())
+                        return GST_PAD_PROBE_DROP;
+                    if (worker->waitingForKeyframe_.load())
+                    {
+                        if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT))
+                            return GST_PAD_PROBE_DROP;
+                        worker->waitingForKeyframe_ = false;
                     }
                 }
                 return GST_PAD_PROBE_OK;
@@ -333,14 +401,14 @@ public:
                 peerFps_ = payload.value("fps").toDouble();
                 feedbackClock_.restart();
                 if (quality_.observeNetwork(payload.value("packetsReceived").toInteger(-1),
-                        payload.value("packetsLost").toInteger(-1)))
+                        payload.value("packetsLost").toInteger(-1), transportExcessMs_))
                 {
                     profile_ = quality_.profile();
                     auto *encoder = gst_bin_get_by_name(GST_BIN(pipeline_), "encoder");
                     if (hardwareEncoder_)
                         g_object_set(encoder, "qp", guint(hardwareQuantizer()), nullptr);
                     else
-                        g_object_set(encoder, "target-bitrate", profile_.bitrate(), nullptr);
+                        g_object_set(encoder, "target-bitrate", encoderBudget(), nullptr);
                     gst_object_unref(encoder);
                 }
             }
@@ -369,6 +437,26 @@ public:
             fail(QStringLiteral("收到无效的共享 SDP"));
             return;
         }
+        if (!sender_ && type == "offer")
+        {
+            offeredTwccId_ = 0;
+            for (guint i = 0; i < gst_sdp_message_medias_len(sdp->sdp); ++i)
+            {
+                const auto *media = gst_sdp_message_get_media(sdp->sdp, i);
+                if (QByteArray(gst_sdp_media_get_media(media)) != "video")
+                    continue;
+                for (guint j = 0; j < gst_sdp_media_attributes_len(media); ++j)
+                {
+                    const auto *attribute = gst_sdp_media_get_attribute(media, j);
+                    if (QByteArray(attribute->key) != "extmap")
+                        continue;
+                    const auto parts = QString::fromUtf8(attribute->value).split(' ');
+                    if (parts.size() >= 2 && parts.at(1)
+                        == "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01")
+                        offeredTwccId_ = parts.first().section('/', 0, 0).toInt();
+                }
+            }
+        }
         auto *promise = gst_promise_new_with_change_func(remoteDescriptionSet,
             new ShareCallback{guard_, epoch_, type}, destroyPromise);
         g_signal_emit_by_name(rtc_, "set-remote-description", sdp, promise);
@@ -395,6 +483,22 @@ public:
             g_error_free(error);
 #else
         Q_UNUSED(message)
+        Q_UNUSED(epoch)
+#endif
+    }
+
+    void setCursorEmbedded(bool embedded, quint64 epoch)
+    {
+#ifdef ZJDESK_HAS_GSTREAMER
+        if (epoch != epoch_ || !pipeline_ || !sender_)
+            return;
+        if (auto *capture = gst_bin_get_by_name(GST_BIN(pipeline_), "desktopcapture"))
+        {
+            g_object_set(capture, "show-pointer", gboolean(embedded), nullptr);
+            gst_object_unref(capture);
+        }
+#else
+        Q_UNUSED(embedded)
         Q_UNUSED(epoch)
 #endif
     }
@@ -452,6 +556,13 @@ private:
             if (worker->channel_)
                 g_object_unref(worker->channel_);
             worker->channel_ = GST_WEBRTC_DATA_CHANNEL(g_object_ref(owned.get()));
+            if (worker->sender_ && !worker->sendReady_.exchange(true))
+            {
+                auto *encoder = gst_bin_get_by_name(GST_BIN(worker->pipeline_), "encoder");
+                gst_element_send_event(encoder,
+                    gst_video_event_new_upstream_force_key_unit(GST_CLOCK_TIME_NONE, TRUE, 0));
+                gst_object_unref(encoder);
+            }
             emit worker->controlChannelChanged(worker->epoch_, true);
         });
     }
@@ -460,6 +571,8 @@ private:
         if (!controlChannel(channel))
             return;
         queue(*static_cast<ShareCallback *>(data), [](auto *worker) {
+            worker->sendReady_ = false;
+            worker->waitingForKeyframe_ = true;
             emit worker->controlChannelChanged(worker->epoch_, false);
         });
     }
@@ -474,8 +587,61 @@ private:
         if (!message.isObject())
             return;
         queue(*static_cast<ShareCallback *>(data), [object = message.object()](auto *worker) {
+            if (object.contains("_zjdeskProbe"))
+            {
+                worker->receiveProbe(object);
+                return;
+            }
             emit worker->controlReceived(worker->epoch_, object);
         });
+    }
+    void receiveProbe(const QJsonObject &message)
+    {
+        bool valid = false;
+        const auto sequence = message.value("sequence").toString().toULongLong(&valid);
+        if (!valid || sequence == 0)
+            return;
+        const auto kind = message.value("_zjdeskProbe").toString();
+        if (!sender_ && kind == "ping")
+            sendControl({{"_zjdeskProbe", "pong"}, {"sequence", QString::number(sequence)}}, epoch_);
+        else if (sender_ && kind == "pong" && pendingProbe_ == sequence)
+        {
+            const auto now = latencyClock_.elapsed();
+            controlRttMs_ = double(now - probeSentMs_);
+            probeSamples_.append({now, controlRttMs_});
+            pendingProbe_ = 0;
+        }
+    }
+    void pollProbe()
+    {
+        if (!sender_ || !channel_ || !sendReady_.load())
+        {
+            transportExcessMs_ = -1;
+            return;
+        }
+        const auto now = latencyClock_.elapsed();
+        // A rolling baseline tolerates route changes. An unanswered probe contributes
+        // delay only after this peer has demonstrated support; older clients stay compatible.
+        while (!probeSamples_.isEmpty() && now - probeSamples_.first().first > 60000)
+            probeSamples_.removeFirst();
+        transportExcessMs_ = -1;
+        if (!probeSamples_.isEmpty())
+        {
+            double baseline = probeSamples_.first().second;
+            for (const auto &sample : probeSamples_)
+                baseline = qMin(baseline, sample.second);
+            const double waiting = pendingProbe_ ? double(now - probeSentMs_) : 0;
+            transportExcessMs_ = qMax(0.0, qMax(controlRttMs_, waiting) - baseline);
+        }
+        // Bound probes to one outstanding message, including unsupported peers.
+        if (pendingProbe_ && now - probeSentMs_ >= 5000)
+            pendingProbe_ = 0;
+        if (!pendingProbe_ && now - lastProbeMs_ >= 1000)
+        {
+            pendingProbe_ = ++probeSequence_;
+            probeSentMs_ = lastProbeMs_ = now;
+            sendControl({{"_zjdeskProbe", "ping"}, {"sequence", QString::number(pendingProbe_)}}, epoch_);
+        }
     }
     static void prepareChannel(GstElement *, GstWebRTCDataChannel *channel, gboolean, gpointer data)
     {
@@ -501,14 +667,22 @@ private:
             worker->rtcpFeedbackBudget_ = int(budget);
         });
     }
+
     static void selectedPair(NiceAgent *agent, guint stream, guint component,
-        NiceCandidate *local, NiceCandidate *, gpointer data)
+        NiceCandidate *local, NiceCandidate *remote, gpointer data)
     {
         const auto retained = std::shared_ptr<NiceAgent>(NICE_AGENT(g_object_ref(agent)),
             [](NiceAgent *value) { g_object_unref(value); });
         const auto transport = local->transport == NICE_CANDIDATE_TRANSPORT_UDP ? QString("UDP") : QString("TCP");
-        queue(*static_cast<ShareCallback *>(data), [retained, stream, component, transport](auto *worker) {
+        char localIp[NICE_ADDRESS_STRING_LEN], remoteIp[NICE_ADDRESS_STRING_LEN];
+        nice_address_to_string(&local->addr, localIp);
+        nice_address_to_string(&remote->addr, remoteIp);
+        const auto localAddress = QString::fromLatin1(localIp);
+        const auto remoteAddress = QString::fromLatin1(remoteIp);
+        queue(*static_cast<ShareCallback *>(data), [retained, stream, component, transport, localAddress, remoteAddress](auto *worker) {
             worker->transport_ = transport;
+            worker->localAddress_ = localAddress;
+            worker->remoteAddress_ = remoteAddress;
             // Only this session's selected direct UDP socket; never change system-wide limits.
             auto *socket = nice_agent_get_selected_socket(retained.get(), stream, component);
             if (!socket)
@@ -524,11 +698,84 @@ private:
             g_object_unref(socket);
         });
     }
+    static guint64 probeBytes(GstPadProbeInfo *info)
+    {
+        if (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER)
+            return gst_buffer_get_size(GST_PAD_PROBE_INFO_BUFFER(info));
+        auto *list = GST_PAD_PROBE_INFO_BUFFER_LIST(info);
+        guint64 bytes = 0;
+        for (guint i = 0; i < gst_buffer_list_length(list); ++i)
+            bytes += gst_buffer_get_size(gst_buffer_list_get(list, i));
+        return bytes;
+    }
+    static GstElement *requestAuxSender(GstElement *, GstWebRTCDTLSTransport *, gpointer data)
+    {
+        const auto callback = *static_cast<ShareCallback *>(data);
+        QMutexLocker lock(&callback.guard->mutex);
+        auto *worker = callback.guard->worker;
+        if (!worker || callback.epoch != callback.guard->epoch)
+            return nullptr;
+        auto *gcc = gst_element_factory_make("rtpgccbwe", nullptr);
+        if (!gcc)
+            return nullptr;
+        g_object_set(gcc, "min-bitrate", guint(worker->gccMinimumBitrate_), "estimated-bitrate", guint(40000000),
+            "max-bitrate", guint(40000000), nullptr);
+        g_signal_connect_data(gcc, "notify::estimated-bitrate", G_CALLBACK(bandwidthChanged),
+            new ShareCallback(callback), destroySignal, GConnectFlags(0));
+        for (const char *name : {"sink", "src"})
+        {
+            auto *pad = gst_element_get_static_pad(gcc, name);
+            gst_pad_add_probe(pad, GstPadProbeType(GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST),
+                [](GstPad *pad, GstPadProbeInfo *info, gpointer value) {
+                    auto *owner = static_cast<ScreenShareWorker *>(value);
+                    const auto bytes = qint64(probeBytes(info));
+                    owner->pacedBytes_.fetch_add(GST_PAD_DIRECTION(pad) == GST_PAD_SINK ? bytes : -bytes);
+                    return GST_PAD_PROBE_OK;
+                }, worker, nullptr);
+            gst_object_unref(pad);
+        }
+        return gcc;
+    }
+    static void bandwidthChanged(GObject *gcc, GParamSpec *, gpointer data)
+    {
+        guint bitrate = 0;
+        g_object_get(gcc, "estimated-bitrate", &bitrate, nullptr);
+        const auto &callback = *static_cast<ShareCallback *>(data);
+        QMutexLocker lock(&callback.guard->mutex);
+        if (callback.guard->worker && callback.epoch == callback.guard->epoch)
+            callback.guard->worker->gccBitrate_ = bitrate;
+    }
+    void updateEncoderBudget()
+    {
+        if (!gccEnabled_ || encoderBudgetClock_.elapsed() < 250)
+            return;
+        encoderBudgetClock_.restart();
+        auto *encoder = gst_bin_get_by_name(GST_BIN(pipeline_), "encoder");
+        if (hardwareEncoder_)
+        {
+            guint actual = 0;
+            g_object_get(encoder, "qp", &actual, nullptr);
+            if (actual != guint(hardwareQuantizer()))
+                g_object_set(encoder, "qp", guint(hardwareQuantizer()), nullptr);
+        }
+        else
+        {
+            gint actual = 0;
+            g_object_get(encoder, "target-bitrate", &actual, nullptr);
+            if (actual != encoderBudget())
+                g_object_set(encoder, "target-bitrate", encoderBudget(), nullptr);
+        }
+        gst_object_unref(encoder);
+    }
+    int encoderBudget() const
+    {
+        return gccEnabled_ ? qMin(profile_.bitrate(), int(gccBitrate_.load() * 4 / 5)) : profile_.bitrate();
+    }
     int hardwareQuantizer() const
     {
         auto unconstrained = profile_;
         unconstrained.bitrateLimit = 0;
-        return 8 + qBound(0, (unconstrained.bitrate() - profile_.bitrate()) * 8 / unconstrained.bitrate(), 8);
+        return 8 + qBound(0, (unconstrained.bitrate() - encoderBudget()) * 8 / unconstrained.bitrate(), 8);
     }
     QString encoderPipeline() const
     {
@@ -544,7 +791,7 @@ private:
             "end-usage=cbr min-quantizer=0 max-quantizer=8 "
             "buffer-size=300 buffer-initial-size=150 buffer-optimal-size=150 max-intra-bitrate=1000 "
             "min-force-key-unit-interval=500000000 target-bitrate=%1 keyframe-max-dist=%2")
-            .arg(profile_.bitrate()).arg(profile_.fps * 5);
+            .arg(encoderBudget()).arg(profile_.fps * 5);
     }
     void selectEncoder()
     {
@@ -629,7 +876,7 @@ private:
             g_object_set(encoder, "qp", guint(hardwareQuantizer()),
                 "key-int-max", guint(qMin(1024, profile_.fps * 5)), nullptr);
         else
-            g_object_set(encoder, "target-bitrate", profile_.bitrate(), "keyframe-max-dist", profile_.fps * 5, nullptr);
+            g_object_set(encoder, "target-bitrate", encoderBudget(), "keyframe-max-dist", profile_.fps * 5, nullptr);
         gst_object_unref(encoder);
         ++revision_;
         peerFps_ = -1;
@@ -725,7 +972,32 @@ private:
             for (const auto &candidate : candidates)
                 worker->negotiate("ice", candidate, worker->epoch_);
             if (type == "offer")
+            {
+                // webrtcbin removes optional offer fields when answering. Explicitly
+                // accept the offered TWCC mapping in the receiver codec preferences.
+                if (worker->offeredTwccId_ > 0 && worker->offeredTwccId_ < 15)
+                {
+                    GArray *transceivers = nullptr;
+                    g_signal_emit_by_name(worker->rtc_, "get-transceivers", &transceivers);
+                    for (guint i = 0; transceivers && i < transceivers->len; ++i)
+                    {
+                        auto *transceiver = g_array_index(transceivers, GstWebRTCRTPTransceiver *, i);
+                        GstWebRTCKind kind = GST_WEBRTC_KIND_UNKNOWN;
+                        g_object_get(transceiver, "kind", &kind, nullptr);
+                        if (kind != GST_WEBRTC_KIND_VIDEO)
+                            continue;
+                        auto *caps = gst_caps_from_string("application/x-rtp,media=video,encoding-name=VP9,clock-rate=90000");
+                        const auto field = QByteArray("extmap-") + QByteArray::number(worker->offeredTwccId_);
+                        gst_caps_set_simple(caps, field.constData(), G_TYPE_STRING,
+                            "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01", nullptr);
+                        g_object_set(transceiver, "codec-preferences", caps, nullptr);
+                        gst_caps_unref(caps);
+                    }
+                    if (transceivers)
+                        g_array_unref(transceivers);
+                }
                 worker->createDescription("answer");
+            }
         });
     }
     static void statisticsReceived(GstPromise *promise, gpointer data)
@@ -835,6 +1107,8 @@ private:
             timer_->stop();
             return;
         }
+        pollProbe();
+        updateEncoderBudget();
         while (auto *message = gst_bus_pop(bus_))
         {
             QString error;
@@ -888,7 +1162,8 @@ private:
             || connection == GST_WEBRTC_PEER_CONNECTION_STATE_DISCONNECTED
             || connection == GST_WEBRTC_PEER_CONNECTION_STATE_CLOSED)
             return fail(QStringLiteral("屏幕共享连接已断开"));
-        if (!running_ && firstFrame_ && connection == GST_WEBRTC_PEER_CONNECTION_STATE_CONNECTED)
+        if (!running_ && firstFrame_ && (!sender_ || sendReady_.load())
+            && connection == GST_WEBRTC_PEER_CONNECTION_STATE_CONNECTED)
         {
             running_ = true;
             emit statusChanged(epoch_, "running", QStringLiteral("%1 · %2 × %3 · 目标 %4 fps")
@@ -925,9 +1200,13 @@ private:
                     return;
                 stats.deliveredFrames = mailbox_->stats.deliveredFrames;
                 stats.presentedFps = mailbox_->stats.presentedFps;
+                stats.presentedGapMaxMs = mailbox_->stats.presentedGapMaxMs;
                 stats.overwrittenFrames = mailbox_->stats.overwrittenFrames;
                 stats.copyMaxMs = copyMaxMs_;
-                stats.encoderBitrate = sender_ ? profile_.bitrate() : 0;
+                stats.encoderBitrate = sender_ ? encoderBudget() : 0;
+                stats.congestionBitrate = gccEnabled_ ? int(gccBitrate_.load()) : -1;
+                stats.pacedBytes = gccEnabled_ ? qMax(qint64(0), pacedBytes_.load()) : -1;
+                stats.droppedBeforeEncode = droppedBeforeEncode_.load();
                 stats.sendBufferBytes = sendBufferBytes_;
                 stats.receiveBufferBytes = receiveBufferBytes_;
                 stats.rtcpFeedbackBudget = rtcpFeedbackBudget_;
@@ -936,6 +1215,8 @@ private:
                 stats.codec = sender_ && hardwareEncoder_ ? "vavp9lpenc / VP9 profile 1" : sender_ ? "vp9enc / VP9 profile 1" : "vp9dec";
                 stats.codecFallbackReason = sender_ ? codecFallbackReason_ : QString();
                 stats.transport = transport_;
+                stats.localAddress = localAddress_;
+                stats.remoteAddress = remoteAddress_;
                 stats.size = size_;
                 stats.intervalSeconds = seconds;
                 stats.targetFps = targetFps_;
@@ -949,6 +1230,14 @@ private:
                 stats.packetsLost = packetsLost_;
                 stats.jitterMs = jitterMs_;
                 stats.webRtcRttMs = webRtcRttMs_;
+                stats.controlRttMs = controlRttMs_;
+                stats.transportExcessMs = transportExcessMs_;
+                if (channel_)
+                {
+                    guint64 buffered = 0;
+                    g_object_get(channel_, "buffered-amount", &buffered, nullptr);
+                    stats.controlBufferedBytes = buffered;
+                }
                 mailbox_->stats = stats;
                 mailbox_->stats.overwrittenFrames = 0;
             }
@@ -974,7 +1263,7 @@ private:
                     {"packetsReceived", stats.packetsReceived}, {"packetsLost", stats.packetsLost}});
             }
         }
-        if (!running_ && startup_.elapsed() > 15000)
+        if (!running_ && startup_.elapsed() > 45000)
             fail(QStringLiteral("屏幕共享连接超时，请检查双方网络和媒体插件"));
     }
 
@@ -992,6 +1281,8 @@ private:
     bool remoteReady_ = false;
     bool running_ = false;
     bool firstFrame_ = false;
+    std::atomic_bool sendReady_{false};
+    std::atomic_bool waitingForKeyframe_{true};
     QSize size_;
     int targetFps_ = 60;
     std::atomic<quint64> processedFrames_{0};
@@ -1021,11 +1312,28 @@ private:
     qint64 packetsLost_ = -1;
     double jitterMs_ = -1;
     double webRtcRttMs_ = -1;
+    QElapsedTimer latencyClock_;
+    quint64 probeSequence_ = 0;
+    quint64 pendingProbe_ = 0;
+    qint64 probeSentMs_ = -1000;
+    qint64 lastProbeMs_ = -1000;
+    QList<QPair<qint64, double>> probeSamples_;
+    double controlRttMs_ = -1;
+    double transportExcessMs_ = -1;
+    bool gccEnabled_ = false;
+    int gccMinimumBitrate_ = 2000000;
+    QElapsedTimer encoderBudgetClock_;
+    int offeredTwccId_ = 0;
+    std::atomic<guint> gccBitrate_{40000000};
+    std::atomic<qint64> pacedBytes_{0};
+    std::atomic<quint64> droppedBeforeEncode_{0};
     bool statsPending_ = false;
     int sendBufferBytes_ = -1;
     int receiveBufferBytes_ = -1;
     int rtcpFeedbackBudget_ = -1;
     QString transport_;
+    QString localAddress_;
+    QString remoteAddress_;
 #endif
     ShareMailbox *mailbox_;
 };
@@ -1088,17 +1396,19 @@ void ScreenShare::start(bool sender, const QString &source, quint64 epoch, int t
         mailbox_.epoch = epoch;
         mailbox_.image = {};
         mailbox_.stats = {};
+        pendingPosition_.reset();
     }
     QMetaObject::invokeMethod(worker_, [this, sender, source, epoch, targetFps, nativeSize, maximumFps] {
         worker_->start(sender, source, epoch, targetFps, nativeSize, maximumFps);
     });
 }
 
-void ScreenShare::reportPresentation(quint64 frames, quint64 epoch, bool active)
+void ScreenShare::reportPresentation(quint64 frames, quint64 epoch, bool active, double gapMaxMs)
 {
     QMutexLocker lock(&mailbox_.mutex);
     if (epoch != mailbox_.epoch)
         return;
+    mailbox_.stats.presentedGapMaxMs = active ? gapMaxMs : -1;
     if (!active)
     {
         mailbox_.stats.presentedFps = -1;
@@ -1118,6 +1428,7 @@ void ScreenShare::stop(quint64 epoch)
         QMutexLocker lock(&mailbox_.mutex);
         mailbox_.epoch = epoch;
         mailbox_.image = {};
+        pendingPosition_.reset();
     }
     QMetaObject::invokeMethod(worker_, [this, epoch] { worker_->stop(epoch); });
 }
@@ -1129,7 +1440,47 @@ void ScreenShare::negotiate(const QString &type, const QJsonObject &payload, qui
 
 void ScreenShare::sendControl(const QJsonObject &message, quint64 epoch)
 {
+    const auto action = message.value("action").toString();
+    const bool position = (action == "input" && message.value("kind") == "move" && !message.contains("probe"))
+        || (action == "cursor" && !message.contains("image"));
+    std::shared_ptr<QJsonObject> pending;
+    {
+        QMutexLocker lock(&mailbox_.mutex);
+        if (epoch != mailbox_.epoch)
+            return;
+        if (position)
+        {
+            if (pendingPosition_ && !pendingPosition_->isEmpty() && pendingPositionEpoch_ == epoch
+                && pendingPosition_->value("action") == message.value("action")
+                && pendingPosition_->value("epoch") == message.value("epoch"))
+            {
+                *pendingPosition_ = message;
+                return;
+            }
+            pending = pendingPosition_ = std::make_shared<QJsonObject>(message);
+            pendingPositionEpoch_ = epoch;
+        }
+        else
+            pendingPosition_.reset(); // Discrete events and cursor shapes form ordering barriers.
+    }
+    if (pending)
+    {
+        QMetaObject::invokeMethod(worker_, [this, pending, epoch] {
+            QJsonObject latest;
+            {
+                QMutexLocker lock(&mailbox_.mutex);
+                latest.swap(*pending);
+            }
+            worker_->sendControl(latest, epoch);
+        });
+        return;
+    }
     QMetaObject::invokeMethod(worker_, [this, message, epoch] { worker_->sendControl(message, epoch); });
+}
+
+void ScreenShare::setCursorEmbedded(bool embedded, quint64 epoch)
+{
+    QMetaObject::invokeMethod(worker_, [this, embedded, epoch] { worker_->setCursorEmbedded(embedded, epoch); });
 }
 } // namespace zjdesk
 

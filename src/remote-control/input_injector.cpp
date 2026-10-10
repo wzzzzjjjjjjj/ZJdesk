@@ -6,6 +6,7 @@
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 #include <X11/extensions/XTest.h>
+#include <X11/extensions/Xfixes.h>
 #endif
 
 namespace zjdesk
@@ -39,12 +40,40 @@ bool InputInjector::available()
         return false;
     }
     display_ = display;
+    cursorAvailable_ = XFixesQueryExtension(display, &event, &error);
     const auto ratio = screen->devicePixelRatio();
     bounds_ = QRect(screen->geometry().topLeft() * ratio, screen->size() * ratio);
     return true;
 #else
     return false;
 #endif
+}
+
+RemoteCursor InputInjector::cursor()
+{
+    RemoteCursor result;
+#ifdef ZJDESK_HAS_XTEST
+    if (!available() || !cursorAvailable_)
+        return result;
+    auto *cursor = XFixesGetCursorImage(static_cast<Display *>(display_));
+    if (!cursor)
+        return result;
+    if (cursor->width > 0 && cursor->width <= 128 && cursor->height > 0 && cursor->height <= 128)
+    {
+        result.image = QImage(cursor->width, cursor->height, QImage::Format_ARGB32_Premultiplied);
+        for (int y = 0; y < cursor->height; ++y)
+            for (int x = 0; x < cursor->width; ++x)
+                reinterpret_cast<QRgb *>(result.image.scanLine(y))[x] = QRgb(cursor->pixels[y * cursor->width + x]);
+        result.hotspot = QPoint(cursor->xhot, cursor->yhot);
+        result.position = QPointF(double(cursor->x - bounds_.x()) / qMax(1, bounds_.width() - 1),
+            double(cursor->y - bounds_.y()) / qMax(1, bounds_.height() - 1));
+        result.screenSize = bounds_.size();
+        result.serial = cursor->cursor_serial;
+        result.visible = bounds_.contains(QPoint(cursor->x, cursor->y));
+    }
+    XFree(cursor);
+#endif
+    return result;
 }
 
 bool InputInjector::inject(const QJsonObject &input)

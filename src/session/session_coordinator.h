@@ -45,7 +45,7 @@ public:
     PreviewStats previewStats() const { return media_.stats(); }
     bool startScreenShare(const QString &source = "desktop", int targetFps = 0);
     ShareStats shareStats() const { return shareStats_; }
-    void reportSharePresentation(quint64 frames, bool active = true);
+    void reportSharePresentation(quint64 frames, bool active = true, double gapMaxMs = -1);
     void stopScreenShare();
     PreviewState shareState() const { return shareState_; }
     QString shareDetail() const { return shareDetail_; }
@@ -76,6 +76,7 @@ signals:
     void remoteChanged();
     void inputProbeInjected(quint64 sequence, qint64 injectUs, bool accepted);
     void inputProbeAcknowledged(quint64 sequence, qint64 roundTripUs, qint64 injectUs, bool accepted);
+    void remoteCursorChanged(const zjdesk::RemoteCursor &cursor);
 
 private:
     void receive(const protocol::Message &message);
@@ -88,6 +89,7 @@ private:
     void receiveControlRequest(const QJsonObject &message);
     void sendControlGrant();
     void clearControl();
+    void sendCursor();
 
     SignalingClient signaling_;
     EventLog events_;
@@ -105,12 +107,17 @@ private:
     quint64 pendingProbeSequence_ = 0;
     QElapsedTimer inputProbeClock_;
     QTimer controlDeadline_;
+    QTimer cursorTimer_;
+    RemoteCursor sentCursor_, remoteCursor_;
+    quint64 cursorSequence_ = 0, remoteCursorSequence_ = 0;
+    bool cursorSyncActive_ = false;
     QTimer deadline_;
     MediaEngine media_;
     ScreenShare screen_;
     PreviewState shareState_ = PreviewState::Stopped;
     QString shareDetail_ = QStringLiteral("屏幕共享未启动");
     QString streamId_;
+    QString failedStreamId_;
     QString ownPeerId_;
     quint64 shareEpoch_ = 0;
     bool receivingScreen_ = false;

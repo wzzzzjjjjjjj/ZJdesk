@@ -1,5 +1,360 @@
 # 验证记录
 
+## 2026-10-10：最终 GCC + TCP 十分钟完整回归
+
+当前源码使用 `ZJDESK_WEBRTC_GCC=tcp`，调度下限为 min(启动 profile 预算, 8 Mbps)。
+完整跨机测试 Windows 3 项通过 / 684.616 秒，Linux 3 项通过 / 692.034 秒。
+600.445 秒真实 Edge 压力中启动 / 关闭 68 次、最小化 / 还原各 204 次、调整尺寸 612 次；
+平均实际交换 52.729 fps，随后 60 秒画质阶段 44.942 fps，始终 1920×1080。
+压力目标曾为 60 / 50 / 45 / 40，画质阶段为 45 fps，不能报告稳定 60 fps。
+整段 34,406 个新帧交换间隔 p95 39.843 ms、最大 907.258 ms、10 次 >200 ms。
+彩线平均误差 0.721、最大 4；画质采样零异常 / 235 次变化。
+压力后的鼠标位置确认 118 样本中位 20.996 / p95 30.864 ms；拖拽解码反馈 50 样本
+中位 57.072 / p95 73.053 / 最大 79.474 ms。不是压力中同步测量，也不是物理扫描时刻。
+完整功能通过，但流畅性目标未达标。
+
+从测试约第 2.2 分钟起，TCP 进程级只读采样覆盖 539.8 秒 / 524 条：
+媒体 Send-Q 中位 7,459 / p95 127,257 / 最大 1,242,227 字节，notsent 最大 1,060,283；
+TCP RTT 中位 11.992 / p95 27.691 / 最大 205.665 ms。不是连续全局峰值。
+长停顿时编码仍连续而解码 / 呈现同时停顿，探针额外延迟最高 718 ms；
+GCC 队列为零不能排除 libnice / TCP 下游积压。另有显示交换间隔大于解码间隔的窗口，接收调度也待定位。
+隔离桌面仍有 llvmpipe 软件 OpenGL 负载，编码仍为 VA-API VP9 profile 1；
+测试信令临时经 SSH，媒体 / 输入断言为实际 LAN ICE-TCP，原生 GNOME 操作长测及跨网仍未验收。
+报告 `build/analysis/interaction-20261010/final-soak/`；没有归档未更新的旧 input-latency JSON。
+其他试验、已修复停止竞态与未通过的全 UI 布局检查见后文，不能混为本轮全部通过。
+
+长测后最终 Windows `build.ps1 -Preset windows-release -Deploy` 构建 / 部署通过，
+core / signaling / media 三组通过 / 131.15 秒；Linux 对应三组通过 / 113.86 秒。
+两端 13 个相关源码 / 构建文件 SHA256 一致，Windows build / dist 可执行文件 SHA256 一致。
+仅清理本轮 SSH 信令隧道和隔离测试资源，原信令服务 PID 6761 保留。
+两端正常客户端已重新启动：Windows PID 33088，原生窗口句柄非零且 Responding；
+Linux PID 1258181，物理 DISPLAY :1 窗口 IsViewable，进程 GCC=tcp、LOCAL_ADDRESS=10.11.47.137。
+Windows 正常客户端继续使用直接 `ws://10.11.47.137:8765`，未部署 SSH 转发。
+这些启动检查不等于远控连接已再次通过；两端需点击加入房间，Linux 本地批准控制后才会建立实际会话。
+
+## 2026-10-10：Edge 卡顿优化与 GCC / UDP 对照（过程记录）
+
+用户要求逐步优化；在原工作区保留既有未提交改动，备份在
+`build/analysis/interaction-20261010/before-optimization`，Linux 同名目录有 sources.tar 和旧客户端。
+新增相对 RTT 基线的拥塞反馈、媒体线程前最新位置合并、frameSwapped 计数 / 间隔，
+以及进程环境 `ZJDESK_WEBRTC_GCC=1` 启用的 TWCC / 单层 rtpgccbwe pacing；默认 TCP 保留。
+没有调整系统代理、路由、Tailscale、sysctl 或用户 Edge 配置；LAN 地址仍为 10.11.47.137 / 10.11.48.48。
+
+该阶段 Windows Release 构建 / 部署通过，core / signaling / media 三组全通过，127.70 秒；
+Linux Release 构建和三组基础测试全通过，113.22 秒。两端 13 个相关源码 / 构建文件 SHA256 一致。
+新增回归覆盖连续延迟无丢包降预算、孤立尖峰 / 旧客户端兼容、拥塞不升档、
+2000 次位置突发与按钮顺序 / 代次，以及双端 TWCC answer / transport-cc 协商。
+GCC 显式协商用例另在 Linux 启用环境后通过，不能只凭创建了 GCC 元件认为接入成功。
+Windows 相关真实 OpenGL 回归 6 项通过 / 15.78 秒，包含交换计数与光标独立重绘。
+Linux 全 UI 轮为 16 通过、1 失败、3 跳过 / 61.84 秒：
+`workspaceFitsSmallWindowAndLongNames` 的最小视频高度断言失败，相关布局本轮未改；
+未独立证明为原版本故障，不报告全 UI 通过。首帧 / 实际光标 / 细字相关用例通过。
+
+### 对照结果与测量边界
+
+仅延迟反馈 / 位置合并的 TCP 轮完整远控用例通过，但画面曾停顿 4.065 秒，
+发送端编码输出仍连续，探针额外往返延迟最高 3.671 秒。
+该轮 30 秒平均显示 52.93 fps、随后 60 秒 52.46 fps；彩线均值 0.653、最大 4。
+因此“测试通过”不能等于已消除卡顿。报告在 `interaction-20261010/phase1`。
+
+首个单层 GCC / UDP 完整短测通过，60 秒画质阶段平均显示 59.92 fps，
+整段画面交换间隔 p95 46.032 ms、最大 221.950 ms，1 次 >200 ms；彩线均值 0.652、最大 4。
+随后发现重复设置 VA qp 会生成频繁关键帧，改为每 250 ms 检查、仅变化时更新参数。
+旧候选的 DTS 改写 / clocksync / 任意积压就跳帧没有恢复，CQP 仍限 8～16。
+旧短测报告在 `interaction-20261010/gcc-single-first`，不混作最终参数的成绩。
+
+真实 Edge 压力测试运行在独立 Xephyr / Openbox 桌面，使用独立临时浏览器配置，
+反复启动 / SIGTERM 关闭、最小化 / 还原和调整窗口尺寸；Windows 在未切换的原生桌面运行真实 OpenGL。
+这不是用户 GNOME 桌面的逐次按钮操作验收，也不是 offscreen 渲染。
+最终长测确认 Linux 隔离进程有活跃 llvmpipe 软件 OpenGL 线程，不能用该 CPU 占用代表原生 GNOME GPU 呈现。
+GStreamer 仍使用 VA-API VP9 profile 1；Windows 接收进程加载 Intel OpenGL ICD，
+没有读取 GL_RENDERER 或验证物理显示扫描输出。
+
+600.349 秒媒体采样完成：平均显示 48.997 fps，每秒 FPS 第 5 百分位 43.956、最低 26.973；
+保持 1920×1080，目标在 60 / 50 / 45 fps 间调整，实际 ICE-UDP。
+窗口记录的画面交换最大间隔最高 504.364 ms、解码输出最大间隔最高 501.805 ms；
+7 个采样窗口记录 >200 ms，不能当作精确停顿事件数或逐帧 p95。
+调度队列每秒采样中位 0、p95 34,005、最高 157,420 字节，结束为 0；
+不能当作连续测得的队列全局峰值。探针 RTT 中位 10、p95 49、最高 261 ms，
+额外延迟 p95 44 ms，最后待答探针达 763 ms。
+编码输出连续而接收解码 / 交换停顿，仍需继续定位 RTP 到达、关键帧恢复与缓冲，
+不能据一秒采样区分其全部贡献。稳定 60 fps 和完全消除短卡顿未通过。
+
+这轮在 606.971 秒失败于测试收尾：Edge 已退出，测试误调用 waitForFinished 后断言 false。
+已修为仅等待仍运行的进程；这一轮未执行随后画质 / 拖拽步骤，旧 JSON 没有混入归档。
+Linux 配对测试因为没有完成标志而终止，外层清理隔离桌面。
+`interaction-20261010/edge-10min` 保存性能和失败报告，该轮不能称为完整用例通过。
+此前出现过信令 HTTP 200、测试脚本 X11 窗口销毁竞态、QtTest 默认 5 分钟 watchdog；
+前者来源仍未确定，后两者已修正脚本 / 测试超时设置，均不计作通过。
+
+修正测试收尾后的 UDP 完整补验通过：Windows 3 项 / 253.488 秒、Linux 3 项 / 260.885 秒。
+其中 Edge 启动 / 关闭 21 次、最小化 / 还原 61 次、尺寸调整 183 次；
+180.165 秒压力阶段平均显示 55.24 fps，随后 60 秒画质阶段 44.95 fps；全程保持 1080p，
+239 次像素采样零异常、236 次变化；1800 列彩线平均 RGB 误差 0.670、最大 4。
+压力 + 画质整段新视频帧交换间隔 p95 37.571 ms、最大 468.718 ms，3 次 >200 ms。
+随后光标确认 117 样本中位 22.437 / p95 45.284 ms；拖拽解码反馈 53 样本
+中位 61.338 / p95 83.085 / 最大 102.238 ms；不是压力期间同步测得的延迟。
+输入、文字、滚轮、拒绝 / 允许 / 撤销、旧授权及释放回归通过。归档 `interaction-20261010/edge-final`。
+
+### 物理 GNOME 首帧复验：UDP 失败，TCP + GCC 通过
+
+UDP 候选在物理桌面复验未通过：首帧约 35.85 秒才出现，超过 15 秒标准；
+接收用例失败退出，随后发送侧下一次 startScreenShare 也失败。
+不能用上面的隔离桌面通过结果推广到物理桌面，因此 UDP 不用于当前日常客户端。
+报告 `physical-udp-failed.txt` / `physical-udp-sender-failed.txt`。
+
+新增 `ZJDESK_WEBRTC_GCC=tcp` 对照，仍接入相同的 TWCC / GCC pacing，但保留 Linux ICE-TCP。
+真实物理 GNOME 桌面三次停止 / 重开全通过：首帧 5349 / 2393 / 1988 ms；
+Windows 3 项通过 / 18.675 秒，Linux 3 项通过 / 29.271 秒。
+物理桌面流的解码均值约 15.97～19.15 ms，较隔离桌面负载更高，
+不能用纯测试图案平均 FPS 代表该桌面。该短测只证明首帧 / 重启，没有验收真实 Edge 长时间操作。
+报告 `background-physical-gcc-tcp.txt` / `physical-gcc-tcp-sender.txt`。
+
+加入 tcp 模式后再次构建 / 部署并跑基础测试：Windows 三组全通过 / 130.93 秒，
+Linux 三组全通过 / 114.08 秒。
+
+GCC + TCP 的 2 Mbps 下限完整对照：Edge 启动 / 关闭 20 次，最小化 / 还原 60 次，
+调整尺寸 180 次；180.135 秒压力阶段平均 59.91 fps、目标保持 60、最大窗口交换间隔 160.598 ms。
+但随后 60 秒画质阶段仅 44.16 fps，整段逐帧交换最大间隔 1527.385 ms、p95 38.861 ms、
+13 次 >200 ms。像素零异常，彩线均值 0.661、最大 4。
+功能回归通过不代表流畅性达标，报告保留在 `interaction-20261010/edge-gcc-tcp`。
+该轮画质阶段没有保存 senderMedia，不能确认 GCC 触底的完整时间线。
+下一轮补录双端数据，调度下限改为 min(启动 profile 预算, 8 Mbps)，这是当前 LAN 对照参数。
+再次遇到直连信令 HTTP 200 后，临时 SSH 端口转发只用于测试信令；视频 / 输入仍走真实 LAN ICE 地址，
+回归单独断言信令之外的媒体地址。正常客户端未改用该转发，不能称为已修复信令问题。
+
+### 8 Mbps 下限短测与停止竞态修复
+
+新下限短测完整通过：60.036 秒 Edge 压力阶段平均 52.785 fps，随后 60 秒画质阶段 49.825 fps；
+1920×1080 保持，彩线均值 0.703、最大 4，像素零异常 / 236 次变化。
+整段逐帧交换间隔 p95 36.009 ms、最大 500.288 ms，1 次 >200 ms。
+光标确认 118 样本中位 21.390 / p95 32.072 ms；拖拽解码反馈 52 样本
+中位 59.723 / p95 71.232 / 最大 76.799 ms；Windows 用例 133.454 秒通过。
+画质阶段 GCC 估计最低约 8.072 Mbps、队列采样最大 4431 字节、探针 RTT 最大 64 ms，
+RTP lost 计数维持 20。相邻试验时长 / 网络时刻不同，不能当作严格配对的因果统计。
+报告 `interaction-20261010/edge-gcc-floor`；信令经临时 SSH 转发，媒体 / 输入为真实 LAN TCP。
+
+物理复验进一步发现正常停止竞态：ICE failed 先于 stop 信令到达，原代码清空 streamId 后
+丢弃迟到 stop，发送端停留 Failed，接收端可能独自通过；该失败轮仍保留。
+新增 `lateStopAfterMediaFailureMatchesOnlyTheFailedStream`：受控媒体失败后，错误 ID 的 stop
+保持 Failed、匹配 ID 的 stop 收尾、新流不受旧 stop 影响。
+旧代码在匹配 stop 后仍 Failed，回归失败 / 15.673 秒；修复后 3 项通过 / 0.659 秒。
+控制权限在最初失败时已撤销，此修复不自动重连、不重新授权。
+修复后的物理 GNOME 三轮双端通过：首帧 5247 / 3358 / 1983 ms，
+Windows 3 项 / 18.730 秒，Linux 3 项 / 29.844 秒。
+报告 `late-stop-before.txt` / `late-stop-final.txt` / `background-physical-gcc-floor-fixed.txt`
+和 `physical-gcc-floor-fixed-sender.txt`。后续最终长测另行记录，稳定 60 fps 仍未验收。
+
+## 2026-10-10：公司局域网路径确认与稳定性复验
+
+用户确认两端已回公司内网，并要求先跳过跨网络。实时检查 Windows WLAN 为
+`10.11.48.48/24`，Linux WLAN 为 `10.11.47.137/24`；SSH 直接使用
+`orbbec@10.11.47.137` 成功，Linux 信令仍监听 `0.0.0.0:8765`。
+两端在不同子网，但公司网络可互通，不等于同一广播域。
+
+仅把信令改为 `ws://10.11.47.137:8765` 的基础控制回归通过（Windows 12.962 秒），
+libnice 日志却显示媒体选中 `100.87.60.58` / `100.122.3.99`，故不计为纯 LAN 成功。
+本轮增加 `ZJDESK_WEBRTC_LOCAL_ADDRESS`，只绑定本进程的候选地址；
+两端分别设置 `10.11.47.137` / `10.11.48.48`，跨机回归断言 ShareStats 的实际两端地址。
+无效地址在采集启动前失败，由新增 media 回归覆盖。没有更改系统代理、路由或 Tailscale。
+
+GCC / CBR / 严格节流候选在纯 LAN 未通过：30 秒平均编码 11.35、解码 10.81、显示 10.83 fps；
+彩线平均 RGB 误差 7.665、最大 66，未满足均值 <2 / 单通道 ≤24 的既有标准。
+候选及原始报告保存于 `build/analysis/lan-20261010/gcc-candidate`，正式源码已撤回，
+不再要求新增 rsrtp 插件，Linux 保留原 CQP 8～16 与 ICE-TCP，首帧门禁和鼠标优化保留。
+
+恢复方案第一次纯 LAN 测量：30 秒平均编码 53.15、解码 47.22、显示 47.21 fps；
+480 列彩线均值 0.667、最大 4。随后 60 秒 239 次像素采样，零异常、234 次变化，
+平均显示 41.70 fps，保持 1920×1080，目标降到 40 fps；RTP lost 从 198 到 217。
+本次连续画面阶段通过；后续可选拖拽视频延迟测量因为 Windows 开启标志而 Linux 未开启，
+未生成对应编码图案，断言失败。此轮不能报告整个远控用例通过；保留报告于
+`build/analysis/lan-20261010/baseline-quality-first`，修正两端运行参数后另行复跑。
+上述 FPS 不是稳定 60 fps 的证据。
+
+### 最终纯 LAN 复验
+
+两端 Release 构建 / 部署完成。Windows core / signaling / media 三组全通过，129.73 秒；
+Linux 三组全通过，112.50 秒，包含无效媒体绑定地址回归。
+Linux 隐藏真实 X11 / OpenGL 回归：新首帧 3 项通过 / 2.139 秒、鼠标与实际光标
+7 项通过 / 1.116 秒、小字与全屏 4 项通过 / 2.424 秒；后者小字均值 0.981、最大 5。
+
+首次最终复跑出现一次入会失败：Qt 报 HTTP 200，媒体尚未启动。
+独立直接 TCP WebSocket 升级检查随后得到 HTTP 101，原服务仍监听且未重启；
+没有更改代理或路由，后续同一地址重试成功。200 响应来源尚未确定，不能称为已修复。
+失败报告 `build/windows-release/test-results/background-lan-final-quality.txt`。
+
+正确匹配两端运行参数后的完整远控 + 画质用例通过：
+Windows `background-lan-final-quality-retry.txt`，3 项通过、102.604 秒；
+Linux `build/lan-final-quality-linux.txt`，3 项通过、110.103 秒。
+媒体为 `10.11.47.137` ↔ `10.11.48.48` 的 ICE-TCP，地址断言通过；
+全部图形测试在未切换的隐藏桌面 / 未映射父窗口下运行，没有显示测试窗口。
+
+| 测量 | 实际结果 |
+| --- | --- |
+| 前 30 秒平均编码 / 解码 / 显示 | 60.05 / 60.04 / 60.05 fps |
+| 前 30 秒 RTP lost | 0；最大解码输出间隔 107.36 ms |
+| 单像素彩线 480 列 | 平均误差 0.667、最大 4 |
+| 后续 60 秒连续画面 | 239 次采样，0 次像素异常、236 次变化，1920×1080 保持 |
+| 后续 60 秒平均显示 | 58.21 fps，末段目标从 60 降到 50 fps |
+| 后续 60 秒 RTP lost | 0 → 33 |
+| 持续传输后光标回传 | 73 样本，中位 296.13 ms、p95 727.26 ms |
+
+原始 JSON 与报告快照保存在 `build/analysis/lan-20261010/final-quality`。
+随后另起连接、两端均开启拖拽编码图案，完整加载动画远控用例再次通过：
+Windows `background-lan-final-drag.txt`，3 项通过、13.798 秒；Linux
+`build/lan-final-drag-linux.txt`，3 项通过、20.983 秒。实际滑块更新 80 次，最大间隔 47 ms；
+107 个光标确认样本中位 28.96 ms、p95 77.88 ms；58 个输入到解码图案样本
+中位 78.14 ms、p95 167.08 ms、最大 302.22 ms。图案近似关联滑块值，不是物理显示扫描延迟。
+两轮包含点击、文字、滚轮、拖动、拒绝 / 允许、撤销、修饰键释放与退会重入。
+
+Linux 物理桌面（非隐藏测试场景）另行连续三次共享 / 停止 / 重开也通过：
+Windows `background-lan-final-physical.txt`，3 项通过、18.493 秒；Linux
+`test-results/lan-physical-sender.txt`，3 项通过、29.046 秒。实际选中双方 LAN 地址与 TCP，
+三次首帧分别 5083 / 2648 / 1886 ms，均为 1920×1080，真实 OpenGL 呈现断言通过。
+这项不打开 Linux 测试窗口，Windows 接收窗口隐藏。三次末采样解码约 54 / 55 / 55.8 fps，
+第二次 RTP lost 计数 399，其余末采样为 0；短采样不能代替持续性能验收。
+
+最终 Windows 构建 / 部署 EXE SHA256 相同：
+`F01D038D6B1955D8E40645180E29511B6AFC6B05CBA4B4D5A1CF5D2CEE9EB577`；
+Linux 构建 / 部署 ELF Build ID 同为 `d433570b08103a357869449b9570f0eed025ea48`。
+Linux 部署工具调整 RPATH，故两个 ELF 文件 SHA256 不同，不作为部署不一致的判断。
+收尾已关闭所有本轮隐藏测试 / Xephyr，原信令服务 PID 6761 保留；正常客户端已重新打开：
+Windows PID 25496，窗口可见且 Responding，信令为 `ws://10.11.47.137:8765`；
+Linux PID 1206046，X11 窗口 IsViewable。两端进程分别绑定当前 LAN 地址，使用 demo 房间，
+由用户正常入会并在 Linux 本地允许控制；没有自动批准真实桌面的远控。
+
+结论：本次纯 LAN 已恢复画面与操作可用性；短时画质检查通过。
+不同轮次平均帧率与持续传输后的光标等待仍波动，稳定 1080p / 60 fps 与持续低延迟尚未通过。
+不同网络的 Tailscale 适配按用户要求暂停。
+
+## 2026-10-09：握手前旧帧积压回归
+
+用户再次反馈当前 Windows 控制 Linux 后无画面。新增隐藏真实 X11 桌面回归
+`desktopSharingStartsWithFreshKeyframeAfterDelayedNegotiation`：先采集红色，延迟转发协商，
+切成蓝色并确认本地已采到蓝色，再建立连接，检查首次解码是否为当前蓝色。
+旧实现实际首次解码为 `#fd0000`，2 项通过 / 1 项失败，2.210 秒，
+报告 Linux `build/startup-before.txt`；证实存在握手前旧帧积压，不代表全部跨网失败均由此导致。
+
+修复在编码输出 probe 丢弃通道就绪前的视频 buffer，CAPS / 事件仍正常协商；
+DataChannel 打开后请求新关键帧，并丢弃此前增量帧，避免将旧视频带入连接或争用握手阶段。
+发送侧 Running 也等待该就绪状态，保留有界启动失败。未降低画质预算、分辨率或性能验收标准。
+同一回归修改后 3 项通过、2.198 秒，报告 Linux `build/linux-release/test-results/hidden-startup.txt`。
+强制关键帧事件采用 GStreamer 的
+[upstream force key unit API](https://gstreamer.freedesktop.org/documentation/video/video-event.html)。
+本节本机回归不能代替当前 Tailscale 的画面 / 控制验收，后续跨机结果另记。
+
+## 2026-10-09：Tailscale 跨局域网检查与未通过项
+
+Windows Tailscale IPv4 为 `100.122.3.99`，Linux 为 `100.87.60.58`，两台电脑的物理 LAN 地址不同。
+新 IP 的 SSH 成功；原 Linux 信令服务 PID 6761 监听 `0.0.0.0:8765`，后台 Windows 用例直接填写
+`ws://100.87.60.58:8765`，双方实际入会并交换控制能力。此次没有用 SSH 信令隧道代替跨网连接。
+源码 host ICE 候选未设置 LAN 网段白名单；Linux `ss -tinp` 和 Windows TCP 表实际出现
+`100.122.3.99` / `100.87.60.58` 间的媒体候选 TCP 连接，不能把候选连接直接当成画面与输入成功。
+
+`tailscale status` / `tailscale ping` 显示实际 DERP relay，未建立 direct。
+Windows 到 Linux 的三次 ping 为 268 / 266 / 801 ms，Windows home DERP 为 sfo，Linux 为 hkg。
+netcheck 中 Linux `MappingVariesByDestIP=true`；Windows报告仍使用既有本地系统代理。
+没有修改代理、Clash、路由、防火墙或 Tailscale 配置。
+两次 SSH 随机数据探针总耗时分别为 1 MiB 111.03 秒、64 KiB 9.70 秒；
+前者与失败媒体测试短暂重叠，二者均包含 SSH 握手、远程进程与 Base64 开销，不作为纯链路吞吐上限。
+最终 TCP 轮候选 socket 的 `ss` 平滑 RTT 约 1.1～2.0 秒并出现重传，Send-Q 当时为 0，
+尚未输出实际媒体；因此该轮不能断言为视频发送队列拥堵。快照为 `build/tailscale-progress-1.txt` / `-2.txt`。
+
+原 15 秒期限两轮均未建立远控。第二轮 trace 中 ICE completed 10.230 秒，PeerConnection / DTLS
+connected 11.209 秒，首 RTP 11.368 秒；仍未得到首帧和授权。
+正式改为媒体启动等待 45 秒、控制请求及本地批准后的连接等待 60 秒；本地待批准仍 30 秒。
+延时版实际跨网回归仍失败：Windows ICE checking 27.675 秒后于 37.214 秒 failed；
+Linux 曾选 TCP 并短暂 ICE completed，但 DTLS / 首帧 / 控制没有完成。
+Windows 接收统计 processed / delivered 为 0；用例 2 项通过、1 项失败、207.963 秒。
+报告：`build/windows-release/test-results/background-tailscale-final.txt` / `.xml`，
+诊断日志 `build/tailscale-windows-final-gst.log` 与 Linux `build/tailscale-linux-final-gst.log`。
+
+随后只在 Linux 测试构建临时启用 ICE-UDP、关闭 ICE-TCP，Windows 诊断构建只将预期传输改 UDP，
+没有放宽任何画面或输入指标。Windows ICE connected 9.566 秒，PeerConnection connected 10.388 秒，
+RTP 到达后持续 `Waiting for keyframe` / `Dropping inter-frame before intra-frame`，40.074 秒 ICE failed。
+Linux 诊断统计为 UDP、关键帧 121095 字节、发送约 3.97 Mbps；这些是发送侧统计，不能视作接收吞吐。
+该轮没有首帧或远控授权，点击 / 文字 / 拖动均未执行；确认 ICE failed 后终止诊断，未标记测试通过。
+日志：`build/tailscale-windows-udp-gst.log`、Linux `build/tailscale-linux-udp-gst.log`，
+观察快照 `build/tailscale-udp-progress.txt`。正式源码和测试源均已按备份 SHA256 恢复，
+Linux 默认仍为 ICE-TCP。含 SDP 的原始调试日志仅作本地诊断，不进入版本管理或用户报告。
+
+两端基础 core / signaling / media 均通过：Windows 137.58 秒，Linux 109.10 秒；
+日志分别为 `build/tailscale-windows-build.log` 与 Linux `build/tailscale-linux-validation.log`。
+Windows 后台 `controlSurfaceRejectsLetterboxAndReleasesOnFocusLoss` 另通过，3 项、1.204 秒。
+所有图形测试均在未切换 Win32 桌面 / 未映射 Xephyr 父窗口中运行实际 OpenGL，未展示测试窗口。
+
+网络检查收尾时，Windows build / dist 客户端 SHA256 均为
+`5F4EDB20F267EEEDAC916C56A2F90E34DDADA74BF915CD009DF2FC94CB9D5EF2`；
+Linux build / dist 客户端 ELF Build ID 均为 `34b07c8b2874a0ce9f4ed719dc08ad54aaab7a4f`。
+临时 UDP 测试源恢复后，Windows 测试强制重新编译，Linux 正式 TCP 构建 / 部署完成。
+正常客户端已重新打开：Windows PID 8836，命令明确使用新 IP，窗口标题正常、IsWindowVisible=true、Responding=true；
+Linux PID 654557，正常物理桌面窗口 `_NET_WM_PID` 匹配且 `Map State: IsViewable`。
+双方为 demo 房间待加入，仅打开正常客户端不视作跨网画面 / 输入验收通过。
+本次 Xephyr 与图形测试进程已清理，原信令 PID 6761 保留，未创建新的信令隧道。
+
+结论：地址 / 信令和 host ICE 候选可以使用 Tailnet，当前真实中继链路下 TCP、UDP 都未通过画面与控制验收。
+45 / 60 秒只是有界等待兼容，不是跨网失败修复；中继抖动与现有固定 200 ms 缓冲、发送突发、
+关键帧恢复和缺少完整带宽估计 / 异步 pacer 都仍需进一步适配。
+不能宣称代码无需优化、仅网络有问题，也不能宣称已支持任意公网或稳定高清高帧率。
+Tailscale 路径解释参照官方 [Connection types](https://tailscale.com/docs/reference/connection-types)
+与 [Poor performance between tailnet devices](https://tailscale.com/docs/reference/troubleshooting/poor-performance-tailnet)。
+
+## 2026-10-09：独立实际光标与最终鼠标回归
+
+保留 8 ms 最新移动合并，新增 XFixes 实际光标形状 / 热点 / 位置回传与 VideoSurface 独立图层。
+控制端确认支持且取得有效形状后关闭采集内嵌光标；退出控制恢复采集光标，图像获取 / 编码失败回退。
+只在有效控制画面内隐藏 Windows 光标；独立光标重绘不增加视频呈现帧数。
+
+迁移 Tailscale 前，隐藏跨机 loaded-input 用例两端通过；Windows 报告 3 项、16.836 秒：
+`build/windows-release/test-results/background-cursor-loaded-input.txt`。
+滑块观察 87 次更新、最大间隔 53 ms；119 个输入到被控端实际位置回传样本中位 21.519 ms、p95 31.856 ms。
+拖拽输入到解码视频变化的 69 个样本中位 59.04 ms、p95 71.488 ms、最大 80.836 ms。
+位置回传测量不包含最终绘制 / 屏幕扫描；视频变化按滑块量化值近似关联输入，不是精确传输时间戳。
+这些均为迁移前局域网隐藏桌面结果，不能用作当前 DERP 链路的延迟或物理桌面手感保证。
+小缓冲和 videoconvert 线程数对照未显示稳定收益，均未保留；默认接收缓冲仍为 200 ms。
+
+Tailscale 优先检查完成后，最终相关图形回归：
+
+- Windows：移动合并 / 光标恢复、独立图层像素、黑边与失焦释放、全屏恢复，6 项通过、27.495 秒，
+  报告 `build/windows-release/test-results/background-cursor-final.txt` / `.xml`。
+- Linux：同上并增加真实桌面采集光标关闭 / 恢复和旧代次无效检查，7 项通过、1.214 秒，
+  报告 `build/linux-release/test-results/hidden-drag.txt`。
+
+新采集回归直接使用 ScreenShare，最初遗漏 MediaEnvironment::inspect 初始化导致测试 SIGSEGV；
+补齐与现有媒体集成测试相同的初始化后通过，未改产品初始化流程。
+Windows 光标像素断言按实际 devicePixelRatioF 取样，避免 125% 缩放下使用逻辑坐标读取物理帧缓冲。
+测试仍在未切换的 Win32 桌面 / 未映射的 Xephyr 父窗口中执行实际 OpenGL，未展示测试窗口。
+两端基础测试与部署沿用上节最终正式版本；本次后续只改测试初始化与文档，客户端哈希未变化。
+独立光标仍经过可靠 DataChannel，网络往返 / TCP 排队无法消除；窗口拖拽内容仍依赖视频反馈。
+当前跨网连接未通过，独立光标在新路径上的实际效果与正常物理桌面反馈仍未验收。
+
+## 2026-10-09：连续拖拽与单光标（第一阶段）
+
+新增 `controlSurfaceCoalescesMotionAndRestoresCursor`，连续输入 380 个移动事件后检查最后位置、
+按钮松开后的无残留移动、失焦 / 停止控制清理与光标恢复。旧实现实际 x=0.1890625，
+期望 x=0.78125，后台 Linux 回归失败；改为保留最新位置并在 8 ms 定时器发送后通过。
+相关回归同时执行 `controlSurfaceRejectsLetterboxAndReleasesOnFocusLoss` 与
+`expandedVideoKeepsSurfaceAndRestoresWindow`：Windows 5 项通过、16.286 秒；Linux 5 项通过、0.505 秒。
+报告分别为 `build/windows-release/test-results/background-drag-surface.txt`、
+Linux `build/linux-release/test-results/hidden-drag.txt`；均使用实际 OpenGL。
+
+跨机控制用例改为按住鼠标、分 120 步连续移动，再松开；Linux 记录滑块更新次数和最大更新间隔，
+Windows 同时验证控制画面本地光标为 BlankCursor。Windows 3 项通过、11.749 秒；
+Linux 3 项通过、19.112 秒。Windows 当时观测到 79 次更新，Linux 最终观察文件记录 91 次、
+最终值 100，最大间隔 37 ms。这是滑块值变化间隔，不是视频呈现延迟或鼠标总事件数。
+点击、文字 `zjdesk123`、滚轮、拒绝 / 允许、双方撤销、Ctrl 释放与退会 / 重入均通过。
+报告为 Windows `build/windows-release/test-results/background-drag-input.txt`、
+Linux `build/linux-release/test-results/hidden-fixture.txt` 与 `output/remote-observations.json`。
+
+基础 core / signaling / media 全部通过：Windows 115.62 秒，Linux 109.22 秒。
+Windows `build.ps1 -Preset windows-release -Deploy` 与 Linux `build.sh --deploy` 成功；
+Linux 构建日志为 `build/drag-linux-build.log`。Windows 构建 / 部署客户端 SHA256 均为
+`DA2298E0B4DA15A52F42A52C55401E8DA9EF4015A21B39ABCF38E866E3E2AF74`；
+Linux 构建 / 部署客户端 ELF Build ID 均为 `f4012353629184b2ec1d269ccf9de9e21088e4d4`。
+后台测试使用未切换的 Win32 桌面、未映射父窗口的 Xephyr / X11，未显示测试程序。
+已重新打开两端正常客户端；用户实际桌面拖拽手感与单光标显示待复核。
+光标仍来自视频捕获；本次未改变视频接收缓冲、传输策略，也未证明任意网络下无卡顿。
+
 ## 2026-10-09：正常客户端首帧空白修复
 
 现场 Windows 已入会并显示“正在接收对方屏幕”，但没有首帧。Windows 为用户手动关闭，未发现本次客户端崩溃证据。

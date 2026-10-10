@@ -4,10 +4,31 @@
 #include <QWheelEvent>
 #include <QKeyEvent>
 #include <QFocusEvent>
+#include <QCursor>
 
 VideoSurface::VideoSurface(QWidget *parent) : QOpenGLWidget(parent)
 {
     setMinimumSize(320, 220);
+    motionTimer_.setSingleShot(true);
+    motionTimer_.setInterval(8);
+    motionTimer_.setTimerType(Qt::PreciseTimer);
+    connect(&motionTimer_, &QTimer::timeout, this, &VideoSurface::flushMotion);
+    connect(this, &QOpenGLWidget::frameSwapped, this, [this] {
+        if (!awaitingSwap_)
+            return;
+        awaitingSwap_ = false;
+        ++presentedFrames_;
+        if (presentationClock_.isValid())
+            presentationGapMaxMs_ = qMax(presentationGapMaxMs_, presentationClock_.nsecsElapsed() / 1000000.0);
+        presentationClock_.restart();
+    });
+}
+
+double VideoSurface::takePresentationGapMaxMs()
+{
+    const double result = presentationGapMaxMs_;
+    presentationGapMaxMs_ = -1;
+    return result;
 }
 
 void VideoSurface::setParticipant(const QString &name, const QString &caption)
@@ -26,7 +47,7 @@ void VideoSurface::paintGL()
     {
         if (pendingFrame_)
         {
-            ++presentedFrames_;
+            awaitingSwap_ = true;
             pendingFrame_ = false;
         }
         painter.fillRect(rect(), Qt::black);
@@ -34,6 +55,17 @@ void VideoSurface::paintGL()
         const QRect target((width() - size.width()) / 2, (height() - size.height()) / 2,
                            size.width(), size.height());
         painter.drawImage(target, frame_);
+        if (controlEnabled_ && hasRemoteCursor())
+        {
+            const double scale = double(target.width()) / remoteCursor_.screenSize.width();
+            const QPointF position(target.x() + remoteCursor_.position.x() * (target.width() - 1),
+                target.y() + remoteCursor_.position.y() * (target.height() - 1));
+            painter.save();
+            painter.setClipRect(target);
+            painter.drawImage(QRectF(position - remoteCursor_.hotspot * scale,
+                remoteCursor_.image.size() * scale), remoteCursor_.image);
+            painter.restore();
+        }
         painter.setPen(Qt::white);
         painter.drawText(QRect(16, 12, width() - 32, 24), Qt::AlignLeft,
                          frameCaption_);
@@ -82,20 +114,68 @@ void VideoSurface::paintGL()
 
 void VideoSurface::setFrame(const QImage &frame)
 {
+    const bool hadFrame = !frame_.isNull();
     frame_ = frame;
     pendingFrame_ = !frame.isNull();
+    if (frame.isNull())
+    {
+        awaitingSwap_ = false;
+        presentationClock_.invalidate();
+        presentationGapMaxMs_ = -1;
+        motionTimer_.stop();
+        pendingMotion_ = {};
+        remoteCursor_ = {};
+        if (hadFrame && controlEnabled_)
+        {
+            remoteButtons_ = Qt::NoButton;
+            emit remoteInput({{"kind", "release"}});
+        }
+        unsetCursor();
+    }
+    else if (!hadFrame)
+        updatePointerCursor(mapFromGlobal(QCursor::pos()));
     update();
 }
 
 void VideoSurface::setControlEnabled(bool enabled)
 {
-    if (controlEnabled_ && !enabled)
-        emit remoteInput({{"kind", "release"}});
-    controlEnabled_ = enabled;
     if (!enabled)
+    {
+        motionTimer_.stop();
+        pendingMotion_ = {};
+        remoteCursor_ = {};
         remoteButtons_ = Qt::NoButton;
+        if (controlEnabled_)
+            emit remoteInput({{"kind", "release"}});
+    }
+    controlEnabled_ = enabled;
     setMouseTracking(enabled);
     setFocusPolicy(enabled ? Qt::StrongFocus : Qt::NoFocus);
+    updatePointerCursor(mapFromGlobal(QCursor::pos()));
+}
+
+void VideoSurface::setRemoteCursor(const zjdesk::RemoteCursor &cursor)
+{
+    remoteCursor_ = cursor;
+    update();
+}
+
+void VideoSurface::flushMotion()
+{
+    motionTimer_.stop();
+    const auto input = pendingMotion_;
+    pendingMotion_ = {};
+    if (!input.isEmpty())
+        emit remoteInput(input);
+}
+
+void VideoSurface::updatePointerCursor(const QPointF &position)
+{
+    QJsonObject input;
+    if (pointerInput(position, input))
+        setCursor(Qt::BlankCursor);
+    else
+        unsetCursor();
 }
 
 bool VideoSurface::pointerInput(const QPointF &position, QJsonObject &input) const
@@ -114,11 +194,13 @@ bool VideoSurface::pointerInput(const QPointF &position, QJsonObject &input) con
 
 void VideoSurface::mouseMoveEvent(QMouseEvent *event)
 {
+    updatePointerCursor(event->position());
     QJsonObject input{{"kind", "move"}};
-    if (pointerInput(event->position(), input) && (!motionClock_.isValid() || motionClock_.elapsed() >= 16))
+    if (pointerInput(event->position(), input))
     {
-        emit remoteInput(input);
-        motionClock_.restart();
+        pendingMotion_ = input;
+        if (!motionTimer_.isActive())
+            motionTimer_.start();
     }
 }
 
@@ -128,6 +210,7 @@ void VideoSurface::mousePressEvent(QMouseEvent *event)
     if (pointerInput(event->position(), input))
     {
         setFocus(Qt::MouseFocusReason);
+        flushMotion();
         remoteButtons_ |= event->button();
         emit remoteInput(input);
         event->accept();
@@ -139,6 +222,7 @@ void VideoSurface::mouseReleaseEvent(QMouseEvent *event)
     QJsonObject input{{"kind", "button"}, {"button", int(event->button())}, {"pressed", false}};
     if (!remoteButtons_.testFlag(event->button()))
         return;
+    flushMotion();
     remoteButtons_ &= ~event->button();
     if (pointerInput(event->position(), input))
         emit remoteInput(input);
@@ -155,6 +239,7 @@ void VideoSurface::wheelEvent(QWheelEvent *event)
     QJsonObject input{{"kind", "wheel"}, {"steps", steps}};
     if (steps && pointerInput(event->position(), input))
     {
+        flushMotion();
         emit remoteInput(input);
         event->accept();
     }
@@ -164,6 +249,7 @@ void VideoSurface::keyPressEvent(QKeyEvent *event)
 {
     if (controlEnabled_)
     {
+        flushMotion();
         emit remoteInput({{"kind", "key"}, {"key", event->key()}, {"pressed", true}});
         event->accept();
     }
@@ -175,6 +261,7 @@ void VideoSurface::keyReleaseEvent(QKeyEvent *event)
 {
     if (controlEnabled_ && !event->isAutoRepeat())
     {
+        flushMotion();
         emit remoteInput({{"kind", "key"}, {"key", event->key()}, {"pressed", false}});
         event->accept();
     }
@@ -186,6 +273,8 @@ void VideoSurface::focusOutEvent(QFocusEvent *event)
 {
     if (controlEnabled_)
     {
+        motionTimer_.stop();
+        pendingMotion_ = {};
         remoteButtons_ = Qt::NoButton;
         emit remoteInput({{"kind", "release"}});
     }

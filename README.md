@@ -28,6 +28,7 @@ C++ / Qt 跨平台协作工作台，目标平台为 Windows 11 x64 与 Ubuntu 22
 - WebRTC DataChannel 传输授权和键鼠输入；Linux X11 本地确认后使用 XTest 执行。
 - 点击“放大画面”全屏查看并控制，按 Esc 或“退出放大”恢复原窗口。
 - 支持点击、移动、拖动、滚轮和常用键盘操作；拒绝、撤销、失焦和退会释放本程序按下的键鼠。
+- 拖拽按 8 ms 节奏合并发送最新位置，保留末次移动；远控画面内隐藏控制端光标，独立回传并绘制 Linux 实际光标，减少等待视频解码的反馈延迟。
 
 双向摄像头通话、远端音频、Windows 被控端和自动重连还没有实现。
 摄像头预览不会发送给对方；两人入会后，Windows 直接请求控制，Linux 本地允许后自动连接桌面。
@@ -116,12 +117,31 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run.ps1
 ```
 
 两端填写 `ws://服务机器局域网IP:8765` 并加入相同房间。
+2026-10-10 两端回到公司网络：Linux 为 `10.11.47.137`，Windows 为 `10.11.48.48`；
+已验证这两个子网可以互通，SSH 使用 `orbbec@10.11.47.137`。
+仅修改信令地址不会限制媒体网卡。需要明确验证纯局域网时，在各自启动进程前设置
+`ZJDESK_WEBRTC_LOCAL_ADDRESS` 为本机局域网地址；候选收集只使用该地址，
+ShareStats 的 `localAddress` / `remoteAddress` 记录实际选中地址。未设置时保留自动收集，
+地址变化后须更新或移除此进程环境变量，不修改系统路由或 Tailscale 配置。
 首版没有账号和房间密码，定位于局域网开发验证；公网部署属于后续版本。
+
+### 不同局域网，通过 Tailscale 连接
+
+两端已加入同一 Tailnet 时，服务地址可直接填写 Linux 的 Tailscale 地址，
+本次为 `ws://100.87.60.58:8765`。Linux 服务需监听该地址或 `0.0.0.0`，
+恢复跨网验证时应移除两端 `ZJDESK_WEBRTC_LOCAL_ADDRESS` 的局域网绑定，Windows 启动传入
+`-ServerUrl 'ws://100.87.60.58:8765'`；两端加入同一房间，再由 Linux 本地允许控制。
+媒体 ICE host 候选不限制局域网网段，能够使用 Tailscale 虚拟网卡地址，无需把 IP 写入代码。
+本次将媒体启动等待改为 45 秒、控制请求及允许后的连接等待改为 60 秒；
+Linux 等待本地批准仍为 30 秒，拒绝、撤销和断开仍立即清理。
+Tailscale 的 direct / relay 路径独立于界面显示的媒体 TCP / UDP；DERP 中继可能增加延迟并限制实际速度。
+这不代表已实现脱离 Tailscale 的公网 NAT 穿透或 TURN；本次中继链路下画面 / 控制验收未通过，
+延长等待没有解决连接失败，实测边界见 docs/validation.md。
 
 ## Ubuntu 22.04
 
 准备在 Ubuntu 22.04 上构建的 Qt 6.8.3、GStreamer 1.26.11、CMake >= 3.28、Ninja、G++ 11
-和 X11 / XTest 开发库。脚本默认使用 `~/.local/opt/zjdesk-deps/` 下的 Qt 和 GStreamer，
+和 X11 / XTest / XFixes 开发库（`libxtst-dev`、`libxfixes-dev`）。脚本默认使用 `~/.local/opt/zjdesk-deps/` 下的 Qt 和 GStreamer，
 可通过 `QT_ROOT` / `GST_ROOT` 指定其他前缀。在 Linux 的 X11 桌面终端执行：
 
 ```bash
@@ -141,8 +161,12 @@ bash ./run.sh
 Linux 桌面运行 `bash ./run.sh`，Windows 运行：
 
 ```powershell
-.\run.ps1 -Preset windows-release -ServerUrl 'ws://192.168.3.13:8765' -Room demo -Name Windows
+$env:ZJDESK_WEBRTC_LOCAL_ADDRESS = '10.11.48.48'
+.\run.ps1 -Preset windows-release -ServerUrl 'ws://10.11.47.137:8765' -Room demo -Name Windows
 ```
+
+本次 Linux 启动使用 `ZJDESK_WEBRTC_LOCAL_ADDRESS=10.11.47.137 bash ./run.sh ws://127.0.0.1:8765 demo Linux`。
+不同网络经 Tailscale 的验证按用户要求暂停，当前局域网结果见 [validation.md](docs/validation.md)。
 
 两端点击“加入房间”；Windows 点击“请求控制 Linux”，Linux 点击“允许控制”，桌面自动连接。
 Windows 点击收到的画面后操作键鼠；“放大画面”进入全屏，Esc / “退出放大”返回，任一端可停止控制。
@@ -180,7 +204,13 @@ Linux 桌面发送默认使用 WebRTC ICE-TCP，避免高画质大关键帧在�
 VP9 保留 4:4:4 色彩，默认允许轻微有损以减少大帧和带宽压力；软件量化范围为 0～8，线程数为 1～8。
 Linux 可选探测 VA-API VP9 profile 1 编码，启动及自动模式尺寸切换通过后才使用；失败回退软件编码。
 硬编使用 CQP 8～16，实际码率不受目标预算硬性限制；Windows 接收仍使用软件解码以保留 4:4:4。
-连续丢包反馈会保守降低编码预算，稳定后逐步恢复；这不等同于完整 GCC，实际效果仍由两端实测确认，不含系统声音。
+连续丢包或相对基线的持续往返延迟会保守降低编码预算，拥塞期间不自动升档；稳定后逐步恢复。
+另有 Linux 发送端 `ZJDESK_WEBRTC_GCC=tcp` 可选路径，使用实际协商的 TWCC 和单层 GCC pacing 并保留 ICE-TCP，
+需要可选 rsrtp / rtpgccbwe 插件；不设置或设为 0 保留原 ICE-TCP、不开启 GCC。
+当前 LAN 最终十分钟真实 Edge 隔离桌面对照平均显示 52.73 fps、保持 1080p，
+仍有最长约 907 ms 停顿，尚未达到稳定 60 fps；完整结果和物理 GNOME 验证边界见 docs/validation.md。
+设为 1 的 UDP 候选在物理 GNOME 首帧复验失败，不用于当前日常客户端。公司 LAN 对照结果见 docs/validation.md，
+不能推广为跨网保证。两端鼠标位置在进入媒体线程前合并，离散按键和授权事件仍保持顺序；不含系统声音。
 传输保留 NACK / RTX，增加 RED / ULPFEC；仅为本会话的直连 UDP socket 申请缓冲，不修改系统网络参数。
 两端为 RTCP 反馈明确保留 64 kbps 预算，避免启动期自动预算过低导致重传反馈晚于接收期限。
 全屏移除边距与底部控件，占满屏幕；远端与本机屏幕像素尺寸相同时按 1:1 显示。

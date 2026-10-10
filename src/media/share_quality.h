@@ -33,7 +33,7 @@ public:
         return result;
     }
     bool observe(double encodedFps, double receivedFps);
-    bool observeNetwork(qint64 receivedPackets, qint64 lostPackets);
+    bool observeNetwork(qint64 receivedPackets, qint64 lostPackets, double excessDelayMs = -1);
 private:
     QList<ShareProfile> profiles_;
     int index_ = 0;
@@ -42,6 +42,8 @@ private:
     int bitrateLimit_ = 0;
     int congestedWindows_ = 0;
     int healthyNetworkWindows_ = 0;
+    int delayedWindows_ = 0;
+    double excessDelayMs_ = -1;
     qint64 previousReceived_ = -1;
     qint64 previousLost_ = -1;
 };

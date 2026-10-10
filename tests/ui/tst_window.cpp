@@ -50,6 +50,14 @@ QJsonObject shareDiagnostics(const zjdesk::ShareStats &stats)
         {"hardwareQuantizer", stats.encoderQuantizer}, {"targetFps", stats.targetFps},
         {"sendBufferBytes", stats.sendBufferBytes}, {"receiveBufferBytes", stats.receiveBufferBytes},
         {"rtcpFeedbackBudget", stats.rtcpFeedbackBudget}, {"transport", stats.transport},
+        {"localAddress", stats.localAddress}, {"remoteAddress", stats.remoteAddress},
+        {"networkMbps", stats.networkMbps}, {"packetsReceived", stats.packetsReceived},
+        {"packetsLost", stats.packetsLost}, {"jitterMs", stats.jitterMs},
+        {"controlRttMs", stats.controlRttMs}, {"transportExcessMs", stats.transportExcessMs},
+        {"controlBufferedBytes", qint64(stats.controlBufferedBytes)}, {"revision", stats.revision},
+        {"congestionBitrate", stats.congestionBitrate}, {"pacedBytes", stats.pacedBytes},
+        {"droppedBeforeEncode", qint64(stats.droppedBeforeEncode)},
+        {"presentedGapMaxMs", stats.presentedGapMaxMs},
         {"processedFps", stats.processedFps}, {"deliveredFps", stats.deliveredFps},
         {"codecMeanMs", stats.codecMeanMs}, {"codecMaxMs", stats.codecMaxMs},
         {"outputGapMaxMs", stats.outputGapMaxMs}, {"copyMaxMs", stats.copyMaxMs},
@@ -135,7 +143,8 @@ private slots:
             startup.start();
             QTRY_VERIFY_WITH_TIMEOUT(surface->hasFrame(), 15000);
             const auto firstFrameMs = startup.elapsed();
-            QTRY_COMPARE_WITH_TIMEOUT(window.session_.shareStats().transport, QString("TCP"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(window.session_.shareStats().transport,
+                qEnvironmentVariable("ZJDESK_TEST_TRANSPORT", "TCP"), 5000);
             QTRY_VERIFY_WITH_TIMEOUT(window.session_.shareStats().processedFps > 0, 5000);
             waitForPresentation(2000);
             const auto stats = window.session_.shareStats();
@@ -189,6 +198,25 @@ private slots:
         layout->addWidget(&drag);
         layout->addWidget(&result);
         int clicks = 0;
+        int dragUpdates = 0;
+        qint64 dragGapMaxMs = 0;
+        QElapsedTimer dragClock;
+        connect(&drag, &QSlider::valueChanged, this, [&](int value) {
+            if (dragClock.isValid())
+                dragGapMaxMs = qMax(dragGapMaxMs, dragClock.elapsed());
+            dragClock.restart();
+            ++dragUpdates;
+            if (qEnvironmentVariable("ZJDESK_DRAG_LATENCY_TEST") == "1")
+            {
+                QImage code(224, 64, QImage::Format_RGB32);
+                QPainter painter(&code);
+                for (int bit = 0; bit < 7; ++bit)
+                    painter.fillRect(bit * 32, 0, 32, 64, value & (1 << bit) ? Qt::white : Qt::black);
+                painter.end();
+                result.setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                result.setPixmap(QPixmap::fromImage(code));
+            }
+        });
         QElapsedTimer fixtureClock;
         fixtureClock.start();
         qint64 injectedAtUs = -1;
@@ -215,13 +243,28 @@ private slots:
         target.show();
         QVERIFY(QTest::qWaitForWindowExposed(&target));
         MovingDesktop marker;
+        bool edgeStressActive = false;
         marker.setGeometry(QGuiApplication::primaryScreen()->geometry().right() - 500, 60, 480, 280);
+        if (qEnvironmentVariable("ZJDESK_DRAG_LATENCY_TEST") == "1")
+            marker.setGeometry(60, 380, 1800, 640);
         marker.show();
         QVERIFY(QTest::qWaitForWindowExposed(&marker));
         QTimer observations;
         const auto screen = QGuiApplication::primaryScreen();
         connect(&observations, &QTimer::timeout, this, [&] {
             QDir().mkpath("output");
+            const bool stress = QFile::exists("output/edge-stress-active");
+            if (stress != edgeStressActive)
+            {
+                edgeStressActive = stress;
+                marker.setVisible(!stress);
+                target.setVisible(!stress);
+                if (!stress)
+                {
+                    target.raise();
+                    target.activateWindow();
+                }
+            }
             const auto shareStats = window.session_.shareStats();
             const auto editPoint = field.mapToGlobal(field.rect().center());
             const auto clickPoint = button.mapToGlobal(button.rect().center());
@@ -249,6 +292,7 @@ private slots:
                 {"wheelX", wheelPoint.x()}, {"wheelY", wheelPoint.y()}, {"wheel", wheel.value()},
                 {"dragX", dragStart.x()}, {"dragY", dragStart.y()},
                 {"dragEndX", dragEnd.x()}, {"dragEndY", dragEnd.y()}, {"drag", drag.value()},
+                {"dragUpdates", dragUpdates}, {"dragGapMaxMs", dragGapMaxMs},
                 {"markerX", marker.mapToGlobal(QPoint()).x()}, {"markerY", marker.mapToGlobal(QPoint()).y()},
                 {"markerWidth", marker.width()}, {"markerHeight", marker.height()}};
             QSaveFile file("output/remote-observations.json");
@@ -272,7 +316,8 @@ private slots:
         target.activateWindow();
         QElapsedTimer completionClock;
         completionClock.start();
-        while (!completed && completionClock.elapsed() < 240000)
+        const int fixtureLimit = qMax(240000, qEnvironmentVariableIntValue("ZJDESK_PERFORMANCE_DURATION_MS") + 180000);
+        while (!completed && completionClock.elapsed() < fixtureLimit)
             waitForPresentation(100);
         QVERIFY(completed);
         QVERIFY(clicks >= 1);
@@ -329,6 +374,7 @@ private slots:
             if (QTest::currentTestFailed())
             {
                 qWarning().noquote() << window.findChild<QPlainTextEdit *>()->toPlainText();
+                qWarning().noquote() << QJsonDocument(shareDiagnostics(window.session_.shareStats())).toJson(QJsonDocument::Compact);
                 qWarning().noquote() << observer.readAllStandardError();
                 window.grab().save("output/remote-control-failed.png");
             }
@@ -344,9 +390,18 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(status->text(), QStringLiteral("远程控制未开启"), 10000);
         QTRY_VERIFY(request->isEnabled());
         request->click();
-        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("正在控制 Linux")), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("正在控制 Linux")), 60000);
         QTRY_VERIFY_WITH_TIMEOUT(surface->hasFrame(), 10000);
-        QTRY_COMPARE_WITH_TIMEOUT(window.session_.shareStats().transport, QString("TCP"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(surface->hasRemoteCursor(), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(window.session_.shareStats().transport,
+            qEnvironmentVariable("ZJDESK_TEST_TRANSPORT", "TCP"), 5000);
+        if (!qEnvironmentVariable("ZJDESK_WEBRTC_LOCAL_ADDRESS").isEmpty())
+        {
+            QTRY_COMPARE_WITH_TIMEOUT(window.session_.shareStats().localAddress,
+                qEnvironmentVariable("ZJDESK_WEBRTC_LOCAL_ADDRESS"), 5000);
+            QCOMPARE(window.session_.shareStats().remoteAddress,
+                qEnvironmentVariable("ZJDESK_TEST_MEDIA_REMOTE_ADDRESS", QUrl(qEnvironmentVariable("ZJDESK_TEST_SERVER")).host()));
+        }
         QTRY_VERIFY_WITH_TIMEOUT(observation().contains("fieldX"), 10000);
         const auto normalSize = surface->size();
         auto *expand = window.findChild<QPushButton *>("expandVideoButton");
@@ -453,13 +508,45 @@ private slots:
         if (qEnvironmentVariable("ZJDESK_VIDEO_QUALITY_TEST") == "1")
         {
             QJsonArray performance;
+            QList<qint64> presentationGapsUs;
+            QElapsedTimer swapClock;
+            quint64 lastSwapFrames = surface->presentedFrames();
+            const auto swapConnection = connect(surface, &QOpenGLWidget::frameSwapped, this, [&] {
+                const auto frames = surface->presentedFrames();
+                if (frames == lastSwapFrames)
+                    return;
+                if (swapClock.isValid())
+                    presentationGapsUs.append(swapClock.nsecsElapsed() / 1000);
+                swapClock.restart();
+                lastSwapFrames = frames;
+            });
+            const auto stopSwaps = qScopeGuard([&] { QObject::disconnect(swapConnection); });
             QElapsedTimer measurement;
+            const int performanceDuration = qBound(30000,
+                qEnvironmentVariableIntValue("ZJDESK_PERFORMANCE_DURATION_MS"), 600000);
+            QProcess edgeStress;
+            if (qEnvironmentVariable("ZJDESK_EDGE_STRESS_TEST") == "1")
+            {
+                edgeStress.start("C:/Windows/System32/OpenSSH/ssh.exe", {"-o", "BatchMode=yes", host,
+                    "python3 " + root + "/build/edge-stress.py " + QString::number(performanceDuration / 1000 - 5)});
+                QVERIFY(edgeStress.waitForStarted(5000));
+            }
+            const auto stopEdgeStress = qScopeGuard([&] {
+                if (edgeStress.state() != QProcess::NotRunning)
+                {
+                    edgeStress.terminate();
+                    edgeStress.waitForFinished(3000);
+                }
+            });
             measurement.start();
             auto previousPresented = surface->presentedFrames();
             qint64 previousTime = 0;
-            while (measurement.elapsed() < 30000)
+            while (measurement.elapsed() < performanceDuration)
             {
                 waitForPresentation(1000);
+                if (qEnvironmentVariable("ZJDESK_EDGE_STRESS_TEST") == "1"
+                    && edgeStress.state() == QProcess::NotRunning && edgeStress.exitCode() != 0)
+                    QFAIL(edgeStress.readAllStandardError().constData());
                 const auto elapsed = measurement.elapsed();
                 const auto presented = surface->presentedFrames();
                 const auto network = window.session_.shareStats();
@@ -479,6 +566,14 @@ private slots:
             QVERIFY(performanceReport.open(QIODevice::WriteOnly));
             performanceReport.write(QJsonDocument(performance).toJson());
             QVERIFY(performanceReport.commit());
+            if (qEnvironmentVariable("ZJDESK_EDGE_STRESS_TEST") == "1")
+            {
+                if (edgeStress.state() != QProcess::NotRunning)
+                    QVERIFY(edgeStress.waitForFinished(10000));
+                qInfo().noquote() << edgeStress.readAllStandardOutput();
+                QVERIFY2(edgeStress.exitCode() == 0, edgeStress.readAllStandardError().constData());
+                waitForPresentation(1000);
+            }
             const auto source = QSize(data.value("width").toInt(), data.value("height").toInt());
             const auto nativeFrame = surface->grabFramebuffer();
             QCOMPARE(nativeFrame.size(), source);
@@ -538,6 +633,7 @@ private slots:
                 const auto network = window.session_.shareStats();
                 samples.append(QJsonObject{{"milliseconds", duration.elapsed()}, {"healthyPixels", healthy},
                     {"receiver", window.findChild<QLabel *>("shareStatus")->text()},
+                    {"receiverMedia", shareDiagnostics(network)}, {"senderMedia", observation().value("media")},
                     {"receivedMbps", network.networkMbps}, {"packetsReceived", network.packetsReceived},
                     {"packetsLost", network.packetsLost},
                     {"jitterMs", network.jitterMs}});
@@ -553,8 +649,16 @@ private slots:
             }
             QSaveFile report("output/cross-video-quality.json");
             QVERIFY(report.open(QIODevice::WriteOnly));
+            std::sort(presentationGapsUs.begin(), presentationGapsUs.end());
+            const int stalls = int(std::count_if(presentationGapsUs.begin(), presentationGapsUs.end(),
+                [](qint64 gap) { return gap > 200000; }));
             report.write(QJsonDocument(QJsonObject{{"samples", samples},
                 {"presentedFps", (surface->presentedFrames() - qualityPresentedBefore) * 1000.0 / duration.elapsed()},
+                {"presentationGapSamples", presentationGapsUs.size()},
+                {"presentationGapP95Us", presentationGapsUs.isEmpty() ? -1
+                    : presentationGapsUs.at(presentationGapsUs.size() * 95 / 100)},
+                {"presentationGapMaxUs", presentationGapsUs.isEmpty() ? -1 : presentationGapsUs.last()},
+                {"presentationStallsOver200Ms", stalls},
                 {"unhealthySamples", unhealthy},
                 {"changedSamples", changed}}).toJson());
             QVERIFY(report.commit());
@@ -572,10 +676,78 @@ private slots:
             Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
         QApplication::sendEvent(surface, &scroll);
         QTRY_COMPARE_WITH_TIMEOUT(observation().value("wheel").toInt(), 11, 10000);
+        QElapsedTimer dragTimeline;
+        QList<qint64> commandedAt(101, -1), dragVisibleUs;
+        QHash<int, qint64> cursorCommandedAt;
+        QList<qint64> cursorReceivedUs;
+        const auto cursorUpdates = connect(&window.session_, &zjdesk::SessionCoordinator::remoteCursorChanged, this,
+            [&](const zjdesk::RemoteCursor &cursor) {
+                const int x = qRound(cursor.position.x() * (cursor.screenSize.width() - 1));
+                if (cursor.visible && dragTimeline.isValid() && cursorCommandedAt.contains(x))
+                    cursorReceivedUs.append(dragTimeline.nsecsElapsed() / 1000 - cursorCommandedAt.take(x));
+            });
+        const auto stopCursorUpdates = qScopeGuard([&] { QObject::disconnect(cursorUpdates); });
+        int lastDecodedDrag = -1;
+        const auto dragFrames = connect(&window.session_, &zjdesk::SessionCoordinator::shareFrame, this,
+            [&](const QImage &image) {
+                if (qEnvironmentVariable("ZJDESK_DRAG_LATENCY_TEST") != "1"
+                    || image.isNull() || !dragTimeline.isValid())
+                    return;
+                int value = 0;
+                for (int bit = 0; bit < 7; ++bit)
+                {
+                    const auto color = image.pixelColor(data.value("resultX").toInt() + 4 + bit * 32,
+                        data.value("resultY").toInt());
+                    if (color.red() > 180 && color.green() > 180 && color.blue() > 180)
+                        value |= 1 << bit;
+                    else if (color.red() > 70 || color.green() > 70 || color.blue() > 70)
+                        return;
+                }
+                if (value > 100 || value <= lastDecodedDrag || commandedAt.at(value) < 0)
+                    return;
+                lastDecodedDrag = value;
+                dragVisibleUs.append(dragTimeline.nsecsElapsed() / 1000 - commandedAt.at(value));
+            });
+        const auto stopDragFrames = qScopeGuard([&] { QObject::disconnect(dragFrames); });
+        dragTimeline.start();
         QTest::mousePress(surface, Qt::LeftButton, Qt::NoModifier, point("dragX", "dragY"));
-        QTest::mouseMove(surface, point("dragEndX", "dragEndY"), 100);
+        const auto dragStart = point("dragX", "dragY"), dragEnd = point("dragEndX", "dragEndY");
+        for (int step = 1; step <= 120; ++step)
+        {
+            const auto position = dragStart + (dragEnd - dragStart) * step / 120;
+            const int value = qMin(100, qRound(step * 100.0 / 120));
+            if (commandedAt.at(value) < 0)
+                commandedAt[value] = dragTimeline.nsecsElapsed() / 1000;
+            const QSize source(data.value("width").toInt(), data.value("height").toInt());
+            const auto size = source.scaled(surface->size(), Qt::KeepAspectRatio);
+            const double x = (position.x() - (surface->width() - size.width()) / 2.0) / size.width();
+            cursorCommandedAt.insert(qRound(x * (source.width() - 1)), dragTimeline.nsecsElapsed() / 1000);
+            QMouseEvent move(QEvent::MouseMove, position, surface->mapToGlobal(position),
+                Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(surface, &move);
+            waitForPresentation(8);
+        }
         QTest::mouseRelease(surface, Qt::LeftButton, Qt::NoModifier, point("dragEndX", "dragEndY"));
         QTRY_VERIFY_WITH_TIMEOUT(observation().value("drag").toInt() >= 80, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(observation().value("dragUpdates").toInt() >= 20, 10000);
+        qInfo() << "Remote drag updates" << observation().value("dragUpdates").toInt()
+                << "maximum update gap ms" << observation().value("dragGapMaxMs").toInteger();
+        QCOMPARE(surface->cursor().shape(), Qt::BlankCursor);
+        QTRY_VERIFY_WITH_TIMEOUT(cursorReceivedUs.size() >= 10, 10000);
+        std::sort(cursorReceivedUs.begin(), cursorReceivedUs.end());
+        qInfo() << "Cursor input to confirmed remote position samples" << cursorReceivedUs.size()
+            << "median ms" << cursorReceivedUs.at(cursorReceivedUs.size() / 2) / 1000.0
+            << "p95 ms" << cursorReceivedUs.at(cursorReceivedUs.size() * 95 / 100) / 1000.0;
+        if (qEnvironmentVariable("ZJDESK_DRAG_LATENCY_TEST") == "1")
+        {
+            waitForPresentation(1000);
+            QVERIFY(dragVisibleUs.size() >= 10);
+            std::sort(dragVisibleUs.begin(), dragVisibleUs.end());
+            qInfo() << "Drag input to decoded frame samples" << dragVisibleUs.size()
+                << "median ms" << dragVisibleUs.at(dragVisibleUs.size() / 2) / 1000.0
+                << "p95 ms" << dragVisibleUs.at(dragVisibleUs.size() * 95 / 100) / 1000.0
+                << "maximum ms" << dragVisibleUs.last() / 1000.0;
+        }
         QVERIFY(QDir().mkpath("output"));
         const auto controlledImage = surface->grabFramebuffer();
         QCOMPARE(controlledImage.size(), surface->size() * surface->devicePixelRatioF());
@@ -601,6 +773,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(observation().value("controlHeld").toBool(), 10000);
         window.findChild<QPushButton *>("stopControlButton")->click();
         QTRY_COMPARE(status->text(), QStringLiteral("远程控制未开启"));
+        QVERIFY(!surface->hasRemoteCursor());
         QTRY_COMPARE_WITH_TIMEOUT(observation().value("status").toString(), QStringLiteral("远程控制未开启"), 10000);
         QTRY_VERIFY_WITH_TIMEOUT(!observation().value("controlHeld").toBool(), 10000);
         QTest::keyClicks(surface, "blocked", Qt::NoModifier, 20);
@@ -694,6 +867,242 @@ private slots:
         QApplication::sendEvent(&surface, &lost);
         QCOMPARE(input.last().at(0).toJsonObject().value("kind").toString(), QString("release"));
         surface.setControlEnabled(false);
+    }
+
+    void controlSurfaceCoalescesMotionAndRestoresCursor()
+    {
+        VideoSurface surface;
+        surface.resize(640, 480);
+        surface.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&surface));
+        QImage frame(1920, 1080, QImage::Format_RGB32);
+        frame.fill(Qt::blue);
+        surface.setFrame(frame);
+        surface.setControlEnabled(true);
+        QSignalSpy input(&surface, &VideoSurface::remoteInput);
+        const auto move = [&](const QPoint &position) {
+            QMouseEvent event(QEvent::MouseMove, position, surface.mapToGlobal(position),
+                Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(&surface, &event);
+        };
+        QTest::mousePress(&surface, Qt::LeftButton, Qt::NoModifier, QPoint(120, 240));
+        input.clear();
+        for (int x = 121; x <= 500; ++x)
+            move(QPoint(x, 240));
+        QTRY_VERIFY_WITH_TIMEOUT(!input.isEmpty(), 200);
+        const auto lastMove = input.last().at(0).toJsonObject();
+        QCOMPARE(lastMove.value("kind").toString(), QString("move"));
+        QCOMPARE(lastMove.value("x").toDouble(), 500.0 / 640);
+        QVERIFY(input.size() <= 2);
+        QCOMPARE(surface.cursor().shape(), Qt::BlankCursor);
+        input.clear();
+        move(QPoint(510, 240));
+        QTest::mouseRelease(&surface, Qt::LeftButton, Qt::NoModifier, QPoint(520, 240));
+        QCOMPARE(input.last().at(0).toJsonObject().value("kind").toString(), QString("button"));
+        QCOMPARE(input.last().at(0).toJsonObject().value("x").toDouble(), 520.0 / 640);
+        const auto releasedCount = input.size();
+        QTest::qWait(30);
+        QCOMPARE(input.size(), releasedCount);
+        move(QPoint(320, 20));
+        QCOMPARE(surface.cursor().shape(), Qt::ArrowCursor);
+        move(QPoint(300, 240));
+        QFocusEvent lost(QEvent::FocusOut);
+        QApplication::sendEvent(&surface, &lost);
+        const auto lostCount = input.size();
+        QTest::qWait(30);
+        QCOMPARE(input.size(), lostCount);
+        QCOMPARE(input.last().at(0).toJsonObject().value("kind").toString(), QString("release"));
+        move(QPoint(310, 240));
+        surface.setControlEnabled(false);
+        const auto stoppedCount = input.size();
+        QCOMPARE(surface.cursor().shape(), Qt::ArrowCursor);
+        QTest::qWait(30);
+        QCOMPARE(input.size(), stoppedCount);
+        surface.setControlEnabled(true);
+        surface.setFrame({});
+        QCOMPARE(surface.cursor().shape(), Qt::ArrowCursor);
+    }
+
+    void presentationCountsSwapsAndIgnoresCursorOnlyRedraws()
+    {
+        VideoSurface surface;
+        surface.resize(640, 480);
+        surface.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&surface));
+        QImage frame(640, 480, QImage::Format_RGB32);
+        frame.fill(Qt::blue);
+        surface.setFrame(frame);
+        QCOMPARE(surface.presentedFrames(), quint64(0));
+        QTRY_COMPARE(surface.presentedFrames(), quint64(1));
+        for (int i = 0; i < 3; ++i)
+        {
+            surface.update();
+            waitForPresentation(30);
+        }
+        QCOMPARE(surface.presentedFrames(), quint64(1));
+        surface.setFrame(frame);
+        QTRY_COMPARE(surface.presentedFrames(), quint64(2));
+        QVERIFY(surface.takePresentationGapMaxMs() > 0);
+        QCOMPARE(surface.takePresentationGapMaxMs(), -1.0);
+        surface.setFrame(frame);
+        surface.setFrame({});
+        waitForPresentation(50);
+        QCOMPARE(surface.presentedFrames(), quint64(2));
+        surface.setFrame(frame);
+        QTRY_COMPARE(surface.presentedFrames(), quint64(3));
+        QCOMPARE(surface.takePresentationGapMaxMs(), -1.0);
+    }
+
+    void remoteCursorOverlayUsesHostShapeAndClearsOnStop()
+    {
+        VideoSurface surface;
+        surface.resize(640, 480);
+        surface.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&surface));
+        QImage frame(1920, 1080, QImage::Format_RGB32);
+        frame.fill(Qt::blue);
+        surface.setFrame(frame);
+        surface.setControlEnabled(true);
+        const auto center = QPoint(320, 240) * surface.devicePixelRatioF();
+        const auto movedCenter = QPoint(480, 240) * surface.devicePixelRatioF();
+        QCOMPARE(surface.grabFramebuffer().pixelColor(center), QColor(Qt::blue));
+        const auto presented = surface.presentedFrames();
+        zjdesk::RemoteCursor cursor;
+        cursor.image = QImage(48, 48, QImage::Format_ARGB32_Premultiplied);
+        cursor.image.fill(Qt::red);
+        cursor.hotspot = QPoint(24, 24);
+        cursor.screenSize = frame.size();
+        cursor.position = QPointF(0.5, 0.5);
+        cursor.visible = true;
+        surface.setRemoteCursor(cursor);
+        QVERIFY(surface.hasRemoteCursor());
+        QCOMPARE(surface.grabFramebuffer().pixelColor(center), QColor(Qt::red));
+        QCOMPARE(surface.presentedFrames(), presented);
+        cursor.position = QPointF(0.75, 0.5);
+        surface.setRemoteCursor(cursor);
+        const auto moved = surface.grabFramebuffer();
+        QCOMPARE(moved.pixelColor(center), QColor(Qt::blue));
+        QCOMPARE(moved.pixelColor(movedCenter), QColor(Qt::red));
+        cursor.visible = false;
+        surface.setRemoteCursor(cursor);
+        QVERIFY(!surface.hasRemoteCursor());
+        QCOMPARE(surface.grabFramebuffer().pixelColor(movedCenter), QColor(Qt::blue));
+        cursor.visible = true;
+        surface.setRemoteCursor(cursor);
+        surface.setControlEnabled(false);
+        QVERIFY(!surface.hasRemoteCursor());
+        QCOMPARE(surface.cursor().shape(), Qt::ArrowCursor);
+        QCOMPARE(surface.grabFramebuffer().pixelColor(movedCenter), QColor(Qt::blue));
+    }
+
+    void desktopSharingStartsWithFreshKeyframeAfterDelayedNegotiation()
+    {
+#ifndef Q_OS_LINUX
+        QSKIP("Linux X11 capture startup regression");
+#else
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        QWidget desktop(nullptr, Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        const auto fill = [&](const QColor &color) {
+            auto palette = desktop.palette();
+            palette.setColor(QPalette::Window, color);
+            desktop.setPalette(palette);
+        };
+        desktop.setAutoFillBackground(true);
+        fill(Qt::red);
+        desktop.showFullScreen();
+        QVERIFY(QTest::qWaitForWindowExposed(&desktop));
+        zjdesk::ScreenShare sender, receiver;
+        QList<QPair<QString, QJsonObject>> pending;
+        bool forward = false;
+        connect(&sender, &zjdesk::ScreenShare::negotiationReady, &receiver,
+            [&](quint64, const QString &type, const QJsonObject &message) {
+                if (forward)
+                    receiver.negotiate(type, message, 9);
+                else
+                    pending.append({type, message});
+            });
+        connect(&receiver, &zjdesk::ScreenShare::negotiationReady, &sender,
+            [&](quint64, const QString &type, const QJsonObject &message) { sender.negotiate(type, message, 7); });
+        QImage captured, firstDecoded;
+        connect(&sender, &zjdesk::ScreenShare::frameReady, this,
+            [&](quint64, const QImage &image) { captured = image; });
+        connect(&receiver, &zjdesk::ScreenShare::frameReady, this,
+            [&](quint64, const QImage &image) { if (firstDecoded.isNull()) firstDecoded = image; });
+        receiver.start(false, {}, 9);
+        sender.start(true, "desktop", 7, 30);
+        QTRY_VERIFY_WITH_TIMEOUT(!captured.isNull() && captured.pixelColor(100, 100).red() > 220, 10000);
+        QTest::qWait(1000);
+        fill(Qt::blue);
+        QTRY_VERIFY_WITH_TIMEOUT(captured.pixelColor(100, 100).blue() > 220, 5000);
+        QTest::qWait(500);
+        QVERIFY(firstDecoded.isNull());
+        QVERIFY(!pending.isEmpty());
+        forward = true;
+        for (const auto &message : pending)
+            receiver.negotiate(message.first, message.second, 9);
+        QTRY_VERIFY_WITH_TIMEOUT(!firstDecoded.isNull(), 10000);
+        const auto pixel = firstDecoded.pixelColor(100, 100);
+        QVERIFY2(pixel.blue() > 220 && pixel.red() < 24, qPrintable(pixel.name()));
+        sender.stop(8);
+        receiver.stop(10);
+#endif
+    }
+
+    void desktopCursorEmbeddingCanBeDisabledAndRestored()
+    {
+#ifndef Q_OS_LINUX
+        QSKIP("Linux X11 cursor capture only");
+#else
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        QWidget desktop(nullptr, Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        auto palette = desktop.palette();
+        palette.setColor(QPalette::Window, Qt::blue);
+        desktop.setPalette(palette);
+        desktop.setAutoFillBackground(true);
+        desktop.setCursor(Qt::CrossCursor);
+        desktop.showFullScreen();
+        QVERIFY(QTest::qWaitForWindowExposed(&desktop));
+        const auto originalPointer = QCursor::pos();
+        const auto restorePointer = qScopeGuard([&] { QCursor::setPos(originalPointer); });
+        QCursor::setPos(desktop.mapToGlobal(desktop.rect().center()));
+        zjdesk::InputInjector input;
+        const auto cursor = input.cursor();
+        QVERIFY(cursor.visible && !cursor.image.isNull());
+        zjdesk::ScreenShare sender, receiver;
+        connect(&sender, &zjdesk::ScreenShare::negotiationReady, &receiver,
+            [&](quint64, const QString &type, const QJsonObject &message) { receiver.negotiate(type, message, 9); });
+        connect(&receiver, &zjdesk::ScreenShare::negotiationReady, &sender,
+            [&](quint64, const QString &type, const QJsonObject &message) { sender.negotiate(type, message, 7); });
+        QImage captured;
+        int frames = 0;
+        connect(&sender, &zjdesk::ScreenShare::frameReady, this, [&](quint64, const QImage &image) {
+            captured = image;
+            ++frames;
+        });
+        receiver.start(false, {}, 9);
+        sender.start(true, "desktop", 7, 30);
+        QTRY_VERIFY_WITH_TIMEOUT(!captured.isNull(), 20000);
+        const auto hasCursor = [&] {
+            const auto center = captured.rect().center();
+            int changed = 0;
+            for (int y = center.y() - 32; y <= center.y() + 32; ++y)
+                for (int x = center.x() - 32; x <= center.x() + 32; ++x)
+                    if (captured.pixelColor(x, y) != QColor(Qt::blue))
+                        ++changed;
+            return changed > 4;
+        };
+        QTRY_VERIFY(hasCursor());
+        sender.setCursorEmbedded(false, 6);
+        const int beforeOldEpoch = frames;
+        QTRY_VERIFY(frames > beforeOldEpoch + 3);
+        QVERIFY(hasCursor());
+        sender.setCursorEmbedded(false, 7);
+        QTRY_VERIFY_WITH_TIMEOUT(!hasCursor(), 5000);
+        sender.setCursorEmbedded(true, 7);
+        QTRY_VERIFY_WITH_TIMEOUT(hasCursor(), 5000);
+        sender.stop(8);
+        receiver.stop(10);
+#endif
     }
 
     void sharedTextRetainsSinglePixelDetail()

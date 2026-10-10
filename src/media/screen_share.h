@@ -3,6 +3,7 @@
 #include "media_engine.h"
 #include <QElapsedTimer>
 #include <QJsonObject>
+#include <memory>
 
 namespace zjdesk
 {
@@ -25,6 +26,13 @@ struct ShareStats
     qint64 packetsLost = -1;
     double jitterMs = -1;
     double webRtcRttMs = -1;
+    double controlRttMs = -1;
+    double transportExcessMs = -1; // DataChannel round trip above the recent minimum; not video age.
+    quint64 controlBufferedBytes = 0;
+    int congestionBitrate = -1;
+    qint64 pacedBytes = -1;
+    quint64 droppedBeforeEncode = 0;
+    double presentedGapMaxMs = -1;
     int encoderBitrate = 0; // Software bitrate target; hardware CQP uses this as a feedback budget, not a wire cap.
     int encoderQuantizer = -1;
     int sendBufferBytes = -1;
@@ -41,6 +49,8 @@ struct ShareStats
     QString codec;
     QString codecFallbackReason;
     QString transport;
+    QString localAddress;
+    QString remoteAddress;
     bool hardwareEncoder = false;
 };
 
@@ -62,8 +72,9 @@ public:
     void start(bool sender, const QString &source, quint64 epoch, int targetFps = 0);
     void stop(quint64 epoch);
     void negotiate(const QString &type, const QJsonObject &payload, quint64 epoch);
-    void reportPresentation(quint64 frames, quint64 epoch, bool active = true);
+    void reportPresentation(quint64 frames, quint64 epoch, bool active = true, double gapMaxMs = -1);
     void sendControl(const QJsonObject &message, quint64 epoch);
+    void setCursorEmbedded(bool embedded, quint64 epoch);
 
 signals:
     void statusChanged(quint64 epoch, const QString &status, const QString &detail);
@@ -80,6 +91,8 @@ private:
     QTimer frames_;
     QElapsedTimer presentationClock_;
     quint64 previousPresented_ = 0;
+    std::shared_ptr<QJsonObject> pendingPosition_;
+    quint64 pendingPositionEpoch_ = 0;
 };
 } // namespace zjdesk
 

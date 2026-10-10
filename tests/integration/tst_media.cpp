@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QThread>
+#include <QScopeGuard>
 #include <QtTest>
 
 using Preview = zjdesk::SessionCoordinator::PreviewState;
@@ -11,6 +12,29 @@ class MediaTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void invalidMediaLocalAddressFailsWithoutStartingCapture()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        const bool wasSet = qEnvironmentVariableIsSet("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+        const auto previous = qgetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+        const auto restore = qScopeGuard([&] {
+            if (wasSet)
+                qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", previous);
+            else
+                qunsetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+        });
+        qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", "invalid-local-address");
+        zjdesk::ScreenShare sender;
+        QSignalSpy status(&sender, &zjdesk::ScreenShare::statusChanged);
+        QSignalSpy frames(&sender, &zjdesk::ScreenShare::frameReady);
+        sender.start(true, "test", 7, 30);
+        QTRY_VERIFY(!status.isEmpty());
+        QCOMPARE(status.last().at(0).toULongLong(), quint64(7));
+        QCOMPARE(status.last().at(1).toString(), QString("failed"));
+        QCOMPARE(status.last().at(2).toString(), QStringLiteral("指定的媒体本地地址不可用"));
+        QCOMPARE(frames.size(), 0);
+    }
+
     void physicalDesktopSenderWithoutWindow()
     {
 #ifndef Q_OS_LINUX
@@ -19,14 +43,19 @@ private slots:
         if (qEnvironmentVariable("ZJDESK_PHYSICAL_SENDER") != "1")
             QSKIP("Explicit physical desktop validation only; opens no test windows");
         zjdesk::SessionCoordinator sender;
+        connect(&sender, &zjdesk::SessionCoordinator::shareChanged, this, [&] {
+            qInfo() << "Physical sender state" << int(sender.shareState()) << sender.shareDetail();
+        });
         QVERIFY(sender.join(QUrl(qEnvironmentVariable("ZJDESK_TEST_SERVER")), "physical-first-frame", "Linux"));
         QTRY_COMPARE_WITH_TIMEOUT(sender.memberCount(), 2, 60000);
         for (int cycle = 0; cycle < 3; ++cycle)
         {
             QVERIFY(sender.startScreenShare());
             QTRY_COMPARE_WITH_TIMEOUT(sender.shareState(), Preview::Running, 15000);
-            QTRY_COMPARE_WITH_TIMEOUT(sender.shareStats().transport, QString("TCP"), 5000);
-            QTRY_COMPARE_WITH_TIMEOUT(sender.shareState(), Preview::Stopped, 45000);
+            QTRY_COMPARE_WITH_TIMEOUT(sender.shareStats().transport,
+                qEnvironmentVariable("ZJDESK_TEST_TRANSPORT", "TCP"), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(sender.shareState() == Preview::Stopped || sender.shareState() == Preview::Failed, 45000);
+            QVERIFY2(sender.shareState() == Preview::Stopped, qPrintable(sender.shareDetail()));
             QTest::qWait(500);
         }
         sender.leave();
@@ -51,6 +80,56 @@ private slots:
         QCOMPARE(message.value("revision").toInt(), 7);
         QCOMPARE(message.value("fps").toDouble(), 0.0);
         receiver.stop(10);
+    }
+
+    void lateStopAfterMediaFailureMatchesOnlyTheFailedStream()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator alice;
+        zjdesk::SignalingClient bob;
+        QSignalSpy connected(&bob, &zjdesk::SignalingClient::connected);
+        bob.open(url);
+        QTRY_VERIFY(!connected.isEmpty());
+        QVERIFY(bob.send({"join", {{"roomId", "late-stop"}, {"name", "Bob"}}}));
+        QVERIFY(alice.join(url, "late-stop", "Alice"));
+        QTRY_COMPARE(alice.memberCount(), 2);
+        QSignalSpy negotiations(&bob, &zjdesk::SignalingClient::messageReceived);
+        const bool wasSet = qEnvironmentVariableIsSet("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+        const auto previous = qgetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+        const auto restoreAddress = [&] {
+            if (wasSet)
+                qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", previous);
+            else
+                qunsetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+        };
+        const auto restore = qScopeGuard(restoreAddress);
+        qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", "invalid-local-address");
+        QVERIFY(alice.startScreenShare("test"));
+        QTRY_COMPARE(alice.shareState(), Preview::Failed);
+        QTRY_VERIFY(!negotiations.isEmpty());
+        QString failedId;
+        for (const auto &event : negotiations)
+        {
+            const auto message = qvariant_cast<zjdesk::protocol::Message>(event.at(0));
+            if (message.type == "share" && message.payload.value("action") == "start")
+                failedId = message.payload.value("streamId").toString();
+        }
+        QVERIFY(!failedId.isEmpty());
+        restoreAddress();
+        QVERIFY(bob.send({"share", {{"action", "stop"}, {"streamId", "different-stream"}}}));
+        QTest::qWait(100);
+        QCOMPARE(alice.shareState(), Preview::Failed);
+        QVERIFY(bob.send({"share", {{"action", "stop"}, {"streamId", failedId}}}));
+        QTRY_COMPARE(alice.shareState(), Preview::Stopped);
+        QVERIFY(alice.startScreenShare("test"));
+        QCOMPARE(alice.shareState(), Preview::Starting);
+        QVERIFY(bob.send({"share", {{"action", "stop"}, {"streamId", failedId}}}));
+        QTest::qWait(100);
+        QVERIFY(alice.shareState() == Preview::Starting || alice.shareState() == Preview::Running);
+        alice.stopScreenShare();
+        QTRY_COMPARE(alice.shareState(), Preview::Stopped);
     }
 
     void sharedFramesSurvivePipelineRestartAndDetachOnWrite()
@@ -155,6 +234,9 @@ private slots:
         QSignalSpy receiverReady(&receiver, &zjdesk::ScreenShare::controlChannelChanged);
         QSignalSpy atSender(&sender, &zjdesk::ScreenShare::controlReceived);
         QSignalSpy atReceiver(&receiver, &zjdesk::ScreenShare::controlReceived);
+        zjdesk::ShareStats sent;
+        connect(&sender, &zjdesk::ScreenShare::statisticsReady, this,
+            [&](quint64, const zjdesk::ShareStats &stats) { sent = stats; });
         QString offeredSdp, answeredSdp;
         connect(&sender, &zjdesk::ScreenShare::negotiationReady, &receiver,
             [&](quint64, const QString &type, const QJsonObject &message) {
@@ -173,6 +255,19 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!senderReady.isEmpty() && !receiverReady.isEmpty(), 15000);
         QVERIFY(senderReady.last().at(1).toBool());
         QVERIFY(receiverReady.last().at(1).toBool());
+        QTRY_VERIFY_WITH_TIMEOUT(sent.controlRttMs >= 0 && sent.transportExcessMs >= 0, 5000);
+        QCOMPARE(atSender.size(), 0);
+        QCOMPARE(atReceiver.size(), 0);
+        if (qEnvironmentVariable("ZJDESK_WEBRTC_GCC") == "1"
+            || qEnvironmentVariable("ZJDESK_WEBRTC_GCC") == "tcp")
+        {
+            for (const auto &sdp : {offeredSdp, answeredSdp})
+                QVERIFY2(sdp.contains("transport-wide-cc-extensions-01")
+                    && sdp.contains("a=rtcp-fb:96 transport-cc"), qPrintable(sdp));
+            QVERIFY(sent.congestionBitrate >= 2000000 && sent.congestionBitrate <= 40000000);
+            QVERIFY(sent.pacedBytes >= 0);
+            qInfo() << "Negotiated TWCC with GCC estimate" << sent.congestionBitrate;
+        }
         for (const auto &sdp : {offeredSdp, answeredSdp})
         {
             QVERIFY2(sdp.contains("a=rtcp-fb:96 nack\r\n"), qPrintable(sdp));
@@ -186,9 +281,41 @@ private slots:
         receiver.sendControl({{"action", "request"}}, 9);
         QTRY_COMPARE(atSender.size(), 1);
         QCOMPARE(atSender.last().at(1).toJsonObject().value("action").toString(), QString("request"));
+        // Position bursts may collapse, but the last position must precede each discrete event.
+        atReceiver.clear();
+        for (int i = 1; i <= 1000; ++i)
+            sender.sendControl({{"action", "input"}, {"kind", "move"}, {"epoch", "3"}, {"sequence", i}}, 7);
+        sender.sendControl({{"action", "input"}, {"kind", "button"}, {"epoch", "3"}, {"sequence", 1001}}, 7);
+        for (int i = 1002; i <= 2000; ++i)
+            sender.sendControl({{"action", "input"}, {"kind", "move"}, {"epoch", "3"}, {"sequence", i}}, 7);
+        sender.sendControl({{"action", "input"}, {"kind", "release"}, {"epoch", "3"}, {"sequence", 2001}}, 7);
+        QTRY_VERIFY_WITH_TIMEOUT(!atReceiver.isEmpty()
+            && atReceiver.last().at(1).toJsonObject().value("sequence").toInt() == 2001, 5000);
+        QVERIFY(atReceiver.size() < 2001);
+        int previous = 0;
+        bool button = false, release = false;
+        for (const auto &arguments : atReceiver)
+        {
+            const auto message = arguments.at(1).toJsonObject();
+            const int sequence = message.value("sequence").toInt();
+            QVERIFY(sequence > previous);
+            if (message.value("kind") == "button")
+            {
+                QCOMPARE(previous, 1000);
+                button = true;
+            }
+            if (message.value("kind") == "release")
+            {
+                QCOMPARE(previous, 2000);
+                release = true;
+            }
+            previous = sequence;
+        }
+        QVERIFY(button && release);
+        const int receivedCount = atReceiver.size();
         sender.sendControl({{"action", "old-stream"}}, 6);
         QTest::qWait(100);
-        QCOMPARE(atReceiver.size(), 1);
+        QCOMPARE(atReceiver.size(), receivedCount);
         receiver.stop(10);
         sender.stop(8);
         QTest::qWait(100);

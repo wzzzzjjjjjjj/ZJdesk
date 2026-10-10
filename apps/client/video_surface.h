@@ -2,7 +2,9 @@
 #include <QOpenGLWidget>
 #include <QImage>
 #include <QJsonObject>
+#include <QTimer>
 #include <QElapsedTimer>
+#include "remote-control/input_injector.h"
 
 class VideoSurface final : public QOpenGLWidget
 {
@@ -13,8 +15,11 @@ public:
     void setFrame(const QImage &frame);
     bool hasFrame() const { return !frame_.isNull(); }
     quint64 presentedFrames() const { return presentedFrames_; }
+    double takePresentationGapMaxMs();
     void setFrameCaption(const QString &caption) { frameCaption_ = caption; update(); }
     void setControlEnabled(bool enabled);
+    void setRemoteCursor(const zjdesk::RemoteCursor &cursor);
+    bool hasRemoteCursor() const { return remoteCursor_.visible && !remoteCursor_.image.isNull(); }
 
 signals:
     void remoteInput(const QJsonObject &input);
@@ -35,9 +40,16 @@ private:
     QImage frame_;
     quint64 presentedFrames_ = 0;
     bool pendingFrame_ = false;
+    bool awaitingSwap_ = false;
+    QElapsedTimer presentationClock_;
+    double presentationGapMaxMs_ = -1;
     QString frameCaption_ = QStringLiteral("本地预览 · 尚未发送给对方");
     bool controlEnabled_ = false;
     Qt::MouseButtons remoteButtons_ = Qt::NoButton;
-    QElapsedTimer motionClock_;
+    QTimer motionTimer_;
+    QJsonObject pendingMotion_;
+    zjdesk::RemoteCursor remoteCursor_;
+    void flushMotion();
+    void updatePointerCursor(const QPointF &position);
     bool pointerInput(const QPointF &position, QJsonObject &input) const;
 };

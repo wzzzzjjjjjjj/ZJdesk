@@ -158,6 +158,59 @@ private slots:
             quality.observeNetwork(received += 900, lost += 100);
         QCOMPARE(quality.profile().bitrate(), 2000000);
     }
+    void transportDelayReducesBudgetWithoutChangingNativeProfile()
+    {
+        zjdesk::ShareQuality quality(QSize(1920, 1080));
+        const int initial = quality.profile().bitrate();
+        QVERIFY(!quality.observeNetwork(1000, 0, 100));
+        QVERIFY(quality.observeNetwork(2000, 0, 100));
+        QCOMPARE(quality.profile().bitrate(), initial * 85 / 100);
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        QCOMPARE(quality.profile().fps, 60);
+        const int reduced = quality.profile().bitrate();
+        for (int i = 1; i <= 20; ++i)
+            QVERIFY(!quality.observeNetwork(2000 + i * 1000, 0, 40));
+        QCOMPARE(quality.profile().bitrate(), reduced);
+        for (int i = 1; i <= 14; ++i)
+            QVERIFY(!quality.observeNetwork(22000 + i * 1000, 0, 10));
+        QVERIFY(quality.observeNetwork(37000, 0, 10));
+        QVERIFY(quality.profile().bitrate() > reduced);
+    }
+
+    void delaySpikesAndUnsupportedPeersDoNotReduceBudget()
+    {
+        zjdesk::ShareQuality quality(QSize(1920, 1080));
+        const int initial = quality.profile().bitrate();
+        for (double delay : {100., 10., 100., -1., 100., 10.})
+            QVERIFY(!quality.observeNetwork(-1, -1, delay));
+        QCOMPARE(quality.profile().bitrate(), initial);
+        QVERIFY(!quality.observeNetwork(-1, -1, 100));
+        QVERIFY(quality.observeNetwork(-1, -1, 100));
+        QCOMPARE(quality.profile().bitrate(), initial * 85 / 100);
+        for (int i = 0; i < 15; ++i)
+            quality.observeNetwork(-1, -1, 10);
+        QVERIFY(quality.profile().bitrate() > initial * 85 / 100);
+    }
+
+    void queuedTransportDoesNotTriggerFrameRateUpgrade()
+    {
+        zjdesk::ShareQuality quality(QSize(1920, 1080));
+        quality.observe(10, 10);
+        QVERIFY(quality.observe(10, 10));
+        QCOMPARE(quality.profile().fps, 50);
+        for (int i = 0; i < 30; ++i)
+        {
+            quality.observeNetwork(-1, -1, 40);
+            QVERIFY(!quality.observe(50, 50));
+        }
+        QCOMPARE(quality.profile().fps, 50);
+        quality.observeNetwork(-1, -1, -1);
+        for (int i = 0; i < 29; ++i)
+            QVERIFY(!quality.observe(50, 50));
+        QVERIFY(quality.observe(50, 50));
+        QCOMPARE(quality.profile().fps, 60);
+    }
+
     void messageRoundTrip()
     {
         const zjdesk::protocol::Message original{"join", {{"roomId", "demo"}, {"name", QStringLiteral("测试用户")}}};

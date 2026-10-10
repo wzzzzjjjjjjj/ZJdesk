@@ -358,6 +358,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
             video_->setFrame(image);
     });
     connect(&session_, &zjdesk::SessionCoordinator::shareFrame, video_, &VideoSurface::setFrame);
+    connect(&session_, &zjdesk::SessionCoordinator::remoteCursorChanged, video_, &VideoSurface::setRemoteCursor);
     connect(&session_, &zjdesk::SessionCoordinator::shareChanged, this, &MainWindow::refreshShare);
     connect(&session_, &zjdesk::SessionCoordinator::remoteChanged, this, &MainWindow::refreshControl);
     connect(video_, &VideoSurface::remoteInput, &session_, &zjdesk::SessionCoordinator::sendRemoteInput);
@@ -388,7 +389,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     auto *statsTimer = new QTimer(this);
     connect(statsTimer, &QTimer::timeout, this, [this] {
         session_.reportSharePresentation(video_->presentedFrames(),
-            video_->isVisible() && !isMinimized() && isActiveWindow());
+            video_->isVisible() && !isMinimized() && isActiveWindow(), video_->takePresentationGapMaxMs());
         const auto stats = session_.previewStats();
         previewStatsLabel_->setText(QStringLiteral("采集 %1 帧 · 丢弃 %2 帧 · 待显示 %3 帧")
             .arg(stats.capturedFrames).arg(stats.droppedFrames).arg(stats.pendingFrames));

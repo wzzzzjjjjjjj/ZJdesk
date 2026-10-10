@@ -3,9 +3,21 @@
 #include <QJsonObject>
 #include <QRect>
 #include <QSet>
+#include <QImage>
+#include <QPointF>
 
 namespace zjdesk
 {
+struct RemoteCursor
+{
+    QImage image;
+    QPoint hotspot;
+    QPointF position;
+    QSize screenSize;
+    quint64 serial = 0;
+    bool visible = false;
+};
+
 class InputInjector
 {
 public:
@@ -13,10 +25,14 @@ public:
     bool available();
     bool inject(const QJsonObject &input);
     void releaseAll();
+    RemoteCursor cursor();
 private:
     void *display_ = nullptr;
     QRect bounds_;
+    bool cursorAvailable_ = false;
     QSet<unsigned int> keys_;
     QSet<unsigned int> buttons_;
 };
 } // namespace zjdesk
+
+Q_DECLARE_METATYPE(zjdesk::RemoteCursor)

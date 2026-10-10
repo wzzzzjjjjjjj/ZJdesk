@@ -46,7 +46,8 @@ bool ShareQuality::observe(double encodedFps, double receivedFps)
     int higherResolution = index_ - 1;
     while (higherResolution >= 0 && profiles_.at(higherResolution).size == profile().size)
         --higherResolution;
-    stableWindows_ = actual >= fps * (higherResolution >= 0 ? 0.85 : 0.95) ? stableWindows_ + 1 : 0;
+    stableWindows_ = excessDelayMs_ < 30 && actual >= fps * (higherResolution >= 0 ? 0.85 : 0.95)
+        ? stableWindows_ + 1 : 0;
     if (slowWindows_ >= 2 && index_ + 1 < profiles_.size())
         ++index_;
     else if (stableWindows_ >= 30 && index_ > 0)
@@ -57,39 +58,33 @@ bool ShareQuality::observe(double encodedFps, double receivedFps)
     return true;
 }
 
-bool ShareQuality::observeNetwork(qint64 receivedPackets, qint64 lostPackets)
+bool ShareQuality::observeNetwork(qint64 receivedPackets, qint64 lostPackets, double excessDelayMs)
 {
-    if (receivedPackets < 0 || lostPackets < 0)
-        return false;
-    const auto received = receivedPackets - qMax(qint64(0), previousReceived_);
-    const auto lost = lostPackets - qMax(qint64(0), previousLost_);
-    const bool baseline = previousReceived_ < 0 || received < 0 || lost < 0;
-    previousReceived_ = receivedPackets;
-    previousLost_ = lostPackets;
-    if (baseline)
+    excessDelayMs_ = excessDelayMs;
+    delayedWindows_ = excessDelayMs >= 80 ? delayedWindows_ + 1 : 0;
+    double loss = -1;
+    if (receivedPackets >= 0 && lostPackets >= 0)
     {
-        congestedWindows_ = healthyNetworkWindows_ = 0;
-        return false;
+        const auto received = receivedPackets - qMax(qint64(0), previousReceived_);
+        const auto lost = lostPackets - qMax(qint64(0), previousLost_);
+        // Sparse/static desktop traffic is not a bandwidth estimate.
+        if (previousReceived_ >= 0 && received >= 0 && lost >= 0 && double(received) + double(lost) >= 100)
+            loss = double(lost) / (double(received) + double(lost));
+        previousReceived_ = receivedPackets;
+        previousLost_ = lostPackets;
     }
-    // Sparse/static desktop traffic is not a bandwidth estimate.
-    const double packets = double(received) + double(lost);
-    if (packets < 100)
-    {
-        congestedWindows_ = healthyNetworkWindows_ = 0;
-        return false;
-    }
-    const double loss = double(lost) / packets;
     congestedWindows_ = loss >= 0.02 ? congestedWindows_ + 1 : 0;
-    healthyNetworkWindows_ = loss < 0.005 ? healthyNetworkWindows_ + 1 : 0;
+    const bool healthy = loss >= 0 ? loss < 0.005 : excessDelayMs >= 0;
+    healthyNetworkWindows_ = healthy && excessDelayMs <= 20 ? healthyNetworkWindows_ + 1 : 0;
     const int current = profile().bitrate();
     int next = current;
-    if (congestedWindows_ >= 2)
+    if (congestedWindows_ >= 2 || delayedWindows_ >= 2)
         next = qMax(2000000, current * 85 / 100);
     else if (healthyNetworkWindows_ >= 15 && bitrateLimit_ > 0)
         next = qMin(profiles_.at(index_).bitrate(), current + qMax(100000, current / 20));
     else
         return false;
-    congestedWindows_ = healthyNetworkWindows_ = 0;
+    congestedWindows_ = delayedWindows_ = healthyNetworkWindows_ = 0;
     if (next == current)
         return false;
     bitrateLimit_ = next;
