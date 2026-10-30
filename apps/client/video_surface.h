@@ -27,6 +27,7 @@ signals:
     void remoteInput(const QJsonObject &input);
 
 protected:
+    bool event(QEvent *event) override;
     void paintGL() override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;

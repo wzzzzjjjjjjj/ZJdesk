@@ -277,6 +277,24 @@ void VideoSurface::wheelEvent(QWheelEvent *event)
     }
 }
 
+bool VideoSurface::event(QEvent *event)
+{
+    if (controlEnabled_ && hasFocus()
+        && (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease))
+    {
+        auto *keyEvent = static_cast<QKeyEvent *>(event);
+        if (keyEvent->key() == Qt::Key_Tab || keyEvent->key() == Qt::Key_Backtab)
+        {
+            if (event->type() == QEvent::KeyPress)
+                keyPressEvent(keyEvent);
+            else
+                keyReleaseEvent(keyEvent);
+            return true;
+        }
+    }
+    return QOpenGLWidget::event(event);
+}
+
 void VideoSurface::keyPressEvent(QKeyEvent *event)
 {
     if (controlEnabled_)

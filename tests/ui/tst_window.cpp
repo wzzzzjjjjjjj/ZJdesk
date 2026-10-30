@@ -889,6 +889,67 @@ private slots:
         surface.setControlEnabled(false);
     }
 
+    void controlSurfaceForwardsTabAndDeleteWithoutLosingFocus()
+    {
+        QWidget window;
+        VideoSurface surface(&window);
+        QPushButton next(QStringLiteral("Next"), &window);
+        QPushButton other(QStringLiteral("Other"), &window);
+        window.resize(700, 500);
+        surface.resize(640, 400);
+        next.move(0, 420);
+        other.move(100, 420);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        surface.setFrame(QImage(1920, 1080, QImage::Format_RGB32));
+        surface.setControlEnabled(true);
+        surface.setFocus();
+        QTRY_VERIFY(surface.hasFocus());
+        QSignalSpy input(&surface, &VideoSurface::remoteInput);
+        const auto verifyKey = [&](int key) {
+            QCOMPARE(input.size(), 2);
+            for (int i = 0; i < 2; ++i)
+            {
+                const auto message = input.at(i).at(0).toJsonObject();
+                QCOMPARE(message.value("kind").toString(), QStringLiteral("key"));
+                QCOMPARE(message.value("key").toInt(), key);
+                QCOMPARE(message.value("pressed").toBool(), i == 0);
+            }
+            input.clear();
+        };
+        QTest::keyClick(&surface, Qt::Key_Tab);
+        QVERIFY(surface.hasFocus());
+        verifyKey(Qt::Key_Tab);
+        QTest::keyClick(&surface, Qt::Key_Delete);
+        QVERIFY(surface.hasFocus());
+        verifyKey(Qt::Key_Delete);
+        QTest::keyClick(&surface, Qt::Key_Backtab);
+        QVERIFY(surface.hasFocus());
+        verifyKey(Qt::Key_Backtab);
+        QTest::keyPress(&surface, Qt::Key_Shift);
+        QKeyEvent backtabPress(QEvent::KeyPress, Qt::Key_Backtab, Qt::ShiftModifier);
+        QKeyEvent backtabRelease(QEvent::KeyRelease, Qt::Key_Backtab, Qt::ShiftModifier);
+        QApplication::sendEvent(&surface, &backtabPress);
+        QApplication::sendEvent(&surface, &backtabRelease);
+        QTest::keyRelease(&surface, Qt::Key_Shift);
+        QVERIFY(surface.hasFocus());
+        QCOMPARE(input.size(), 4);
+        QCOMPARE(input.at(0).at(0).toJsonObject().value("key").toInt(), int(Qt::Key_Shift));
+        QCOMPARE(input.at(1).at(0).toJsonObject().value("key").toInt(), int(Qt::Key_Backtab));
+        QCOMPARE(input.at(1).at(0).toJsonObject().value("pressed").toBool(), true);
+        QCOMPARE(input.at(2).at(0).toJsonObject().value("key").toInt(), int(Qt::Key_Backtab));
+        QCOMPARE(input.at(2).at(0).toJsonObject().value("pressed").toBool(), false);
+        QCOMPARE(input.at(3).at(0).toJsonObject().value("key").toInt(), int(Qt::Key_Shift));
+        input.clear();
+        surface.setControlEnabled(false);
+        next.setFocus();
+        QTRY_VERIFY(next.hasFocus());
+        QTest::keyClick(&next, Qt::Key_Tab);
+        QTRY_VERIFY(other.hasFocus());
+        QCOMPARE(input.size(), 1); // disabling control releases any remote keys
+        QCOMPARE(input.first().at(0).toJsonObject().value("kind").toString(), QStringLiteral("release"));
+    }
+
     void controlSurfaceCoalescesMotionAndRestoresCursor()
     {
         VideoSurface surface;
