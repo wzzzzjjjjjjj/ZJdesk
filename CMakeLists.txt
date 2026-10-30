@@ -38,6 +38,8 @@ add_library(zjdesk_client_core STATIC
     src/media/camera_mode.cpp src/media/camera_mode.h
     src/media/screen_share.cpp src/media/screen_share.h
     src/media/share_quality.cpp src/media/share_quality.h
+    src/media/frame_timing.h
+    src/media/congestion_budget.h
     src/platform/platform_info.cpp src/platform/platform_info.h)
 target_link_libraries(zjdesk_client_core PUBLIC zjdesk_protocol Qt6::Gui Qt6::Network Qt6::WebSockets)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

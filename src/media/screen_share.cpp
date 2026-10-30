@@ -1,5 +1,6 @@
 #include "screen_share.h"
 #include "share_quality.h"
+#include "congestion_budget.h"
 #include <QElapsedTimer>
 #include <QMutexLocker>
 #include <QGuiApplication>
@@ -30,6 +31,25 @@
 
 namespace zjdesk
 {
+QJsonObject ShareStats::timingDiagnostics() const
+{
+    return {{"scope", "stream-cumulative"}, {"percentileResolutionMs", 0.1},
+        {"percentileOverflowAboveMs", 100}, {"percentileOverflowUsesMax", true},
+        {"decoder", decoder}, {"hardwareDecoder", hardwareDecoder}, {"codecProfile", codecProfile},
+        {"codecOutputFormat", codecOutputFormat}, {"codecOutputMemory", codecOutputMemory},
+        {"congestion", QJsonObject{{"minimumBitrate", congestionMinimumBitrate},
+            {"maximumBitrate", congestionMaximumBitrate}, {"estimatedBitrate", congestionBitrate},
+            {"encoderBudget", encoderBitrate}, {"pacedBytes", double(pacedBytes)},
+            {"droppedBeforeEncode", qint64(droppedBeforeEncode)}}},
+        {"codec", codecTiming.toJson()}, {"codecOutputGaps", outputGapTiming.toJson()},
+        {"captureToEncoder", captureToEncoderTiming.toJson()}, {"decodedToSink", decodedToSinkTiming.toJson()},
+        {"sinkToPull", sinkToPullTiming.toJson()},
+        {"frameMap", frameMapTiming.toJson()}, {"mailboxWait", mailboxTiming.toJson()},
+        {"workerPoll", workerPollTiming.toJson()}, {"workerPollGaps", workerPollGapTiming.toJson()},
+        {"presentation", presentation.toJson()}, {"deliveredFrameId", qint64(deliveredFrameId)},
+        {"unmatchedCodecOutputs", qint64(unmatchedCodecOutputs)}};
+}
+
 class ScreenShareWorker;
 #ifdef ZJDESK_HAS_GSTREAMER
 struct ShareCallbacks
@@ -105,8 +125,13 @@ public:
         probeSamples_.clear();
         const auto gccMode = qEnvironmentVariable("ZJDESK_WEBRTC_GCC");
         gccEnabled_ = sender && (gccMode == "1" || gccMode == "tcp");
-        gccMinimumBitrate_ = qMin(8000000, profile_.bitrate());
-        gccBitrate_ = 40000000;
+        const auto maximumBitrate = sender ? qEnvironmentVariable("ZJDESK_WEBRTC_MAX_BITRATE") : QString();
+        const auto budget = CongestionBudget::fromMaximum(maximumBitrate, profile_.bitrate());
+        if (!maximumBitrate.isEmpty() && (!gccEnabled_ || !budget))
+            return fail(QStringLiteral("ZJDESK_WEBRTC_MAX_BITRATE 需要启用 GCC，且必须为 128000..40000000 bit/s 的整数"));
+        gccMinimumBitrate_ = budget->minimum;
+        gccMaximumBitrate_ = budget->maximum;
+        gccBitrate_ = budget->initial;
         pacedBytes_ = 0;
         droppedBeforeEncode_ = 0;
         offeredTwccId_ = 0;
@@ -118,7 +143,26 @@ public:
             codecTotalMs_ = 0;
             codecSamples_ = 0;
             lastCodecOutputNs_ = 0;
+            captureOutputs_.clear();
+            decodedOutputs_.clear();
+            sinkArrivals_.clear();
+            codecTiming_ = {};
+            outputGapTiming_ = {};
+            captureToEncoderTiming_ = {};
+            decodedToSinkTiming_ = {};
+            sinkToPullTiming_ = {};
+            codecProfile_.clear();
+            codecOutputFormat_.clear();
+            codecOutputMemory_.clear();
+            unmatchedCodecOutputs_ = 0;
         }
+        frameMapTiming_ = {};
+        workerPollTiming_ = {};
+        workerPollGapTiming_ = {};
+        lastPollNs_ = 0;
+        publishedFrames_ = 0;
+        decoder_.clear();
+        hardwareDecoder_ = false;
         copyMaxMs_ = -1;
         remoteReady_ = running_ = firstFrame_ = false;
         sendReady_ = false;
@@ -130,11 +174,11 @@ public:
             selectEncoder();
             QString capture;
             if (source == "test")
-                capture = "videotestsrc is-live=true pattern=ball ! "
+                capture = "videotestsrc name=desktopcapture is-live=true pattern=ball ! "
                     "video/x-raw,width=640,height=480 ! ";
 #ifdef Q_OS_WIN
             else
-                capture = "d3d11screencapturesrc monitor-index=-1 show-cursor=true ! "
+                capture = "d3d11screencapturesrc name=desktopcapture monitor-index=-1 show-cursor=true ! "
                     "d3d11download ! videoconvert ! ";
 #else
             else if (qEnvironmentVariable("XDG_SESSION_TYPE") != "wayland")
@@ -259,9 +303,34 @@ public:
         sink_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "frames"));
         bus_ = gst_element_get_bus(pipeline_);
         auto *codec = gst_bin_get_by_name(GST_BIN(pipeline_), sender ? "encoder" : "decoder");
+        if (!sender)
+        {
+            auto *factory = gst_element_get_factory(codec);
+            decoder_ = QString::fromUtf8(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)));
+            const auto *classification = gst_element_factory_get_metadata(factory, GST_ELEMENT_METADATA_KLASS);
+            hardwareDecoder_ = classification && QString::fromUtf8(classification).contains("Hardware");
+        }
+        if (sender)
+        {
+            auto *capture = gst_bin_get_by_name(GST_BIN(pipeline_), "desktopcapture");
+            auto *pad = gst_element_get_static_pad(capture, "src");
+            gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                [](GstPad *, GstPadProbeInfo *info, gpointer data) {
+                    auto *worker = static_cast<ScreenShareWorker *>(data);
+                    const auto pts = GST_BUFFER_PTS(GST_PAD_PROBE_INFO_BUFFER(info));
+                    QMutexLocker lock(&worker->codecMutex_);
+                    if (worker->captureOutputs_.size() >= 64)
+                        worker->captureOutputs_.clear();
+                    if (GST_CLOCK_TIME_IS_VALID(pts))
+                        worker->captureOutputs_.insert(pts, FrameTiming::nowNs());
+                    return GST_PAD_PROBE_OK;
+                }, this, nullptr);
+            gst_object_unref(pad);
+            gst_object_unref(capture);
+        }
         if (sender && !hardwareEncoder_)
             g_object_set(codec, "threads", guint(qBound(1, QThread::idealThreadCount() / 2, 8)),
-                "target-bitrate", profile_.bitrate(), "keyframe-max-dist", targetFps_ * 5, nullptr);
+                "target-bitrate", encoderBudget(), "keyframe-max-dist", targetFps_ * 5, nullptr);
         auto *inputPad = gst_element_get_static_pad(codec, "sink");
         gst_pad_add_probe(inputPad, GST_PAD_PROBE_TYPE_BUFFER,
             [](GstPad *, GstPadProbeInfo *info, gpointer data) {
@@ -274,25 +343,36 @@ public:
                     return GST_PAD_PROBE_DROP;
                 }
                 const auto pts = GST_BUFFER_PTS(GST_PAD_PROBE_INFO_BUFFER(info));
+                const auto now = FrameTiming::nowNs();
                 QMutexLocker lock(&worker->codecMutex_);
+                const auto captured = worker->captureOutputs_.find(pts);
+                if (captured != worker->captureOutputs_.end())
+                {
+                    worker->captureToEncoderTiming_.record((now - captured.value()) / 1e6);
+                    worker->captureOutputs_.erase(captured);
+                }
                 if (worker->codecInputs_.size() >= 64)
                     worker->codecInputs_.clear();
                 if (GST_CLOCK_TIME_IS_VALID(pts))
-                    worker->codecInputs_.insert(pts, gst_util_get_timestamp());
+                    worker->codecInputs_.insert(pts, now);
                 return GST_PAD_PROBE_OK;
             }, this, nullptr);
         gst_object_unref(inputPad);
         auto *codecPad = gst_element_get_static_pad(codec, "src");
         gst_pad_add_probe(codecPad, GST_PAD_PROBE_TYPE_BUFFER,
-            [](GstPad *, GstPadProbeInfo *info, gpointer data) {
+            [](GstPad *pad, GstPadProbeInfo *info, gpointer data) {
                 auto *worker = static_cast<ScreenShareWorker *>(data);
                 worker->processedFrames_.fetch_add(1, std::memory_order_relaxed);
                 auto *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
-                const auto now = gst_util_get_timestamp();
+                const auto now = FrameTiming::nowNs();
                 QMutexLocker lock(&worker->codecMutex_);
                 auto &window = worker->codecWindow_;
                 if (worker->lastCodecOutputNs_)
-                    window.outputGapMaxMs = qMax(window.outputGapMaxMs, (now - worker->lastCodecOutputNs_) / 1e6);
+                {
+                    const double gapMs = (now - worker->lastCodecOutputNs_) / 1e6;
+                    window.outputGapMaxMs = qMax(window.outputGapMaxMs, gapMs);
+                    worker->outputGapTiming_.record(gapMs);
+                }
                 worker->lastCodecOutputNs_ = now;
                 const auto input = worker->codecInputs_.find(GST_BUFFER_PTS(buffer));
                 if (input != worker->codecInputs_.end())
@@ -301,7 +381,43 @@ public:
                     worker->codecTotalMs_ += elapsed;
                     ++worker->codecSamples_;
                     window.codecMaxMs = qMax(window.codecMaxMs, elapsed);
+                    worker->codecTiming_.record(elapsed);
                     worker->codecInputs_.erase(input);
+                }
+                else
+                    ++worker->unmatchedCodecOutputs_;
+                if (!worker->sender_ && GST_CLOCK_TIME_IS_VALID(GST_BUFFER_PTS(buffer)))
+                {
+                    if (worker->decodedOutputs_.size() >= 64)
+                        worker->decodedOutputs_.clear();
+                    worker->decodedOutputs_.insert(GST_BUFFER_PTS(buffer), now);
+                }
+                if (worker->codecOutputFormat_.isEmpty())
+                {
+                    if (auto *caps = gst_pad_get_current_caps(pad))
+                    {
+                        const auto *structure = gst_caps_get_structure(caps, 0);
+                        const auto *format = gst_structure_get_string(structure, "format");
+                        worker->codecOutputFormat_ = QString::fromUtf8(format ? format : gst_structure_get_name(structure));
+                        gst_caps_unref(caps);
+                    }
+                    auto *element = gst_pad_get_parent_element(pad);
+                    auto *profilePad = worker->sender_ ? GST_PAD(gst_object_ref(pad))
+                        : gst_element_get_static_pad(element, "sink");
+                    if (auto *caps = gst_pad_get_current_caps(profilePad))
+                    {
+                        const auto *profile = gst_structure_get_string(gst_caps_get_structure(caps, 0), "profile");
+                        worker->codecProfile_ = QString::fromUtf8(profile ? profile : "");
+                        gst_caps_unref(caps);
+                    }
+                    gst_object_unref(profilePad);
+                    gst_object_unref(element);
+                    if (gst_buffer_n_memory(buffer))
+                    {
+                        auto *memory = gst_buffer_peek_memory(buffer, 0);
+                        if (memory->allocator)
+                            worker->codecOutputMemory_ = QString::fromUtf8(memory->allocator->mem_type);
+                    }
                 }
                 if (worker->sender_)
                 {
@@ -326,6 +442,26 @@ public:
             }, this, nullptr);
         gst_object_unref(codecPad);
         gst_object_unref(codec);
+        auto *sinkPad = gst_element_get_static_pad(GST_ELEMENT(sink_), "sink");
+        gst_pad_add_probe(sinkPad, GST_PAD_PROBE_TYPE_BUFFER,
+            [](GstPad *, GstPadProbeInfo *info, gpointer data) {
+                auto *worker = static_cast<ScreenShareWorker *>(data);
+                const auto pts = GST_BUFFER_PTS(GST_PAD_PROBE_INFO_BUFFER(info));
+                const auto now = FrameTiming::nowNs();
+                QMutexLocker lock(&worker->codecMutex_);
+                const auto decoded = worker->decodedOutputs_.find(pts);
+                if (decoded != worker->decodedOutputs_.end())
+                {
+                    worker->decodedToSinkTiming_.record((now - decoded.value()) / 1e6);
+                    worker->decodedOutputs_.erase(decoded);
+                }
+                if (worker->sinkArrivals_.size() >= 64)
+                    worker->sinkArrivals_.clear();
+                if (GST_CLOCK_TIME_IS_VALID(pts))
+                    worker->sinkArrivals_.insert(pts, now);
+                return GST_PAD_PROBE_OK;
+            }, this, nullptr);
+        gst_object_unref(sinkPad);
         g_signal_connect_data(rtc_, "on-ice-candidate", G_CALLBACK(iceCandidate),
             new ShareCallback{guard_, epoch, {}}, destroySignal, GConnectFlags(0));
         g_signal_connect_data(rtc_, "prepare-data-channel", G_CALLBACK(prepareChannel),
@@ -718,8 +854,10 @@ private:
         auto *gcc = gst_element_factory_make("rtpgccbwe", nullptr);
         if (!gcc)
             return nullptr;
-        g_object_set(gcc, "min-bitrate", guint(worker->gccMinimumBitrate_), "estimated-bitrate", guint(40000000),
-            "max-bitrate", guint(40000000), nullptr);
+        // Set the lower bound first: the plugin's default minimum can exceed a WAN cap.
+        g_object_set(gcc, "min-bitrate", guint(worker->gccMinimumBitrate_),
+            "max-bitrate", guint(worker->gccMaximumBitrate_),
+            "estimated-bitrate", worker->gccBitrate_.load(), nullptr);
         g_signal_connect_data(gcc, "notify::estimated-bitrate", G_CALLBACK(bandwidthChanged),
             new ShareCallback(callback), destroySignal, GConnectFlags(0));
         for (const char *name : {"sink", "src"})
@@ -1107,6 +1245,10 @@ private:
             timer_->stop();
             return;
         }
+        const auto pollStartedNs = FrameTiming::nowNs();
+        if (lastPollNs_)
+            workerPollGapTiming_.record((pollStartedNs - lastPollNs_) / 1e6);
+        lastPollNs_ = pollStartedNs;
         pollProbe();
         updateEncoderBudget();
         while (auto *message = gst_bus_pop(bus_))
@@ -1127,6 +1269,17 @@ private:
         }
         if (auto *sample = gst_app_sink_try_pull_sample(sink_, 0))
         {
+            const auto sinkNs = FrameTiming::nowNs();
+            {
+                QMutexLocker lock(&codecMutex_);
+                const auto arrived = sinkArrivals_.find(GST_BUFFER_PTS(gst_sample_get_buffer(sample)));
+                if (arrived != sinkArrivals_.end())
+                {
+                    sinkToPullTiming_.record((sinkNs - arrived.value()) / 1e6);
+                    sinkArrivals_.erase(arrived);
+                }
+            }
+            const auto mapStartedNs = FrameTiming::nowNs();
             GstVideoInfo info;
             auto frame = std::make_unique<GstVideoFrame>();
             if (gst_video_info_from_caps(&info, gst_sample_get_caps(sample))
@@ -1143,6 +1296,7 @@ private:
                 frame.release();
                 size_ = image.size();
                 copyMaxMs_ = 0;
+                frameMapTiming_.record((FrameTiming::nowNs() - mapStartedNs) / 1e6);
                 {
                     QMutexLocker lock(&mailbox_->mutex);
                     if (mailbox_->epoch == epoch_)
@@ -1150,6 +1304,8 @@ private:
                         if (!mailbox_->image.isNull())
                             ++mailbox_->stats.overwrittenFrames;
                         mailbox_->image = std::move(image);
+                        mailbox_->frameId = ++publishedFrames_;
+                        mailbox_->publishedNs = FrameTiming::nowNs();
                     }
                 }
                 firstFrame_ = true;
@@ -1181,6 +1337,15 @@ private:
                 stats = codecWindow_;
                 if (codecSamples_)
                     stats.codecMeanMs = codecTotalMs_ / codecSamples_;
+                stats.codecTiming = codecTiming_.summary();
+                stats.outputGapTiming = outputGapTiming_.summary();
+                stats.captureToEncoderTiming = captureToEncoderTiming_.summary();
+                stats.decodedToSinkTiming = decodedToSinkTiming_.summary();
+                stats.sinkToPullTiming = sinkToPullTiming_.summary();
+                stats.codecProfile = codecProfile_;
+                stats.codecOutputFormat = codecOutputFormat_;
+                stats.codecOutputMemory = codecOutputMemory_;
+                stats.unmatchedCodecOutputs = unmatchedCodecOutputs_;
                 codecWindow_ = {};
                 codecTotalMs_ = 0;
                 codecSamples_ = 0;
@@ -1201,10 +1366,20 @@ private:
                 stats.deliveredFrames = mailbox_->stats.deliveredFrames;
                 stats.presentedFps = mailbox_->stats.presentedFps;
                 stats.presentedGapMaxMs = mailbox_->stats.presentedGapMaxMs;
+                stats.presentation = mailbox_->stats.presentation;
+                stats.mailboxTiming = mailbox_->waitTiming.summary();
+                stats.deliveredFrameId = mailbox_->stats.deliveredFrameId;
+                stats.frameMapTiming = frameMapTiming_.summary();
+                stats.workerPollTiming = workerPollTiming_.summary();
+                stats.workerPollGapTiming = workerPollGapTiming_.summary();
+                stats.decoder = decoder_;
+                stats.hardwareDecoder = hardwareDecoder_;
                 stats.overwrittenFrames = mailbox_->stats.overwrittenFrames;
                 stats.copyMaxMs = copyMaxMs_;
                 stats.encoderBitrate = sender_ ? encoderBudget() : 0;
                 stats.congestionBitrate = gccEnabled_ ? int(gccBitrate_.load()) : -1;
+                stats.congestionMinimumBitrate = gccEnabled_ ? gccMinimumBitrate_ : -1;
+                stats.congestionMaximumBitrate = gccEnabled_ ? gccMaximumBitrate_ : -1;
                 stats.pacedBytes = gccEnabled_ ? qMax(qint64(0), pacedBytes_.load()) : -1;
                 stats.droppedBeforeEncode = droppedBeforeEncode_.load();
                 stats.sendBufferBytes = sendBufferBytes_;
@@ -1265,6 +1440,7 @@ private:
         }
         if (!running_ && startup_.elapsed() > 45000)
             fail(QStringLiteral("屏幕共享连接超时，请检查双方网络和媒体插件"));
+        workerPollTiming_.record((FrameTiming::nowNs() - pollStartedNs) / 1e6);
     }
 
     std::shared_ptr<ShareCallbacks> guard_ = std::make_shared<ShareCallbacks>();
@@ -1289,11 +1465,30 @@ private:
     bool hardwareEncoder_ = false;
     QString codecFallbackReason_;
     QMutex codecMutex_;
-    QHash<quint64, quint64> codecInputs_;
+    QHash<quint64, qint64> codecInputs_;
+    QHash<quint64, qint64> captureOutputs_;
+    QHash<quint64, qint64> decodedOutputs_;
+    QHash<quint64, qint64> sinkArrivals_;
+    FrameTiming codecTiming_;
+    FrameTiming outputGapTiming_;
+    FrameTiming captureToEncoderTiming_;
+    FrameTiming decodedToSinkTiming_;
+    FrameTiming sinkToPullTiming_;
+    FrameTiming frameMapTiming_;
+    FrameTiming workerPollTiming_;
+    FrameTiming workerPollGapTiming_;
+    QString decoder_;
+    bool hardwareDecoder_ = false;
+    QString codecProfile_;
+    QString codecOutputFormat_;
+    QString codecOutputMemory_;
+    quint64 unmatchedCodecOutputs_ = 0;
+    qint64 lastPollNs_ = 0;
+    quint64 publishedFrames_ = 0;
     ShareStats codecWindow_;
     double codecTotalMs_ = 0;
     quint64 codecSamples_ = 0;
-    quint64 lastCodecOutputNs_ = 0;
+    qint64 lastCodecOutputNs_ = 0;
     double copyMaxMs_ = -1;
     quint64 previousProcessed_ = 0;
     quint64 previousDelivered_ = 0;
@@ -1322,6 +1517,7 @@ private:
     double transportExcessMs_ = -1;
     bool gccEnabled_ = false;
     int gccMinimumBitrate_ = 2000000;
+    int gccMaximumBitrate_ = 40000000;
     QElapsedTimer encoderBudgetClock_;
     int offeredTwccId_ = 0;
     std::atomic<guint> gccBitrate_{40000000};
@@ -1357,7 +1553,11 @@ ScreenShare::ScreenShare(QObject *parent) : QObject(parent)
             image.swap(mailbox_.image);
             epoch = mailbox_.epoch;
             if (!image.isNull())
+            {
                 ++mailbox_.stats.deliveredFrames;
+                mailbox_.stats.deliveredFrameId = mailbox_.frameId;
+                mailbox_.waitTiming.record((FrameTiming::nowNs() - mailbox_.publishedNs) / 1e6);
+            }
         }
         if (!image.isNull())
             emit frameReady(epoch, image);
@@ -1396,6 +1596,9 @@ void ScreenShare::start(bool sender, const QString &source, quint64 epoch, int t
         mailbox_.epoch = epoch;
         mailbox_.image = {};
         mailbox_.stats = {};
+        mailbox_.publishedNs = 0;
+        mailbox_.frameId = 0;
+        mailbox_.waitTiming = {};
         pendingPosition_.reset();
     }
     QMetaObject::invokeMethod(worker_, [this, sender, source, epoch, targetFps, nativeSize, maximumFps] {
@@ -1403,12 +1606,14 @@ void ScreenShare::start(bool sender, const QString &source, quint64 epoch, int t
     });
 }
 
-void ScreenShare::reportPresentation(quint64 frames, quint64 epoch, bool active, double gapMaxMs)
+void ScreenShare::reportPresentation(quint64 frames, quint64 epoch, bool active, double gapMaxMs,
+    const VideoPresentationStats &presentation)
 {
     QMutexLocker lock(&mailbox_.mutex);
     if (epoch != mailbox_.epoch)
         return;
     mailbox_.stats.presentedGapMaxMs = active ? gapMaxMs : -1;
+    mailbox_.stats.presentation = active ? presentation : VideoPresentationStats{};
     if (!active)
     {
         mailbox_.stats.presentedFps = -1;

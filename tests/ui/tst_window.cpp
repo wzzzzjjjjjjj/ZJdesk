@@ -13,6 +13,7 @@
 #include <QJsonArray>
 #include <QLineEdit>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QPlainTextEdit>
 #include <QSaveFile>
 #include <QScopeGuard>
@@ -64,7 +65,7 @@ QJsonObject shareDiagnostics(const zjdesk::ShareStats &stats)
         {"maxEncodedFrameBytes", qint64(stats.maxEncodedFrameBytes)},
         {"maxKeyframeBytes", qint64(stats.maxKeyframeBytes)}, {"keyframes", qint64(stats.keyframes)},
         {"overwrittenFrames", qint64(stats.overwrittenFrames)},
-        {"width", stats.size.width()}, {"height", stats.size.height()}};
+        {"width", stats.size.width()}, {"height", stats.size.height()}, {"timings", stats.timingDiagnostics()}};
 }
 
 double processCpuSeconds()
@@ -135,7 +136,9 @@ private slots:
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
         window.findChild<QPushButton *>("primaryButton")->click();
-        QTRY_COMPARE_WITH_TIMEOUT(window.session_.memberCount(), 2, 30000);
+        QTRY_VERIFY_WITH_TIMEOUT(window.session_.memberCount() == 2
+            || window.session_.state() == zjdesk::SessionCoordinator::State::Failed, 30000);
+        QVERIFY2(window.session_.memberCount() == 2, qPrintable(window.session_.detail()));
         auto *surface = window.findChild<VideoSurface *>();
         for (int cycle = 0; cycle < 3; ++cycle)
         {
@@ -148,12 +151,19 @@ private slots:
             QTRY_VERIFY_WITH_TIMEOUT(window.session_.shareStats().processedFps > 0, 5000);
             waitForPresentation(2000);
             const auto stats = window.session_.shareStats();
+            // Keep the last receiver measurements even when a following assertion fails.
+            qInfo().noquote() << "Physical desktop cycle" << cycle + 1 << "first frame ms" << firstFrameMs
+                << QJsonDocument(shareDiagnostics(stats)).toJson(QJsonDocument::Compact);
             QCOMPARE(stats.size, QSize(1920, 1080));
             QVERIFY(stats.deliveredFps > 0);
             QVERIFY(stats.presentedFps > 0);
+            QCOMPARE(stats.decoder, QString("vp9dec"));
+            QVERIFY(!stats.hardwareDecoder);
+            QVERIFY(stats.codecTiming.samples > 0);
+            QVERIFY(stats.decodedToSinkTiming.samples > 0);
+            QVERIFY(stats.mailboxTiming.samples > 0);
+            QVERIFY(stats.presentation.receiveToSwap.samples > 0);
             QVERIFY(!surface->grabFramebuffer().isNull());
-            qInfo().noquote() << "Physical desktop cycle" << cycle + 1 << "first frame ms" << firstFrameMs
-                << QJsonDocument(shareDiagnostics(stats)).toJson(QJsonDocument::Compact);
             window.session_.stopScreenShare();
             QTRY_COMPARE_WITH_TIMEOUT(window.session_.shareState(), zjdesk::SessionCoordinator::PreviewState::Stopped, 5000);
             QVERIFY(!surface->hasFrame());
@@ -411,7 +421,7 @@ private slots:
         window.raise();
         window.activateWindow();
         QVERIFY(QTest::qWaitForWindowActive(&window));
-        const auto data = observation();
+        auto data = observation();
         const auto point = [&](const char *x, const char *y) {
             const QSize source(data.value("width").toInt(), data.value("height").toInt());
             const auto size = source.scaled(surface->size(), Qt::KeepAspectRatio);
@@ -527,8 +537,11 @@ private slots:
             QProcess edgeStress;
             if (qEnvironmentVariable("ZJDESK_EDGE_STRESS_TEST") == "1")
             {
+                const auto display = qEnvironmentVariable("ZJDESK_EDGE_STRESS_DISPLAY", ":77");
+                QVERIFY(QRegularExpression(QStringLiteral("^:[0-9]+(?:\\.[0-9]+)?$")).match(display).hasMatch());
                 edgeStress.start("C:/Windows/System32/OpenSSH/ssh.exe", {"-o", "BatchMode=yes", host,
-                    "python3 " + root + "/build/edge-stress.py " + QString::number(performanceDuration / 1000 - 5)});
+                    "python3 " + root + "/tests/scripts/edge_stress.py "
+                        + QString::number(performanceDuration / 1000 - 5) + " --display " + display});
                 QVERIFY(edgeStress.waitForStarted(5000));
             }
             const auto stopEdgeStress = qScopeGuard([&] {
@@ -574,6 +587,10 @@ private slots:
                 QVERIFY2(edgeStress.exitCode() == 0, edgeStress.readAllStandardError().constData());
                 waitForPresentation(1000);
             }
+            // GNOME may reposition tool windows when Edge stress hides and restores them.
+            // Sample the current fixture geometry rather than the pre-stress coordinates.
+            const auto beforeStressGeometry = data;
+            data = observation();
             const auto source = QSize(data.value("width").toInt(), data.value("height").toInt());
             const auto nativeFrame = surface->grabFramebuffer();
             QCOMPARE(nativeFrame.size(), source);
@@ -596,7 +613,10 @@ private slots:
             QSaveFile detailReport("output/cross-text-detail.json");
             QVERIFY(detailReport.open(QIODevice::WriteOnly));
             detailReport.write(QJsonDocument(QJsonObject{{"meanError", detailError},
-                {"maximumError", maximumDetailError}, {"singlePixelColumns", detailWidth}}).toJson());
+                {"maximumError", maximumDetailError}, {"singlePixelColumns", detailWidth},
+                {"beforeStressMarkerX", beforeStressGeometry.value("markerX")},
+                {"beforeStressMarkerY", beforeStressGeometry.value("markerY")},
+                {"markerX", data.value("markerX")}, {"markerY", data.value("markerY")}}).toJson());
             QVERIFY(detailReport.commit());
             QVERIFY2(detailError < MaximumDesktopMeanError && maximumDetailError <= MaximumDesktopChannelError,
                 "Single-pixel colour detail exceeded the slightly lossy quality budget across machines");
@@ -951,6 +971,43 @@ private slots:
         surface.setFrame(frame);
         QTRY_COMPARE(surface.presentedFrames(), quint64(3));
         QCOMPARE(surface.takePresentationGapMaxMs(), -1.0);
+    }
+
+    void presentationMeasuresBlockedGuiAndResetsOnClear()
+    {
+        VideoSurface surface;
+        surface.resize(640, 480);
+        surface.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&surface));
+        QImage frame(640, 480, QImage::Format_RGB32);
+        frame.fill(Qt::blue);
+        surface.setFrame(frame);
+        surface.setFrame(frame);
+        surface.setFrame(frame);
+        // Deliberately block this GUI thread to reproduce delivery before a late paint.
+        QTest::qSleep(80);
+        QTRY_COMPARE(surface.presentedFrames(), quint64(1));
+        const auto stats = surface.presentationStatistics();
+        QCOMPARE(stats.supersededFrames, quint64(2));
+        QCOMPARE(stats.lastFrameId, quint64(3));
+        QCOMPARE(stats.receiveToPaint.samples, quint64(1));
+        QVERIFY(stats.receiveToPaint.maxMs >= 70);
+        QCOMPARE(stats.receiveToSwap.samples, quint64(1));
+        QVERIFY(stats.receiveToSwap.maxMs >= stats.receiveToPaint.maxMs);
+        QCOMPARE(stats.paint.samples, quint64(1));
+        QCOMPARE(stats.gaps.samples, quint64(0));
+        surface.update();
+        waitForPresentation(50);
+        QCOMPARE(surface.presentationStatistics().receiveToSwap.samples, quint64(1));
+        surface.setFrame({});
+        const auto cleared = surface.presentationStatistics();
+        QCOMPARE(cleared.receiveToSwap.samples, quint64(0));
+        QCOMPARE(cleared.receiveToSwap.maxMs, -1.0);
+        QCOMPARE(cleared.lastFrameId, quint64(0));
+        surface.setFrame(frame);
+        QTRY_COMPARE(surface.presentedFrames(), quint64(2));
+        QCOMPARE(surface.presentationStatistics().lastFrameId, quint64(1));
+        QCOMPARE(surface.presentationStatistics().gaps.samples, quint64(0));
     }
 
     void remoteCursorOverlayUsesHostShapeAndClearsOnStop()

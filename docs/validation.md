@@ -1,5 +1,41 @@
 # 验证记录
 
+## 2026-10-25：异网有线与可选 GCC 启动预算（最新）
+
+Windows 家庭网络、Linux 公司网络，两端千兆有线；早期 Tailscale 为 DERP，随后恢复 direct。
+Windows Release core / signaling / media 3/3 通过，122.20 秒；Linux 同 3/3 通过，116.22 秒，双端部署完成。
+新增回归实际协商 WebRTC/TWCC，验证 512000 bit/s 上限、128000 下限与编码预算，
+以及未启用 GCC、无效整数、越界配置在采集前失败。不将本地回环通过作为公网验收。
+
+恢复直连之前，实际 GNOME 发送 / Windows 原生 OpenGL 接收测试未通过首帧断言：
+Windows `physicalDesktopAcrossMachines` 共 2 通过、1 失败（含初始化/清理），74.161 秒；
+失败位于 `tests/ui/tst_window.cpp:146` 的 `surface->hasFrame()`。
+Linux 已进入共享，最终统计 GCC minimum/max/estimate 为 128000/512000/128000 bit/s，
+编码均值 5.970 ms、最大 13.068 ms，输出最大间隔 45.344 ms；接收端没有显示帧。
+这些是发送端数据，不能据此认定 Windows 解码性能、底层队列容量或流畅性达标。
+Windows 退出后 Linux 共享停止，发送测试下一次启动因成员已离开失败；未完成三次启停。
+
+随后十次 Tailscale ping 均 direct / 3–4 ms，同内容有界 TCP 下行 24.7456 Mbps。
+同一二进制在 direct 下、512000 bit/s 诊断预算三轮通过，Windows 3 项 / 33.149 秒；
+首帧 7255 / 13501 / 1787 ms，短窗口交付 60 / 49 / 60.82 fps，交换最大间隔 93.32 / 100.10 / 126.43 ms。
+默认 40 Mbps 对照首帧已到，随后 deliveredFps > 0 失败，2 通过 / 1 失败 / 11.394 秒。
+发送编码仍接近 60 fps，不能据此替代接收解码和排队定位；稳定 1080p60 未通过。
+路由器仅只读查看，直连恢复原因未知；已归档 direct-512k / direct-default 双端日志与 TCP 报告。
+
+本轮仅新增显式进程配置，默认行为保持；未切换 HEVC 或降低文字/颜色门槛。
+隔离 18765 信令服务已退出，Windows/Linux 均无该监听。
+原始构建及公网失败记录在 `build/analysis/wan-20261025/`，详细复现与后续排查见
+[公网优化](wan-optimization-20261025.md)。稳定 1080p60、公网首帧与实际远控仍未验收。
+
+## 2026-10-10：1080p60 分段观测与独立 HEVC 候选
+
+最终 Release：Windows core / signaling / media 3 项通过，129.43 秒；Linux 同 3 项通过，114.19 秒。
+双端原生桌面呈现、GUI 阻塞观测、光标及动作合并 4 个相关用例均通过，含初始化/清理各 6 项：
+Windows 1519 ms，Linux GNOME X11 642 ms。未运行全量 GUI，不将已知布局问题视作通过。
+同轮较早跨机物理桌面三次启停通过，但存在约 392 ms 输出停顿，且尚非接线后有线验收。
+HEVC QP12/16 合成图门槛通过，QP8 失败；实时 600 帧编码完成，不等于端到端显示 60 fps。
+接线、色彩元数据、依赖回退及完整证据路径见 [实施进度](1080p60-implementation-progress.md)。
+
 ## 2026-10-10：最终 GCC + TCP 十分钟完整回归
 
 当前源码使用 `ZJDESK_WEBRTC_GCC=tcp`，调度下限为 min(启动 profile 预算, 8 Mbps)。

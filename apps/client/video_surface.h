@@ -5,6 +5,7 @@
 #include <QTimer>
 #include <QElapsedTimer>
 #include "remote-control/input_injector.h"
+#include "media/frame_timing.h"
 
 class VideoSurface final : public QOpenGLWidget
 {
@@ -16,6 +17,7 @@ public:
     bool hasFrame() const { return !frame_.isNull(); }
     quint64 presentedFrames() const { return presentedFrames_; }
     double takePresentationGapMaxMs();
+    zjdesk::VideoPresentationStats presentationStatistics() const;
     void setFrameCaption(const QString &caption) { frameCaption_ = caption; update(); }
     void setControlEnabled(bool enabled);
     void setRemoteCursor(const zjdesk::RemoteCursor &cursor);
@@ -43,6 +45,16 @@ private:
     bool awaitingSwap_ = false;
     QElapsedTimer presentationClock_;
     double presentationGapMaxMs_ = -1;
+    zjdesk::FrameTiming presentationGaps_;
+    zjdesk::FrameTiming receiveToPaint_;
+    zjdesk::FrameTiming paintTiming_;
+    zjdesk::FrameTiming receiveToSwap_;
+    qint64 receivedNs_ = 0;
+    qint64 awaitingReceivedNs_ = 0;
+    quint64 frameId_ = 0;
+    quint64 awaitingFrameId_ = 0;
+    quint64 lastPresentedFrameId_ = 0;
+    quint64 supersededFrames_ = 0;
     QString frameCaption_ = QStringLiteral("本地预览 · 尚未发送给对方");
     bool controlEnabled_ = false;
     Qt::MouseButtons remoteButtons_ = Qt::NoButton;

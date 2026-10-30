@@ -45,7 +45,8 @@ public:
     PreviewStats previewStats() const { return media_.stats(); }
     bool startScreenShare(const QString &source = "desktop", int targetFps = 0);
     ShareStats shareStats() const { return shareStats_; }
-    void reportSharePresentation(quint64 frames, bool active = true, double gapMaxMs = -1);
+    void reportSharePresentation(quint64 frames, bool active = true, double gapMaxMs = -1,
+        const VideoPresentationStats &presentation = {});
     void stopScreenShare();
     PreviewState shareState() const { return shareState_; }
     QString shareDetail() const { return shareDetail_; }

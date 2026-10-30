@@ -49,7 +49,8 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
                 {"codec", stats.codec}, {"bitrateBudget", stats.encoderBitrate}, {"quantizer", stats.encoderQuantizer},
                 {"controlRttMs", stats.controlRttMs}, {"transportExcessMs", stats.transportExcessMs},
                 {"outputGapMaxMs", stats.outputGapMaxMs}, {"presentedGapMaxMs", stats.presentedGapMaxMs},
-                {"packetsLost", stats.packetsLost}, {"transport", stats.transport}}).toJson(QJsonDocument::Compact)));
+                {"packetsLost", stats.packetsLost}, {"transport", stats.transport},
+                {"timings", stats.timingDiagnostics()}}).toJson(QJsonDocument::Compact)));
         shareStats_ = stats;
         emit shareStatisticsChanged(stats);
         if (shareState_ == PreviewState::Running)
@@ -337,10 +338,11 @@ void SessionCoordinator::stopScreenShare()
     clearScreenShare(true);
 }
 
-void SessionCoordinator::reportSharePresentation(quint64 frames, bool active, double gapMaxMs)
+void SessionCoordinator::reportSharePresentation(quint64 frames, bool active, double gapMaxMs,
+    const VideoPresentationStats &presentation)
 {
     if (screenActive())
-        screen_.reportPresentation(frames, shareEpoch_, active, gapMaxMs);
+        screen_.reportPresentation(frames, shareEpoch_, active, gapMaxMs, presentation);
 }
 
 void SessionCoordinator::clearScreenShare(bool notifyPeer)

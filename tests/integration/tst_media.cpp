@@ -2,6 +2,7 @@
 #include "signaling/room_server.h"
 #include <QDir>
 #include <QFile>
+#include <QJsonDocument>
 #include <QThread>
 #include <QScopeGuard>
 #include <QtTest>
@@ -12,6 +13,74 @@ class MediaTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void gccCapConstrainsNegotiatedPacerAndEncoder()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        const auto oldGcc = qgetenv("ZJDESK_WEBRTC_GCC");
+        const auto oldCap = qgetenv("ZJDESK_WEBRTC_MAX_BITRATE");
+        const auto restore = qScopeGuard([&] {
+            if (oldGcc.isNull()) qunsetenv("ZJDESK_WEBRTC_GCC");
+            else qputenv("ZJDESK_WEBRTC_GCC", oldGcc);
+            if (oldCap.isNull()) qunsetenv("ZJDESK_WEBRTC_MAX_BITRATE");
+            else qputenv("ZJDESK_WEBRTC_MAX_BITRATE", oldCap);
+        });
+        qputenv("ZJDESK_WEBRTC_GCC", "1");
+        qputenv("ZJDESK_WEBRTC_MAX_BITRATE", "512000");
+        zjdesk::ScreenShare sender, receiver;
+        zjdesk::ShareStats sent;
+        QSignalSpy frames(&receiver, &zjdesk::ScreenShare::frameReady);
+        connect(&sender, &zjdesk::ScreenShare::statisticsReady, this,
+            [&](quint64, const zjdesk::ShareStats &stats) { sent = stats; });
+        connect(&sender, &zjdesk::ScreenShare::negotiationReady, &receiver,
+            [&](quint64, const QString &type, const QJsonObject &message) { receiver.negotiate(type, message, 9); });
+        connect(&receiver, &zjdesk::ScreenShare::negotiationReady, &sender,
+            [&](quint64, const QString &type, const QJsonObject &message) { sender.negotiate(type, message, 7); });
+        receiver.start(false, {}, 9);
+        sender.start(true, "test", 7, 30);
+        QTRY_VERIFY_WITH_TIMEOUT(!frames.isEmpty() && sent.congestionBitrate > 0, 15000);
+        QCOMPARE(sent.congestionMinimumBitrate, 128000);
+        QCOMPARE(sent.congestionMaximumBitrate, 512000);
+        QVERIFY(sent.congestionBitrate >= 128000 && sent.congestionBitrate <= 512000);
+        QVERIFY(sent.encoderBitrate > 0 && sent.encoderBitrate <= 409600);
+        QCOMPARE(sent.timingDiagnostics().value("congestion").toObject().value("maximumBitrate").toInt(), 512000);
+        sender.stop(8);
+        receiver.stop(10);
+    }
+
+    void invalidGccCapFailsBeforeCapture_data()
+    {
+        QTest::addColumn<QByteArray>("mode");
+        QTest::addColumn<QByteArray>("cap");
+        QTest::newRow("missing-gcc") << QByteArray() << QByteArray("512000");
+        QTest::newRow("invalid-integer") << QByteArray("1") << QByteArray("garbage");
+        QTest::newRow("out-of-range") << QByteArray("tcp") << QByteArray("127999");
+    }
+
+    void invalidGccCapFailsBeforeCapture()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        QFETCH(QByteArray, mode);
+        QFETCH(QByteArray, cap);
+        const auto oldGcc = qgetenv("ZJDESK_WEBRTC_GCC");
+        const auto oldCap = qgetenv("ZJDESK_WEBRTC_MAX_BITRATE");
+        const auto restore = qScopeGuard([&] {
+            if (oldGcc.isNull()) qunsetenv("ZJDESK_WEBRTC_GCC");
+            else qputenv("ZJDESK_WEBRTC_GCC", oldGcc);
+            if (oldCap.isNull()) qunsetenv("ZJDESK_WEBRTC_MAX_BITRATE");
+            else qputenv("ZJDESK_WEBRTC_MAX_BITRATE", oldCap);
+        });
+        qputenv("ZJDESK_WEBRTC_GCC", mode);
+        qputenv("ZJDESK_WEBRTC_MAX_BITRATE", cap);
+        zjdesk::ScreenShare sender;
+        QSignalSpy status(&sender, &zjdesk::ScreenShare::statusChanged);
+        QSignalSpy frames(&sender, &zjdesk::ScreenShare::frameReady);
+        sender.start(true, "test", 7, 30);
+        QTRY_VERIFY(!status.isEmpty());
+        QCOMPARE(status.last().at(1).toString(), QString("failed"));
+        QVERIFY(status.last().at(2).toString().contains("ZJDESK_WEBRTC_MAX_BITRATE"));
+        QVERIFY(frames.isEmpty());
+    }
+
     void invalidMediaLocalAddressFailsWithoutStartingCapture()
     {
         QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
@@ -46,8 +115,15 @@ private slots:
         connect(&sender, &zjdesk::SessionCoordinator::shareChanged, this, [&] {
             qInfo() << "Physical sender state" << int(sender.shareState()) << sender.shareDetail();
         });
+        connect(&sender, &zjdesk::SessionCoordinator::shareStatisticsChanged, this,
+            [](const zjdesk::ShareStats &stats) {
+                qInfo().noquote() << "Physical sender timings"
+                    << QJsonDocument(stats.timingDiagnostics()).toJson(QJsonDocument::Compact);
+            });
         QVERIFY(sender.join(QUrl(qEnvironmentVariable("ZJDESK_TEST_SERVER")), "physical-first-frame", "Linux"));
-        QTRY_COMPARE_WITH_TIMEOUT(sender.memberCount(), 2, 60000);
+        QTRY_VERIFY_WITH_TIMEOUT(sender.memberCount() == 2
+            || sender.state() == zjdesk::SessionCoordinator::State::Failed, 60000);
+        QVERIFY2(sender.memberCount() == 2, qPrintable(sender.detail()));
         for (int cycle = 0; cycle < 3; ++cycle)
         {
             QVERIFY(sender.startScreenShare());
@@ -199,6 +275,21 @@ private slots:
         QVERIFY(sent.codecMaxMs >= sent.codecMeanMs);
         QVERIFY(received.outputGapMaxMs > 0);
         QCOMPARE(received.copyMaxMs, 0.0);
+        QCOMPARE(received.decoder, QString("vp9dec"));
+        QVERIFY(!received.hardwareDecoder);
+        QCOMPARE(sent.codecProfile, QString("1"));
+        QCOMPARE(received.codecOutputFormat, QString("Y444"));
+        QVERIFY(!received.codecOutputMemory.isEmpty());
+        QVERIFY(sent.captureToEncoderTiming.samples > 0);
+        QVERIFY(received.codecTiming.samples > 0);
+        QVERIFY(received.decodedToSinkTiming.samples > 0);
+        QVERIFY(received.sinkToPullTiming.samples > 0);
+        QVERIFY(received.frameMapTiming.samples > 0);
+        QVERIFY(received.mailboxTiming.samples > 0);
+        QVERIFY(received.workerPollTiming.samples > 0);
+        QVERIFY(received.workerPollGapTiming.samples > 0);
+        QVERIFY(received.deliveredFrameId > 0);
+        QCOMPARE(received.timingDiagnostics().value("scope").toString(), QString("stream-cumulative"));
         QVERIFY(sent.sendBufferBytes > 0);
         QVERIFY(received.receiveBufferBytes > 0);
         QCOMPARE(sent.rtcpFeedbackBudget, 64000);

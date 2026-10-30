@@ -9,6 +9,17 @@ export GST_PLUGIN_SYSTEM_PATH_1_0="$GST_ROOT/lib/gstreamer-1.0"
 export GST_PLUGIN_PATH_1_0=''
 export GST_PLUGIN_SCANNER="$GST_ROOT/libexec/gstreamer-1.0/gst-plugin-scanner"
 export GST_REGISTRY_1_0="$root/build/gst-registry-linux.bin"
+if [[ -n ${ZJDESK_LIBNICE_ROOT:-} ]]; then
+    candidate_root=$(cd -- "$ZJDESK_LIBNICE_ROOT" && pwd)
+    if [[ ! -f "$candidate_root/lib/libnice.so.10" || ! -f "$candidate_root/lib/gstreamer-1.0/libgstnice.so" ]]; then
+        printf 'ZJDESK_LIBNICE_ROOT must contain both lib/libnice.so.10 and lib/gstreamer-1.0/libgstnice.so\n' >&2
+        exit 1
+    fi
+    export LD_LIBRARY_PATH="$candidate_root/lib:$LD_LIBRARY_PATH"
+    export GST_PLUGIN_PATH_1_0="$candidate_root/lib/gstreamer-1.0"
+    export GST_REGISTRY_1_0="$root/build/gst-registry-linux-libnice-candidate.bin"
+    printf 'Using isolated libnice runtime: %s\n' "$candidate_root" >&2
+fi
 export QT_QPA_PLATFORM=xcb
 bin="$root/build/linux-release/bin"
 server_pid=''

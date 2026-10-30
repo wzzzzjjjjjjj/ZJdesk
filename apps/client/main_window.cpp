@@ -389,7 +389,8 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     auto *statsTimer = new QTimer(this);
     connect(statsTimer, &QTimer::timeout, this, [this] {
         session_.reportSharePresentation(video_->presentedFrames(),
-            video_->isVisible() && !isMinimized() && isActiveWindow(), video_->takePresentationGapMaxMs());
+            video_->isVisible() && !isMinimized() && isActiveWindow(), video_->takePresentationGapMaxMs(),
+            video_->presentationStatistics());
         const auto stats = session_.previewStats();
         previewStatsLabel_->setText(QStringLiteral("采集 %1 帧 · 丢弃 %2 帧 · 待显示 %3 帧")
             .arg(stats.capturedFrames).arg(stats.droppedFrames).arg(stats.pendingFrames));

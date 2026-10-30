@@ -18,10 +18,22 @@ VideoSurface::VideoSurface(QWidget *parent) : QOpenGLWidget(parent)
             return;
         awaitingSwap_ = false;
         ++presentedFrames_;
+        lastPresentedFrameId_ = awaitingFrameId_;
+        receiveToSwap_.record((zjdesk::FrameTiming::nowNs() - awaitingReceivedNs_) / 1e6);
         if (presentationClock_.isValid())
-            presentationGapMaxMs_ = qMax(presentationGapMaxMs_, presentationClock_.nsecsElapsed() / 1000000.0);
+        {
+            const double gapMs = presentationClock_.nsecsElapsed() / 1000000.0;
+            presentationGapMaxMs_ = qMax(presentationGapMaxMs_, gapMs);
+            presentationGaps_.record(gapMs);
+        }
         presentationClock_.restart();
     });
+}
+
+zjdesk::VideoPresentationStats VideoSurface::presentationStatistics() const
+{
+    return {presentationGaps_.summary(), receiveToPaint_.summary(), paintTiming_.summary(),
+        receiveToSwap_.summary(), supersededFrames_, lastPresentedFrameId_};
 }
 
 double VideoSurface::takePresentationGapMaxMs()
@@ -40,6 +52,8 @@ void VideoSurface::setParticipant(const QString &name, const QString &caption)
 
 void VideoSurface::paintGL()
 {
+    const auto paintStartedNs = zjdesk::FrameTiming::nowNs();
+    const bool paintingNewFrame = pendingFrame_ && !frame_.isNull();
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
@@ -48,6 +62,9 @@ void VideoSurface::paintGL()
         if (pendingFrame_)
         {
             awaitingSwap_ = true;
+            awaitingReceivedNs_ = receivedNs_;
+            awaitingFrameId_ = frameId_;
+            receiveToPaint_.record((paintStartedNs - receivedNs_) / 1e6);
             pendingFrame_ = false;
         }
         painter.fillRect(rect(), Qt::black);
@@ -69,6 +86,9 @@ void VideoSurface::paintGL()
         painter.setPen(Qt::white);
         painter.drawText(QRect(16, 12, width() - 32, 24), Qt::AlignLeft,
                          frameCaption_);
+        painter.end();
+        if (paintingNewFrame)
+            paintTiming_.record((zjdesk::FrameTiming::nowNs() - paintStartedNs) / 1e6);
         return;
     }
     QLinearGradient background(0, 0, width(), height());
@@ -115,6 +135,12 @@ void VideoSurface::paintGL()
 void VideoSurface::setFrame(const QImage &frame)
 {
     const bool hadFrame = !frame_.isNull();
+    if (!frame.isNull())
+    {
+        supersededFrames_ += pendingFrame_;
+        receivedNs_ = zjdesk::FrameTiming::nowNs();
+        ++frameId_;
+    }
     frame_ = frame;
     pendingFrame_ = !frame.isNull();
     if (frame.isNull())
@@ -122,6 +148,12 @@ void VideoSurface::setFrame(const QImage &frame)
         awaitingSwap_ = false;
         presentationClock_.invalidate();
         presentationGapMaxMs_ = -1;
+        presentationGaps_ = {};
+        receiveToPaint_ = {};
+        paintTiming_ = {};
+        receiveToSwap_ = {};
+        receivedNs_ = awaitingReceivedNs_ = 0;
+        frameId_ = awaitingFrameId_ = lastPresentedFrameId_ = supersededFrames_ = 0;
         motionTimer_.stop();
         pendingMotion_ = {};
         remoteCursor_ = {};

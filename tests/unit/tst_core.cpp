@@ -4,6 +4,7 @@
 #include "remote-control/control_session.h"
 #include "session/session_coordinator.h"
 #include "media/share_quality.h"
+#include "media/congestion_budget.h"
 #include <QFile>
 #include <QJsonDocument>
 #include <QTemporaryDir>
@@ -14,6 +15,60 @@ class CoreTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void congestionBudgetCapsStartupAndAllowsLowBandwidth()
+    {
+        const auto defaults = zjdesk::CongestionBudget::fromMaximum({}, 8294400);
+        QVERIFY(defaults);
+        QCOMPARE(defaults->minimum, 8000000);
+        QCOMPARE(defaults->maximum, 40000000);
+        QCOMPARE(defaults->initial, 40000000);
+        const auto limited = zjdesk::CongestionBudget::fromMaximum("512000", 8294400);
+        QVERIFY(limited);
+        QCOMPARE(limited->minimum, 128000);
+        QCOMPARE(limited->maximum, 512000);
+        QCOMPARE(limited->initial, 512000);
+        for (const auto &value : {"128000", "8000000", "40000000"})
+        {
+            const auto budget = zjdesk::CongestionBudget::fromMaximum(value, 2000000);
+            QVERIFY(budget);
+            QVERIFY(budget->minimum <= budget->initial && budget->initial <= budget->maximum);
+        }
+        for (const auto &value : {"-1", "0", "127999", "40000001", "4294967296", "1Mbps", "nan"})
+            QVERIFY(!zjdesk::CongestionBudget::fromMaximum(value, 8294400));
+    }
+
+    void frameTimingKeepsLongStallsAndUsesConservativePercentiles()
+    {
+        zjdesk::FrameTiming timing;
+        QCOMPARE(timing.summary().samples, quint64(0));
+        QCOMPARE(timing.summary().p99Ms, -1.0);
+        for (int i = 0; i < 99; ++i)
+            timing.record(10);
+        timing.record(907.258);
+        timing.record(-1);
+        timing.record(std::numeric_limits<double>::quiet_NaN());
+        timing.record(std::numeric_limits<double>::infinity());
+        const auto stats = timing.summary();
+        QCOMPARE(stats.samples, quint64(100));
+        QCOMPARE(stats.p50Ms, 10.0);
+        QCOMPARE(stats.p95Ms, 10.0);
+        QCOMPARE(stats.p99Ms, 10.0);
+        QCOMPARE(stats.maxMs, 907.258);
+        QCOMPARE(stats.over100Ms, quint64(1));
+        QCOMPARE(stats.over200Ms, quint64(1));
+        timing.record(100);
+        QCOMPARE(timing.summary().p99Ms, 100.0);
+        QCOMPARE(timing.summary().over100Ms, quint64(1));
+        timing.record(201);
+        timing.record(201);
+        QCOMPARE(timing.summary().p99Ms, 907.258);
+        QCOMPARE(timing.summary().over200Ms, quint64(3));
+        timing = {};
+        timing.record(1.01);
+        QCOMPARE(timing.summary().p99Ms, 1.1);
+        QCOMPARE(timing.summary().meanMs, 1.01);
+    }
+
     void shareQualityPreservesResolutionAndAvoidsOscillation()
     {
         zjdesk::ShareQuality quality(QSize(3840, 2160));

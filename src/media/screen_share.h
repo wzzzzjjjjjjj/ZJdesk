@@ -1,6 +1,7 @@
 #pragma once
 
 #include "media_engine.h"
+#include "frame_timing.h"
 #include <QElapsedTimer>
 #include <QJsonObject>
 #include <memory>
@@ -30,6 +31,8 @@ struct ShareStats
     double transportExcessMs = -1; // DataChannel round trip above the recent minimum; not video age.
     quint64 controlBufferedBytes = 0;
     int congestionBitrate = -1;
+    int congestionMinimumBitrate = -1;
+    int congestionMaximumBitrate = -1;
     qint64 pacedBytes = -1;
     quint64 droppedBeforeEncode = 0;
     double presentedGapMaxMs = -1;
@@ -52,6 +55,25 @@ struct ShareStats
     QString localAddress;
     QString remoteAddress;
     bool hardwareEncoder = false;
+    bool hardwareDecoder = false;
+    QString decoder;
+    QString codecProfile;
+    QString codecOutputFormat;
+    QString codecOutputMemory;
+    FrameTimingSummary codecTiming;
+    FrameTimingSummary outputGapTiming;
+    FrameTimingSummary captureToEncoderTiming;
+    FrameTimingSummary decodedToSinkTiming;
+    FrameTimingSummary sinkToPullTiming;
+    FrameTimingSummary frameMapTiming;
+    FrameTimingSummary mailboxTiming;
+    FrameTimingSummary workerPollTiming;
+    FrameTimingSummary workerPollGapTiming;
+    VideoPresentationStats presentation;
+    quint64 deliveredFrameId = 0; // Local appsink publication sequence within this stream.
+    quint64 unmatchedCodecOutputs = 0;
+
+    QJsonObject timingDiagnostics() const;
 };
 
 struct ShareMailbox
@@ -60,6 +82,9 @@ struct ShareMailbox
     QImage image;
     quint64 epoch = 0;
     ShareStats stats;
+    qint64 publishedNs = 0;
+    quint64 frameId = 0;
+    FrameTiming waitTiming;
 };
 
 class ScreenShare final : public QObject
@@ -72,7 +97,8 @@ public:
     void start(bool sender, const QString &source, quint64 epoch, int targetFps = 0);
     void stop(quint64 epoch);
     void negotiate(const QString &type, const QJsonObject &payload, quint64 epoch);
-    void reportPresentation(quint64 frames, quint64 epoch, bool active = true, double gapMaxMs = -1);
+    void reportPresentation(quint64 frames, quint64 epoch, bool active = true, double gapMaxMs = -1,
+        const VideoPresentationStats &presentation = {});
     void sendControl(const QJsonObject &message, quint64 epoch);
     void setCursorEmbedded(bool embedded, quint64 epoch);
 

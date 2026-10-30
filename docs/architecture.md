@@ -6,6 +6,15 @@
 
 ## 当前依赖
 
+屏幕统计通过 `media/frame_timing.h` 的有界累计直方图记录分段耗时，由 ScreenShare 经
+SessionCoordinator 发布；VideoSurface 将 GUI 接收、绘制和 frameSwapped 统计经同一路径回传。
+统计包含长停顿计数及实际解码器/输出格式，不引入 GUI 对 GStreamer 的调用。
+当前产品仍为 VP9；HEVC 独立实验不代表产品协商或 RTP 路径已接入。
+公网发送可以通过 `ZJDESK_WEBRTC_MAX_BITRATE` 配合 GCC 限定启动估计、拥塞控制上下限与编码目标；
+配置只影响新流，未设置时保留既有行为。CQP 与底层中继缓存仍可能突发，不能将其视为硬性线速上限。
+当前异网条件与配置边界见 [公网优化](wan-optimization-20261025.md)。
+统计精度、验证边界及后续工作见 [1080p60 实施进度](1080p60-implementation-progress.md)。
+
 ```mermaid
 flowchart TD
     UI[apps/client: Qt Widgets UI] --> CORE[zjdesk_client_core]
