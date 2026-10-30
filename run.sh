@@ -38,6 +38,8 @@ if [[ -z $server ]]; then
     sleep 0.4
     kill -0 "$server_pid"
 fi
-"$bin/zjdesk" --server "$server" --room "${2:-demo}" --display-name "${3:-$(hostname)}" &
+client_args=(--server "$server" --display-name "${3:-$(hostname)}")
+if [[ -n ${2:-} ]]; then client_args+=(--room "$2"); fi
+"$bin/zjdesk" "${client_args[@]}" &
 client_pid=$!
 wait "$client_pid"

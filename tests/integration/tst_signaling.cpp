@@ -53,6 +53,27 @@ private slots:
         QTRY_COMPARE(server.roomCount(), 0);
     }
 
+    void enteredRoomCodesDetermineMembership()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator alice, bob;
+        QVERIFY(!alice.join(url, "", "Alice"));
+        QCOMPARE(server.roomCount(), 0);
+        QVERIFY(alice.join(url, "room_123", "Alice"));
+        QVERIFY(bob.join(url, "room_456", "Bob"));
+        QTRY_COMPARE(alice.state(), State::WaitingForPeer);
+        QTRY_COMPARE(bob.state(), State::WaitingForPeer);
+        QCOMPARE(server.roomCount(), 2);
+        bob.leave();
+        QTRY_COMPARE(server.roomCount(), 1);
+        QVERIFY(bob.join(url, "room_123", "Bob"));
+        QTRY_COMPARE(alice.state(), State::PeerAvailable);
+        QTRY_COMPARE(bob.state(), State::PeerAvailable);
+        QCOMPARE(alice.peerName(), QString("Bob"));
+    }
+
     void cancelAndRepeatedJoinLeave()
     {
         zjdesk::RoomServer server;

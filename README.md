@@ -69,7 +69,7 @@ cd F:\projects\ZJdesk
 修改代码后重新执行构建脚本即可增量构建；构建前关闭上一次演示窗口，避免可执行文件被占用。
 
 启动脚本打开一个客户端窗口；未指定 `-ServerUrl` 时同时启动后台信令服务。
-连接另一台电脑时传入 `-ServerUrl 'ws://服务机器IP:8765'`，两端使用相同房间号。
+连接另一台电脑时传入 `-ServerUrl 'ws://服务机器IP:8765'`，两端输入相同房间码并点击“加入房间”。房间码为 1–32 位字母、数字、下划线或连字符，区分大小写；必须连接同一个信令服务。
 终端会保持运行；关闭客户端后脚本停止自己创建的服务。
 在该终端按 `Ctrl+C` 会清理本次脚本创建的客户端和服务，不影响其他实例。
 不会修改全局 PATH、系统配置或现有 Qt 5 项目。
@@ -96,7 +96,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run.ps1
 1. 打开根目录 `CMakeLists.txt`。
 2. 选择 **Qt 6.8.3 MSVC2022 64bit** 套件，使用 Ninja。
 3. 构建后选 `zjdesk` 作为运行目标；先另外启动 `zjdesk-server`。
-4. 默认服务地址为 `ws://127.0.0.1:8765`，默认房间为 `demo`。
+4. 默认服务地址为 `ws://127.0.0.1:8765`，房间码默认留空，需在两端输入相同的房间码。
 
 ### 可直接双击的本地部署
 
@@ -153,8 +153,14 @@ bash ./run.sh
 本次 Linux 项目实际位于 `~/ZJdesk/zjdesk`；依赖安装和验证记录见 [validation.md](docs/validation.md)。
 默认构建不运行 GUI；需要真实桌面验证时执行 `bash ./build.sh --gui-tests --deploy`。
 `run.sh` 默认后台启动服务并打开一个客户端，关闭客户端后清理自己的服务。
-连接已有服务时执行 `bash ./run.sh ws://服务机器IP:8765 demo Linux`。
+连接已有服务时执行 `bash ./run.sh ws://服务机器IP:8765`，然后在两端输入相同房间码；也可通过第二个参数预填房间码，例如 `bash ./run.sh ws://服务机器IP:8765 myroom Linux`。
 仅构建服务端时配置 `-DZJDESK_BUILD_CLIENT=OFF`；服务不需要桌面会话。
+
+### 双端启动快捷方式
+
+双击 `构建启动.bat` 会将 Windows 当前工作树中的源码（包括未提交的修改）复制到 Linux 独立目录，再在两端构建、运行非 GUI 测试并部署，然后启动两端。Linux 原项目目录不会被覆盖；每次构建会保留一个独立的源码和构建目录，占用磁盘空间。构建期间请勿修改源码。
+双击 `直接启动.bat` 会跳过构建、测试和部署，直接使用两端已有的 Release 构建；代码更新后请先重新构建两端。
+这两个入口使用 `start-both.ps1` 中配置的机器地址、SSH 和 Linux 桌面环境。
 
 ### Windows 控制本次 Linux 电脑
 
@@ -162,13 +168,13 @@ Linux 桌面运行 `bash ./run.sh`，Windows 运行：
 
 ```powershell
 $env:ZJDESK_WEBRTC_LOCAL_ADDRESS = '10.11.48.48'
-.\run.ps1 -Preset windows-release -ServerUrl 'ws://10.11.47.137:8765' -Room demo -Name Windows
+.\run.ps1 -Preset windows-release -ServerUrl 'ws://10.11.47.137:8765' -Name Windows
 ```
 
 本次 Linux 启动使用 `ZJDESK_WEBRTC_LOCAL_ADDRESS=10.11.47.137 bash ./run.sh ws://127.0.0.1:8765 demo Linux`。
 不同网络经 Tailscale 的验证按用户要求暂停，当前局域网结果见 [validation.md](docs/validation.md)。
 
-两端点击“加入房间”；Windows 点击“请求控制 Linux”，Linux 点击“允许控制”，桌面自动连接。
+两端输入相同房间码并点击“加入房间”；Windows 点击“请求控制 Linux”，Linux 点击“允许控制”，桌面自动连接。
 Windows 点击收到的画面后操作键鼠；“放大画面”进入全屏，Esc / “退出放大”返回，任一端可停止控制。
 当前被控端要求 X11；Wayland、Windows 被控、剪贴板和中文输入法同步尚未实现。
 

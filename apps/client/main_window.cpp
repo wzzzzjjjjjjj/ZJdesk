@@ -122,12 +122,12 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     roomEdit_->setObjectName("roomId");
     nameEdit_->setObjectName("displayName");
     serverEdit_->setPlaceholderText("ws://192.168.1.100:8765");
-    roomEdit_->setPlaceholderText(QStringLiteral("输入房间号"));
+    roomEdit_->setPlaceholderText(QStringLiteral("输入房间码（字母、数字、_ 或 -）"));
     nameEdit_->setPlaceholderText(QStringLiteral("输入你的昵称"));
     roomEdit_->setMaxLength(32);
     nameEdit_->setMaxLength(40);
     const QList<QPair<QString, QLineEdit *>> fields = {
-        {QStringLiteral("信令服务"), serverEdit_}, {QStringLiteral("房间号"), roomEdit_},
+        {QStringLiteral("信令服务"), serverEdit_}, {QStringLiteral("房间码"), roomEdit_},
         {QStringLiteral("你的昵称"), nameEdit_}};
     for (const auto &field : fields)
     {

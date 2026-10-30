@@ -172,7 +172,7 @@ bool SessionCoordinator::join(const QUrl &url, const QString &roomId, const QStr
         || url.host().isEmpty() || !url.userInfo().isEmpty()
         || !protocol::isRoomIdValid(roomId) || !protocol::isPeerNameValid(name))
     {
-        fail(QStringLiteral("请填写有效的服务地址、房间号和昵称"));
+        fail(QStringLiteral("请填写有效的服务地址、房间码（1–32 位字母、数字、_ 或 -）和昵称"));
         return false;
     }
     roomId_ = roomId;

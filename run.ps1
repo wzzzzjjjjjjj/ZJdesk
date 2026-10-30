@@ -12,7 +12,7 @@ param(
     [string]$Preset = 'windows-debug',
     [string]$GstRoot = '',
     [string]$ServerUrl = '',
-    [string]$Room = 'demo',
+    [string]$Room = '',
     [string]$Name = $env:COMPUTERNAME
 )
 $ErrorActionPreference = 'Stop'
@@ -62,9 +62,11 @@ try {
         Start-Sleep -Milliseconds 400
         if ($demoServer.HasExited) { throw 'Server could not start; check whether port 8765 is already in use.' }
     }
-    $demoClient = Start-DemoProcess 'zjdesk.exe' @('--server', $ServerUrl, '--display-name', $Name, '--room', $Room) $false
+    $clientArgs = @('--server', $ServerUrl, '--display-name', $Name)
+    if ($Room) { $clientArgs += @('--room', $Room) }
+    $demoClient = Start-DemoProcess 'zjdesk.exe' $clientArgs $false
     Write-Output "Client PID: $($demoClient.Id); server: $ServerUrl"
-    Write-Output 'Click Join. Close the client, or press Ctrl+C here, to stop.'
+    Write-Output 'Enter the same room code on both clients and click Join. Close the client, or press Ctrl+C here, to stop.'
     while (-not $demoClient.HasExited) {
         if ($null -ne $demoServer -and $demoServer.HasExited) { throw 'Server exited unexpectedly.' }
         Start-Sleep -Milliseconds 200
