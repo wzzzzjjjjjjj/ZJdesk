@@ -1,5 +1,15 @@
 # 验证记录
 
+## 2026-10-31：会议更改合入 ZJ-desk
+
+在 `F:\projects\ZJdesk` 的合并结果上，Windows Debug 客户端和测试均编译成功，signaling 与 media 分别通过（4.51 / 121.43 秒）。首次 `build.ps1` 的 core 测试中，`eventLogBoundedAndExported` 无法在默认临时目录创建 `QTemporaryDir`；仅对测试进程将 TEMP / TMP 指向 `build/test-temp` 后，core 全套通过（0.40 秒）。会议原生 GUI 与真实设备、跨机验收仍未执行。
+
+## 2026-10-30：两人视频会议 Windows 本地回归
+
+在工作树使用 MSVC 2022 x64、Qt 6.8.3 和 GStreamer 1.26.11 执行 `build.ps1`：core、signaling、media 3/3 通过，合计 125.22 秒。会议测试使用本机双方真实 WebRTC 管线、合成视频 / 音频和虚拟音频输出，覆盖双向视频和音频、麦克风及扬声器静音 / 恢复、隐藏画面、重复通话、预览及测试音释放、并行屏幕共享、拒接、交叉呼叫、设备错误和离开清理。会议原生 GUI 测试已编译，未运行；真实摄像头、麦克风、扬声器、Ubuntu 与跨机网络未验收。详细操作和限制见 [两人视频会议](video-conference.md)。
+
+单独的 Windows Debug 无 GStreamer 构建也编译通过，core、signaling 2/2 通过（4.47 秒）；该构建不提供会议媒体功能。
+
 ## 2026-10-25：异网有线与可选 GCC 启动预算（最新）
 
 Windows 家庭网络、Linux 公司网络，两端千兆有线；早期 Tailscale 为 DERP，随后恢复 direct。

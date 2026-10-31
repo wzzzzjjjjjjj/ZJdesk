@@ -1,5 +1,15 @@
 # 架构与扩展约定
 
+会议使用独立 `ConferenceMedia` 工作线程与 WebRTC 管线，通过 `conference` 中继消息和
+`sessionId` 区分会话，支持 `start`、`accept`、`stop`、`offer`、`answer` 和 `ice`。
+服务校验消息、绑定实际发送者并检查转发后的消息长度；使用会议需要同步更新服务端。
+`SessionCoordinator` 统一管理 Idle / Calling / Incoming / Connecting / Running / Failed，
+收到邀请不启动采集，接听后才创建双方 VP8 / Opus 双向媒体。Running 要求 WebRTC connected
+且实际收到远端视频与音频；房间状态、屏幕共享及远控保持独立。
+会话代次屏蔽旧协商与帧，设备开启前等待预览和测试音释放；挂断、离开、断线、超时或媒体失败均清理设备。
+本地与远端帧各使用一个最新帧槽交接，避免 UI 事件队列累积画面；设备异常只结束会议并保留可用的房间连接。
+界面只操作协调层，媒体选择、静音和画面隐藏均在会议工作线程执行。使用与限制见 [视频会议](video-conference.md)。
+
 当前采用模块化单进程客户端与独立信令服务。将功能按依赖边界拆成 CMake 目标，
 便于分别编译、测试和替换实际的平台实现，不引入微服务或通用插件加载器。
 本文件是随代码维护的当前设计；原始产品目标保留在 original-project-plan.md。

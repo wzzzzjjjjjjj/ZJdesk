@@ -10,6 +10,65 @@ class SignalingTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void conferenceSignalingIsBoundToRoomAndSender()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SignalingClient alice, bob;
+        QSignalSpy ac(&alice, &zjdesk::SignalingClient::connected);
+        QSignalSpy bc(&bob, &zjdesk::SignalingClient::connected);
+        QSignalSpy am(&alice, &zjdesk::SignalingClient::messageReceived);
+        QSignalSpy bm(&bob, &zjdesk::SignalingClient::messageReceived);
+        alice.open(url);
+        bob.open(url);
+        QTRY_COMPARE(ac.count(), 1);
+        QTRY_COMPARE(bc.count(), 1);
+        QVERIFY(alice.send({"conference", {{"action", "start"}, {"sessionId", "call1"}}}));
+        QTRY_COMPARE(am.count(), 1);
+        QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(am.takeFirst().at(0)).payload.value("code").toString(), "not_joined");
+        QVERIFY(alice.send({"join", {{"roomId", "call"}, {"name", "Alice"}}}));
+        QTRY_COMPARE(am.count(), 1);
+        const auto identity = qvariant_cast<zjdesk::protocol::Message>(am.takeFirst().at(0)).payload.value("peerId").toString();
+        QVERIFY(bob.send({"join", {{"roomId", "call"}, {"name", "Bob"}}}));
+        QTRY_COMPARE(bm.count(), 1);
+        QTRY_COMPARE(am.count(), 1);
+        am.clear();
+        bm.clear();
+        const QList<QJsonObject> messages = {
+            {{"action", "start"}, {"sessionId", "call1"}, {"fromPeerId", "forged"}},
+            {{"action", "accept"}, {"sessionId", "call1"}},
+            {{"action", "offer"}, {"sessionId", "call1"}, {"sdp", "offer"}},
+            {{"action", "answer"}, {"sessionId", "call1"}, {"sdp", "answer"}},
+            {{"action", "ice"}, {"sessionId", "call1"}, {"candidate", "candidate"}, {"sdpMLineIndex", 1}},
+            {{"action", "stop"}, {"sessionId", "call1"}}};
+        for (const auto &message : messages)
+            QVERIFY(alice.send({"conference", message}));
+        QTRY_COMPARE(bm.count(), messages.size());
+        for (int i = 0; i < messages.size(); ++i)
+        {
+            const auto received = qvariant_cast<zjdesk::protocol::Message>(bm.at(i).at(0));
+            QCOMPARE(received.type, "conference");
+            QCOMPARE(received.payload.value("action"), messages.at(i).value("action"));
+            QCOMPARE(received.payload.value("fromPeerId").toString(), identity);
+        }
+        QVERIFY(alice.send({"conference", {{"action", "ice"}, {"sessionId", "call1"},
+            {"candidate", "candidate"}, {"sdpMLineIndex", -1}}}));
+        QTRY_COMPARE(am.count(), 1);
+        QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(am.takeFirst().at(0)).payload.value("code").toString(), "invalid_conference");
+        QCOMPARE(bm.count(), messages.size());
+        zjdesk::protocol::Message large{"conference", {{"action", "offer"}, {"sessionId", "call1"}, {"sdp", ""}}};
+        const auto overhead = zjdesk::protocol::encode(large).toUtf8().size();
+        large.payload.insert("sdp", QString(zjdesk::protocol::MaxMessageBytes - overhead, 'x'));
+        QCOMPARE(zjdesk::protocol::encode(large).toUtf8().size(), zjdesk::protocol::MaxMessageBytes);
+        QVERIFY(alice.send(large));
+        QTRY_COMPARE(am.count(), 1);
+        QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(am.takeFirst().at(0)).payload.value("code").toString(), "message_too_large");
+        QCOMPARE(bm.count(), messages.size());
+        QVERIFY(alice.send({"conference", {{"action", "stop"}, {"sessionId", "call1"}}}));
+        QTRY_COMPARE(bm.count(), messages.size() + 1);
+    }
+
     void twoPeersRelayAndThirdPeerRejected()
     {
         zjdesk::RoomServer server;

@@ -154,6 +154,23 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
     }
     if (protocol::isRelayType(message->type))
     {
+        if (message->type == "conference")
+        {
+            const auto action = message->payload.value("action").toString();
+            const auto &payload = message->payload;
+            if (!protocol::isRoomIdValid(payload.value("sessionId").toString())
+                || (action != "start" && action != "stop" && action != "accept" && action != "offer"
+                    && action != "answer" && action != "ice")
+                || ((action == "offer" || action == "answer") &&
+                    (!payload.value("sdp").isString() || payload.value("sdp").toString().isEmpty()))
+                || (action == "ice" && (!payload.value("candidate").isString()
+                    || payload.value("candidate").toString().isEmpty()
+                    || !payload.value("sdpMLineIndex").isDouble()
+                    || payload.value("sdpMLineIndex").toDouble() < 0
+                    || payload.value("sdpMLineIndex").toDouble() > 255
+                    || payload.value("sdpMLineIndex").toDouble() != payload.value("sdpMLineIndex").toInt())))
+                return reject(socket, "invalid_conference");
+        }
         if (message->type == "control")
         {
             const auto action = message->payload.value("action").toString();
@@ -190,6 +207,9 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
             return reject(socket, "peer_unavailable");
         auto payload = message->payload;
         payload.insert("fromPeerId", peers_[socket].id);
+        if (message->type == "conference"
+            && protocol::encode({message->type, payload}).toUtf8().size() > protocol::MaxMessageBytes)
+            return reject(socket, "message_too_large");
         send(other, {message->type, payload});
         return;
     }

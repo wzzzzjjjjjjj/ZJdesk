@@ -2,6 +2,7 @@
 
 #include "diagnostics/event_log.h"
 #include "media/media_engine.h"
+#include "media/conference_media.h"
 #include "media/screen_share.h"
 #include "remote-control/control_session.h"
 #include "remote-control/input_injector.h"
@@ -61,6 +62,17 @@ public:
     bool grantControl();
     void stopControl();
     void sendRemoteInput(const QJsonObject &input);
+    enum class ConferenceState { Idle, Calling, Incoming, Connecting, Running, Failed };
+    Q_ENUM(ConferenceState)
+    ConferenceState conferenceState() const { return conferenceState_; }
+    QString conferenceDetail() const { return conferenceDetail_; }
+    bool conferenceActive() const { return !conferenceId_.isEmpty(); }
+    bool conferenceDevicesBusy() const { return conferenceActive() || conferenceCleanupPending_; }
+    bool setConferenceDevices(const ConferenceDevices &devices);
+    bool startConference();
+    bool acceptConference();
+    void stopConference();
+    void setConferenceMuted(bool microphone, bool camera, bool speaker);
 
 signals:
     void stateChanged(zjdesk::SessionCoordinator::State state);
@@ -78,6 +90,10 @@ signals:
     void inputProbeInjected(quint64 sequence, qint64 injectUs, bool accepted);
     void inputProbeAcknowledged(quint64 sequence, qint64 roundTripUs, qint64 injectUs, bool accepted);
     void remoteCursorChanged(const zjdesk::RemoteCursor &cursor);
+    void conferenceChanged();
+    void conferenceLocalFrame(const QImage &image);
+    void conferenceRemoteFrame(const QImage &image);
+    void conferenceAudioReceived(quint64 buffers, double peak);
 
 private:
     void receive(const protocol::Message &message);
@@ -91,6 +107,10 @@ private:
     void sendControlGrant();
     void clearControl();
     void sendCursor();
+    void receiveConference(const QJsonObject &payload);
+    void clearConference(bool notifyPeer);
+    void beginConferenceMedia(bool offerer);
+    void startConferenceMediaWhenReady();
 
     SignalingClient signaling_;
     EventLog events_;
@@ -115,6 +135,18 @@ private:
     QTimer deadline_;
     MediaEngine media_;
     ScreenShare screen_;
+    ConferenceMedia conference_;
+    ConferenceDevices conferenceDevices_;
+    ConferenceState conferenceState_ = ConferenceState::Idle;
+    QString conferenceDetail_ = QStringLiteral("视频会议未开启");
+    QString conferenceId_;
+    quint64 conferenceEpoch_ = 0;
+    QTimer conferenceDeadline_;
+    bool conferenceMediaPending_ = false;
+    bool conferenceCleanupPending_ = false;
+    bool conferenceOfferer_ = false;
+    bool conferenceMicMuted_ = false, conferenceCameraHidden_ = false, conferenceSpeakerMuted_ = false;
+    QList<QJsonObject> conferencePendingSignals_;
     PreviewState shareState_ = PreviewState::Stopped;
     QString shareDetail_ = QStringLiteral("屏幕共享未启动");
     QString streamId_;

@@ -63,7 +63,8 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     nav->addSpacing(30);
     auto *workspaceButton = new QPushButton(QStringLiteral("协作空间"));
     auto *diagnosticsButton = new QPushButton(QStringLiteral("运行诊断"));
-    for (auto *button : {workspaceButton, diagnosticsButton})
+    auto *meetingButton = new QPushButton(QStringLiteral("视频会议"));
+    for (auto *button : {workspaceButton, meetingButton, diagnosticsButton})
     {
         button->setObjectName("navButton");
         button->setCheckable(true);
@@ -265,6 +266,106 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     sessionLayout->addWidget(notice);
     pages->addWidget(workspace);
 
+    auto *meeting = new QWidget;
+    auto *meetingLayout = new QVBoxLayout(meeting);
+    meetingLayout->setContentsMargins(0, 0, 0, 0);
+    auto *meetingStatus = text(session_.conferenceDetail(), "conferenceStatus");
+    meetingStatus->setWordWrap(true);
+    meetingLayout->addWidget(meetingStatus);
+    auto *deviceRow = new QHBoxLayout;
+    for (const auto &entry : {qMakePair("conferenceCamera", QStringLiteral("摄像头")),
+                             qMakePair("conferenceMicrophone", QStringLiteral("麦克风")),
+                             qMakePair("conferenceSpeaker", QStringLiteral("扬声器"))})
+    {
+        deviceRow->addWidget(text(entry.second));
+        auto *combo = new QComboBox;
+        combo->setObjectName(entry.first);
+        combo->setAccessibleName(entry.second);
+        combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        combo->setMinimumContentsLength(8);
+        combo->addItem(QStringLiteral("默认设备"), QString());
+        deviceRow->addWidget(combo, 1);
+    }
+    meetingLayout->addLayout(deviceRow);
+    auto *views = new QHBoxLayout;
+    auto *localConference = new VideoSurface;
+    localConference->setObjectName("conferenceLocalVideo");
+    localConference->setFrameCaption(QStringLiteral("本机摄像头 · 接听后发送"));
+    auto *remoteConference = new VideoSurface;
+    remoteConference->setObjectName("conferenceRemoteVideo");
+    remoteConference->setFrameCaption(QStringLiteral("对方摄像头"));
+    views->addWidget(localConference, 1);
+    views->addWidget(remoteConference, 2);
+    meetingLayout->addLayout(views, 1);
+    auto *meetingControls = new QHBoxLayout;
+    auto *call = new QPushButton(QStringLiteral("发起视频会议"));
+    call->setObjectName("conferenceCall");
+    auto *accept = new QPushButton(QStringLiteral("接听"));
+    accept->setObjectName("conferenceAccept");
+    auto *hangup = new QPushButton(QStringLiteral("挂断"));
+    hangup->setObjectName("conferenceHangup");
+    auto *muteMic = new QPushButton(QStringLiteral("麦克风静音"));
+    muteMic->setObjectName("conferenceMuteMicrophone");
+    auto *hideCamera = new QPushButton(QStringLiteral("隐藏画面"));
+    hideCamera->setObjectName("conferenceHideCamera");
+    hideCamera->setToolTip(QStringLiteral("用黑色画面替换本地与发送画面；摄像头设备仍在采集"));
+    auto *muteSpeaker = new QPushButton(QStringLiteral("扬声器静音"));
+    muteSpeaker->setObjectName("conferenceMuteSpeaker");
+    for (auto *button : {muteMic, hideCamera, muteSpeaker}) button->setCheckable(true);
+    for (auto *button : {call, accept, hangup, muteMic, hideCamera, muteSpeaker}) meetingControls->addWidget(button);
+    meetingLayout->addLayout(meetingControls);
+    meetingLayout->addWidget(text(QStringLiteral("接听后采集摄像头与麦克风；建议佩戴耳机，避免扬声器回声。设备需在呼叫前选择。"), "muted"));
+    pages->addWidget(meeting);
+    auto selectMeetingDevices = [this] {
+        return session_.setConferenceDevices({findChild<QComboBox *>("conferenceCamera")->currentData().toString(),
+            findChild<QComboBox *>("conferenceMicrophone")->currentData().toString(),
+            findChild<QComboBox *>("conferenceSpeaker")->currentData().toString()});
+    };
+    connect(call, &QPushButton::clicked, this, [this, selectMeetingDevices] {
+        if (selectMeetingDevices()) session_.startConference();
+    });
+    connect(accept, &QPushButton::clicked, this, [this, selectMeetingDevices] {
+        if (selectMeetingDevices()) session_.acceptConference();
+    });
+    connect(hangup, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::stopConference);
+    auto mute = [this, muteMic, hideCamera, muteSpeaker] {
+        session_.setConferenceMuted(muteMic->isChecked(), hideCamera->isChecked(), muteSpeaker->isChecked());
+    };
+    for (auto *button : {muteMic, hideCamera, muteSpeaker}) connect(button, &QPushButton::toggled, this, mute);
+    connect(&session_, &zjdesk::SessionCoordinator::conferenceLocalFrame, localConference, &VideoSurface::setFrame);
+    connect(&session_, &zjdesk::SessionCoordinator::conferenceRemoteFrame, remoteConference, &VideoSurface::setFrame);
+    auto refreshMeeting = [=] {
+        using CS = zjdesk::SessionCoordinator::ConferenceState;
+        const auto state = session_.conferenceState();
+        const bool mediaActive = state == CS::Connecting || state == CS::Running;
+        call->setEnabled(!session_.conferenceActive() && session_.mediaEnvironment().ready
+            && session_.state() == zjdesk::SessionCoordinator::State::PeerAvailable);
+        accept->setVisible(state == CS::Incoming);
+        accept->setEnabled(session_.mediaEnvironment().ready);
+        hangup->setEnabled(session_.conferenceActive());
+        hangup->setText(state == CS::Incoming ? QStringLiteral("拒绝") : QStringLiteral("挂断"));
+        meetingStatus->setText(session_.conferenceDetail());
+        meetingButton->setText(state == CS::Incoming ? QStringLiteral("视频会议 · 来电") : QStringLiteral("视频会议"));
+        for (auto *button : {muteMic, hideCamera, muteSpeaker})
+        {
+            button->setEnabled(mediaActive);
+            if (!mediaActive) button->setChecked(false);
+        }
+        for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
+            findChild<QComboBox *>(name)->setEnabled(!mediaActive && state != CS::Calling);
+        refreshPreview();
+    };
+    connect(&session_, &zjdesk::SessionCoordinator::conferenceChanged, this, refreshMeeting);
+    connect(&session_, &zjdesk::SessionCoordinator::stateChanged, this, refreshMeeting);
+    connect(meetingButton, &QPushButton::clicked, pages, [=] {
+        pages->setCurrentWidget(meeting);
+        pageTitle->setText(QStringLiteral("视频会议"));
+        pageSubtitle->setText(QStringLiteral("与房间中的另一位成员进行双向视频和语音通话。"));
+    });
+    connect(&session_, &zjdesk::SessionCoordinator::conferenceChanged, this, [this, meetingButton] {
+        if (session_.conferenceState() == zjdesk::SessionCoordinator::ConferenceState::Incoming) meetingButton->click();
+    });
+
     auto *diagnostics = new QWidget;
     auto *diagnosticsLayout = new QVBoxLayout(diagnostics);
     diagnosticsLayout->setContentsMargins(0, 0, 0, 0);
@@ -330,8 +431,8 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         pageTitle->setText(QStringLiteral("协作工作台"));
         pageSubtitle->setText(QStringLiteral("连接彼此的桌面，专注眼前的协作。"));
     });
-    connect(diagnosticsButton, &QPushButton::clicked, pages, [pages, pageTitle, pageSubtitle] {
-        pages->setCurrentIndex(1);
+    connect(diagnosticsButton, &QPushButton::clicked, pages, [pages, diagnostics, pageTitle, pageSubtitle] {
+        pages->setCurrentWidget(diagnostics);
         pageTitle->setText(QStringLiteral("运行诊断"));
         pageSubtitle->setText(QStringLiteral("查看运行环境、设备状态与会话事件。"));
     });
@@ -399,11 +500,25 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     session_.events()->append("application", QStringLiteral("工作台已启动"));
     refreshSession();
     refreshPreview();
+    refreshMeeting();
     QTimer::singleShot(0, &session_, &zjdesk::SessionCoordinator::refreshDevices);
 }
 
 void MainWindow::refreshDevices()
 {
+    for (const auto &entry : {qMakePair("conferenceCamera", "Video/Source"),
+                             qMakePair("conferenceMicrophone", "Audio/Source"),
+                             qMakePair("conferenceSpeaker", "Audio/Sink")})
+    {
+        auto *combo = findChild<QComboBox *>(entry.first);
+        const auto selectedDevice = combo->currentData();
+        combo->clear();
+        combo->addItem(QStringLiteral("默认设备"), QString());
+        for (const auto &device : session_.devices())
+            if (device.kind == entry.second) combo->addItem(device.name, device.name);
+        const auto deviceIndex = combo->findData(selectedDevice);
+        combo->setCurrentIndex(deviceIndex < 0 ? 0 : deviceIndex);
+    }
     const auto selected = sourceCombo_->currentData().toString();
     sourceCombo_->clear();
     sourceCombo_->addItem(QStringLiteral("视频测试源"), "test");
@@ -429,7 +544,7 @@ void MainWindow::refreshPreview()
     const auto state = session_.previewState();
     const bool idle = state == Preview::Stopped || state == Preview::Failed;
     const bool ready = session_.mediaEnvironment().ready;
-    previewButton_->setEnabled(ready && state != Preview::Stopping);
+    previewButton_->setEnabled(ready && state != Preview::Stopping && !session_.conferenceDevicesBusy());
     previewButton_->setText(idle ? QStringLiteral("开始预览") : QStringLiteral("停止预览"));
     sourceCombo_->setEnabled(ready && idle);
     refreshDevicesButton_->setEnabled(ready && idle);
@@ -437,7 +552,7 @@ void MainWindow::refreshPreview()
     if (idle && !session_.screenActive())
         video_->setFrame({});
     const auto audio = session_.audioState();
-    audioButton_->setEnabled(ready && audio != Preview::Stopping);
+    audioButton_->setEnabled(ready && audio != Preview::Stopping && !session_.conferenceDevicesBusy());
     audioButton_->setText(audio == Preview::Stopped || audio == Preview::Failed
         ? QStringLiteral("测试声音") : QStringLiteral("停止声音"));
     audioLabel_->setText(session_.audioDetail());

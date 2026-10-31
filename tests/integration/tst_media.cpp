@@ -13,6 +13,122 @@ class MediaTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void conferenceCarriesBidirectionalVideoAndAudio()
+    {
+        using CS = zjdesk::SessionCoordinator::ConferenceState;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator alice, bob;
+        QVERIFY(alice.setConferenceDevices({"test", "test", "test"}));
+        QVERIFY(bob.setConferenceDevices({"test", "test", "test"}));
+        QSignalSpy af(&alice, &zjdesk::SessionCoordinator::conferenceRemoteFrame);
+        QSignalSpy bf(&bob, &zjdesk::SessionCoordinator::conferenceRemoteFrame);
+        QSignalSpy aa(&alice, &zjdesk::SessionCoordinator::conferenceAudioReceived);
+        QSignalSpy ba(&bob, &zjdesk::SessionCoordinator::conferenceAudioReceived);
+        QVERIFY(alice.join(url, "conference-media", "Alice"));
+        QVERIFY(bob.join(url, "conference-media", "Bob"));
+        QTRY_COMPARE(alice.memberCount(), 2);
+        QTRY_COMPARE(bob.memberCount(), 2);
+        QVERIFY(alice.startPreview("test"));
+        QVERIFY(alice.startAudioTest(false));
+        QTRY_COMPARE(alice.previewState(), Preview::Running);
+        QTRY_COMPARE(alice.audioState(), Preview::Running);
+        for (int cycle = 0; cycle < 2; ++cycle)
+        {
+            af.clear(); bf.clear(); aa.clear(); ba.clear();
+            QVERIFY(alice.startConference());
+            QTRY_COMPARE(bob.conferenceState(), CS::Incoming);
+            QVERIFY(af.isEmpty()); QVERIFY(bf.isEmpty());
+            QVERIFY(aa.isEmpty()); QVERIFY(ba.isEmpty());
+            QVERIFY(bob.acceptConference());
+            QTRY_VERIFY_WITH_TIMEOUT(alice.conferenceState() != CS::Connecting && alice.conferenceState() != CS::Calling, 15000);
+            QVERIFY2(alice.conferenceState() == CS::Running, qPrintable(alice.conferenceDetail() + "; " + bob.conferenceDetail()));
+            QTRY_VERIFY_WITH_TIMEOUT(bob.conferenceState() == CS::Running || bob.conferenceState() == CS::Failed, 15000);
+            QVERIFY2(bob.conferenceState() == CS::Running, qPrintable(bob.conferenceDetail()));
+            QTRY_VERIFY(!af.isEmpty() && !bf.isEmpty() && !aa.isEmpty() && !ba.isEmpty());
+            QVERIFY(!qvariant_cast<QImage>(af.last().at(0)).isNull());
+            QVERIFY(!qvariant_cast<QImage>(bf.last().at(0)).isNull());
+            QVERIFY(aa.last().at(1).toDouble() > 0.01);
+            QVERIFY(ba.last().at(1).toDouble() > 0.01);
+            QCOMPARE(alice.previewState(), Preview::Stopped);
+            QCOMPARE(alice.audioState(), Preview::Stopped);
+            QVERIFY(!alice.startPreview("test"));
+            QVERIFY(!alice.startAudioTest(false));
+            alice.setConferenceMuted(true, true, false);
+            QTRY_VERIFY_WITH_TIMEOUT(ba.last().at(1).toDouble() < 0.0001, 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(qvariant_cast<QImage>(bf.last().at(0)).pixelColor(320, 240).lightness() < 8, 5000);
+            alice.setConferenceMuted(false, false, false);
+            QTRY_VERIFY_WITH_TIMEOUT(ba.last().at(1).toDouble() > 0.01, 5000);
+            alice.setConferenceMuted(false, false, true);
+            QTRY_VERIFY_WITH_TIMEOUT(aa.last().at(1).toDouble() < 0.0001, 5000);
+            QVERIFY(ba.last().at(1).toDouble() > 0.01);
+            alice.setConferenceMuted(false, false, false);
+            QTRY_VERIFY_WITH_TIMEOUT(aa.last().at(1).toDouble() > 0.01, 5000);
+            if (cycle == 0)
+            {
+                QVERIFY(alice.startScreenShare("test", 15));
+                QTRY_COMPARE_WITH_TIMEOUT(bob.shareState(), Preview::Running, 15000);
+                alice.stopScreenShare();
+                QTRY_COMPARE(bob.shareState(), Preview::Stopped);
+                QCOMPARE(alice.conferenceState(), CS::Running);
+                QCOMPARE(bob.conferenceState(), CS::Running);
+            }
+            if (cycle == 0) bob.stopConference();
+            else bob.leave();
+            QTRY_COMPARE(alice.conferenceState(), CS::Idle);
+            QCOMPARE(bob.conferenceState(), CS::Idle);
+            QTRY_VERIFY(!alice.conferenceDevicesBusy() && !bob.conferenceDevicesBusy());
+            QTRY_COMPARE(alice.memberCount(), cycle == 0 ? 2 : 1);
+        }
+    }
+
+    void conferenceRejectCrossedCallsAndDisconnect()
+    {
+        using CS = zjdesk::SessionCoordinator::ConferenceState;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator alice, bob;
+        QVERIFY(alice.join(url, "conference-state", "Alice"));
+        QVERIFY(bob.join(url, "conference-state", "Bob"));
+        QTRY_COMPARE(alice.memberCount(), 2);
+        QTRY_COMPARE(bob.memberCount(), 2);
+        QVERIFY(alice.startConference());
+        QTRY_COMPARE(bob.conferenceState(), CS::Incoming);
+        bob.stopConference();
+        QTRY_COMPARE(alice.conferenceState(), CS::Idle);
+        QVERIFY(alice.startConference());
+        QVERIFY(bob.startConference());
+        QTRY_VERIFY((alice.conferenceState() == CS::Calling && bob.conferenceState() == CS::Incoming)
+            || (bob.conferenceState() == CS::Calling && alice.conferenceState() == CS::Incoming));
+        alice.leave();
+        QTRY_COMPARE(bob.memberCount(), 1);
+        QCOMPARE(bob.conferenceState(), CS::Idle);
+        QVERIFY(!bob.conferenceActive());
+    }
+
+    void conferenceDeviceFailureEndsOnlyTheCall()
+    {
+        using CS = zjdesk::SessionCoordinator::ConferenceState;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator alice, bob;
+        QVERIFY(alice.setConferenceDevices({"missing-camera-for-regression", "test", "test"}));
+        QVERIFY(bob.setConferenceDevices({"test", "test", "test"}));
+        QVERIFY(alice.join(url, "conference-failure", "Alice"));
+        QVERIFY(bob.join(url, "conference-failure", "Bob"));
+        QTRY_COMPARE(alice.memberCount(), 2);
+        QVERIFY(alice.startConference());
+        QTRY_COMPARE(bob.conferenceState(), CS::Incoming);
+        QVERIFY(bob.acceptConference());
+        QTRY_COMPARE_WITH_TIMEOUT(alice.conferenceState(), CS::Failed, 15000);
+        QTRY_COMPARE(bob.conferenceState(), CS::Idle);
+        QCOMPARE(alice.memberCount(), 2);
+        QVERIFY(!alice.conferenceActive());
+    }
+
     void gccCapConstrainsNegotiatedPacerAndEncoder()
     {
         QVERIFY(zjdesk::MediaEnvironment::inspect().ready);

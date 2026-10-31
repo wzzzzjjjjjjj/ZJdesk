@@ -35,6 +35,7 @@ add_library(zjdesk_client_core STATIC
     src/diagnostics/event_log.cpp src/diagnostics/event_log.h
     src/media/media_environment.cpp src/media/media_environment.h
     src/media/media_engine.cpp src/media/media_engine.h
+    src/media/conference_media.cpp src/media/conference_media.h
     src/media/camera_mode.cpp src/media/camera_mode.h
     src/media/screen_share.cpp src/media/screen_share.h
     src/media/share_quality.cpp src/media/share_quality.h

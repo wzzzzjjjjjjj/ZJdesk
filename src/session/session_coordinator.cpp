@@ -13,6 +13,53 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
     qRegisterMetaType<State>();
     qRegisterMetaType<PreviewState>();
     qRegisterMetaType<RemoteCursor>();
+    qRegisterMetaType<ConferenceState>();
+    conferenceDeadline_.setSingleShot(true);
+    connect(&conferenceDeadline_, &QTimer::timeout, this, [this] {
+        clearConference(true);
+        conferenceState_ = ConferenceState::Failed;
+        conferenceDetail_ = QStringLiteral("会议呼叫或连接超时");
+        emit conferenceChanged();
+    });
+    connect(&conference_, &ConferenceMedia::negotiationReady, this,
+        [this](quint64 epoch, const QString &type, QJsonObject payload) {
+            if (epoch != conferenceEpoch_ || !conferenceActive()) return;
+            payload.insert("action", type); payload.insert("sessionId", conferenceId_);
+            if (!sendNegotiation("conference", payload)) stopConference();
+        });
+    connect(&conference_, &ConferenceMedia::statusChanged, this,
+        [this](quint64 epoch, const QString &status, const QString &detail) {
+            if (status == "stopped" && epoch == conferenceEpoch_)
+            {
+                conferenceCleanupPending_ = false;
+                emit conferenceChanged();
+                return;
+            }
+            if (epoch != conferenceEpoch_ || !conferenceActive()) return;
+            if (status == "failed")
+            {
+                clearConference(true);
+                conferenceState_ = ConferenceState::Failed;
+            }
+            else if (status == "running")
+            {
+                conferenceState_ = ConferenceState::Running;
+                conferenceDeadline_.stop();
+            }
+            else return;
+            conferenceDetail_ = detail;
+            events_.append("conference", detail);
+            emit conferenceChanged();
+        });
+    connect(&conference_, &ConferenceMedia::localFrame, this, [this](quint64 epoch, const QImage &image) {
+        if (epoch == conferenceEpoch_ && conferenceActive()) emit conferenceLocalFrame(image);
+    });
+    connect(&conference_, &ConferenceMedia::remoteFrame, this, [this](quint64 epoch, const QImage &image) {
+        if (epoch == conferenceEpoch_ && conferenceActive()) emit conferenceRemoteFrame(image);
+    });
+    connect(&conference_, &ConferenceMedia::receivedAudio, this, [this](quint64 epoch, quint64 count, double peak) {
+        if (epoch == conferenceEpoch_ && conferenceActive()) emit conferenceAudioReceived(count, peak);
+    });
     cursorTimer_.setInterval(16);
     cursorTimer_.setTimerType(Qt::PreciseTimer);
     connect(&cursorTimer_, &QTimer::timeout, this, &SessionCoordinator::sendCursor);
@@ -116,6 +163,7 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
             media_.stopVideo(++previewEpoch_);
         events_.append("media", detail);
         emit previewChanged();
+        startConferenceMediaWhenReady();
     });
     connect(&media_, &MediaEngine::audioStatus, this, [this](quint64 epoch, const QString &status, const QString &detail) {
         if (epoch != audioEpoch_)
@@ -125,6 +173,7 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
         audioDetail_ = detail;
         events_.append("media", detail);
         emit audioChanged();
+        startConferenceMediaWhenReady();
     });
     connect(&media_, &MediaEngine::frameReady, this, [this](quint64 epoch, const QImage &image) {
         if (epoch == previewEpoch_ && previewState_ == PreviewState::Running)
@@ -153,6 +202,7 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
 
 SessionCoordinator::~SessionCoordinator()
 {
+    clearConference(true);
     clearControl();
     signaling_.close();
 }
@@ -187,6 +237,7 @@ bool SessionCoordinator::join(const QUrl &url, const QString &roomId, const QStr
 
 void SessionCoordinator::clearMembership()
 {
+    clearConference(false);
     stopScreenShare();
     failedStreamId_.clear();
     clearControl();
@@ -199,6 +250,7 @@ void SessionCoordinator::clearMembership()
 
 void SessionCoordinator::leave()
 {
+    stopConference();
     stopScreenShare();
     stopPreview();
     stopAudioTest();
@@ -222,6 +274,7 @@ void SessionCoordinator::changeState(State state, const QString &detail)
 
 void SessionCoordinator::fail(const QString &reason)
 {
+    clearConference(false);
     stopScreenShare();
     stopPreview();
     stopAudioTest();
@@ -242,6 +295,7 @@ void SessionCoordinator::refreshDevices()
 
 bool SessionCoordinator::startPreview(const QString &sourceId)
 {
+    if (conferenceDevicesBusy()) return false;
     if (previewState_ != PreviewState::Stopped && previewState_ != PreviewState::Failed)
         return false;
     if (!media_.environment().ready)
@@ -271,6 +325,7 @@ void SessionCoordinator::stopPreview()
 
 bool SessionCoordinator::startAudioTest(bool audible)
 {
+    if (conferenceDevicesBusy()) return false;
     if (audioState_ != PreviewState::Stopped && audioState_ != PreviewState::Failed)
         return false;
     if (!media_.environment().ready)
@@ -720,6 +775,134 @@ void SessionCoordinator::receiveShare(const protocol::Message &message)
         screen_.negotiate(message.type, message.payload, shareEpoch_);
 }
 
+bool SessionCoordinator::setConferenceDevices(const ConferenceDevices &devices)
+{
+    if (conferenceState_ == ConferenceState::Connecting || conferenceState_ == ConferenceState::Running)
+        return false;
+    conferenceDevices_ = devices;
+    return true;
+}
+
+bool SessionCoordinator::startConference()
+{
+    if (state_ != State::PeerAvailable || conferenceActive() || !media_.environment().ready)
+        return false;
+    conferenceId_ = QUuid::createUuid().toString(QUuid::Id128);
+    conferenceState_ = ConferenceState::Calling;
+    conferenceDetail_ = QStringLiteral("正在呼叫对方，等待接听");
+    if (!sendNegotiation("conference", {{"action", "start"}, {"sessionId", conferenceId_}}))
+    { clearConference(false); return false; }
+    conferenceDeadline_.start(45000);
+    emit conferenceChanged();
+    return true;
+}
+
+void SessionCoordinator::beginConferenceMedia(bool offerer)
+{
+    conferenceMediaPending_ = true;
+    conferenceCleanupPending_ = false;
+    conferenceOfferer_ = offerer;
+    ++conferenceEpoch_;
+    conferenceMicMuted_ = conferenceCameraHidden_ = conferenceSpeakerMuted_ = false;
+    conferenceState_ = ConferenceState::Connecting;
+    conferenceDetail_ = QStringLiteral("正在连接双向音视频");
+    conferenceDeadline_.start(45000);
+    stopPreview();
+    stopAudioTest();
+    emit conferenceChanged();
+    startConferenceMediaWhenReady();
+}
+
+void SessionCoordinator::startConferenceMediaWhenReady()
+{
+    if (!conferenceMediaPending_ || !conferenceActive()) return;
+    const auto released = [](PreviewState state) { return state == PreviewState::Stopped || state == PreviewState::Failed; };
+    if (!released(previewState_) || !released(audioState_)) return;
+    conferenceMediaPending_ = false;
+    conference_.start(conferenceOfferer_, conferenceDevices_, conferenceEpoch_);
+    conference_.setMuted(conferenceMicMuted_, conferenceCameraHidden_, conferenceSpeakerMuted_, conferenceEpoch_);
+    const auto pending = conferencePendingSignals_; conferencePendingSignals_.clear();
+    for (const auto &payload : pending)
+        conference_.negotiate(payload.value("action").toString(), payload, conferenceEpoch_);
+}
+
+bool SessionCoordinator::acceptConference()
+{
+    if (conferenceState_ != ConferenceState::Incoming || !conferenceActive() || !media_.environment().ready)
+        return false;
+    if (!sendNegotiation("conference", {{"action", "accept"}, {"sessionId", conferenceId_}}))
+    { stopConference(); return false; }
+    beginConferenceMedia(false);
+    return true;
+}
+
+void SessionCoordinator::setConferenceMuted(bool microphone, bool camera, bool speaker)
+{
+    conferenceMicMuted_ = microphone;
+    conferenceCameraHidden_ = camera;
+    conferenceSpeakerMuted_ = speaker;
+    if (conferenceState_ == ConferenceState::Connecting || conferenceState_ == ConferenceState::Running)
+        conference_.setMuted(microphone, camera, speaker, conferenceEpoch_);
+}
+
+void SessionCoordinator::stopConference() { clearConference(true); }
+
+void SessionCoordinator::clearConference(bool notifyPeer)
+{
+    if (!conferenceActive()) return;
+    conferenceDeadline_.stop();
+    if (notifyPeer) sendNegotiation("conference", {{"action", "stop"}, {"sessionId", conferenceId_}});
+    conferenceId_.clear();
+    conferenceMediaPending_ = false;
+    conferencePendingSignals_.clear();
+    conferenceCleanupPending_ = true;
+    conferenceState_ = ConferenceState::Idle;
+    conferenceDetail_ = QStringLiteral("会议已结束");
+    conference_.stop(++conferenceEpoch_);
+    emit conferenceLocalFrame({}); emit conferenceRemoteFrame({});
+    events_.append("conference", conferenceDetail_);
+    emit conferenceChanged();
+}
+
+void SessionCoordinator::receiveConference(const QJsonObject &payload)
+{
+    const auto id = payload.value("sessionId").toString();
+    const auto action = payload.value("action").toString();
+    if (action == "start")
+    {
+        if (id == conferenceId_) return;
+        if (conferenceActive())
+        {
+            // Resolve crossed calls once, using the same ordering at both peers.
+            if (conferenceState_ != ConferenceState::Calling || ownPeerId_ < peerId_)
+            {
+                sendNegotiation("conference", {{"action", "stop"}, {"sessionId", id}});
+                return;
+            }
+            clearConference(true);
+        }
+        conferenceId_ = id;
+        conferenceState_ = ConferenceState::Incoming;
+        conferenceDetail_ = QStringLiteral("%1 邀请你加入视频会议").arg(peerName_);
+        conferenceDeadline_.start(45000);
+        emit conferenceChanged();
+        return;
+    }
+    if (id.isEmpty() || id != conferenceId_) return;
+    if (action == "stop") { clearConference(false); return; }
+    if (action == "accept" && conferenceState_ == ConferenceState::Calling)
+        beginConferenceMedia(true);
+    else if (conferenceState_ == ConferenceState::Connecting || conferenceState_ == ConferenceState::Running)
+    {
+        if (conferenceMediaPending_)
+        {
+            if (conferencePendingSignals_.size() >= 256) { stopConference(); return; }
+            conferencePendingSignals_.append(payload);
+        }
+        else conference_.negotiate(action, payload, conferenceEpoch_);
+    }
+}
+
 void SessionCoordinator::receive(const protocol::Message &message)
 {
     if (message.type == "error")
@@ -760,6 +943,7 @@ void SessionCoordinator::receive(const protocol::Message &message)
     }
     else if (message.type == "peer_left" && state_ == State::PeerAvailable)
     {
+        clearConference(false);
         clearScreenShare(false);
         clearControl();
         peerControllable_ = false;
@@ -776,6 +960,8 @@ void SessionCoordinator::receive(const protocol::Message &message)
         {
             if (message.type == "control")
                 receiveControlRequest(message.payload);
+            else if (message.type == "conference")
+                receiveConference(message.payload);
             else
             {
                 receiveShare(message);

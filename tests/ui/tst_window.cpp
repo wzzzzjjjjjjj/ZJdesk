@@ -5,6 +5,7 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QLabel>
+#include <QComboBox>
 #include <QOpenGLWidget>
 #include <QPushButton>
 #include <QScreen>
@@ -1423,8 +1424,8 @@ private slots:
         // Capture the composed native window, including the OpenGL framebuffer.
         QVERIFY(alice.screen()->grabWindow(alice.winId()).save("output/ui-workspace.png"));
         const auto navButtons = alice.findChildren<QPushButton *>("navButton");
-        QVERIFY(navButtons.size() == 2);
-        QTest::mouseClick(navButtons.at(1), Qt::LeftButton);
+        QCOMPARE(navButtons.size(), 3);
+        QTest::mouseClick(navButtons.at(2), Qt::LeftButton);
         QTest::qWait(100);
         QVERIFY(alice.screen()->grabWindow(alice.winId()).save("output/ui-diagnostics.png"));
         QTest::mouseClick(bobJoin, Qt::LeftButton);
@@ -1483,13 +1484,71 @@ private slots:
         QTest::qWait(200);
         QVERIFY(window.screen()->grabWindow(window.winId()).save("output/ui-workspace-large.png"));
         const auto nav = window.findChildren<QPushButton *>("navButton");
-        nav.at(1)->setFocus();
-        QTest::keyClick(nav.at(1), Qt::Key_Space);
+        QCOMPARE(nav.size(), 3);
+        nav.at(2)->setFocus();
+        QTest::keyClick(nav.at(2), Qt::Key_Space);
         QTRY_COMPARE(window.findChild<QLabel *>("pageTitle")->text(), QStringLiteral("运行诊断"));
         QTest::qWait(100);
         QVERIFY(window.screen()->grabWindow(window.winId()).save("output/ui-diagnostics-large.png"));
         QTest::mouseClick(nav.at(0), Qt::LeftButton);
         QTRY_COMPARE(window.findChild<QLabel *>("pageTitle")->text(), QStringLiteral("协作工作台"));
+    }
+
+    void conferenceControlsAndFrames()
+    {
+        using CS = zjdesk::SessionCoordinator::ConferenceState;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const auto url = QString("ws://127.0.0.1:%1").arg(server.port());
+        MainWindow alice(url, "conference-ui", "Alice"), bob(url, "conference-ui", "Bob");
+        if (!alice.session_.mediaEnvironment().ready) QSKIP("GStreamer is not enabled in this build");
+        QSignalSpy aliceDevices(&alice.session_, &zjdesk::SessionCoordinator::devicesChanged);
+        QSignalSpy bobDevices(&bob.session_, &zjdesk::SessionCoordinator::devicesChanged);
+        alice.show(); bob.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&alice));
+        QVERIFY(QTest::qWaitForWindowExposed(&bob));
+        QTRY_VERIFY(!aliceDevices.isEmpty() && !bobDevices.isEmpty());
+        for (auto *window : {&alice, &bob})
+        {
+            for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
+            {
+                auto *combo = window->findChild<QComboBox *>(name);
+                QVERIFY(combo);
+                combo->addItem("Test device", "test");
+                combo->setCurrentIndex(combo->count() - 1);
+            }
+            window->findChild<QPushButton *>("primaryButton")->click();
+        }
+        QTRY_COMPARE(alice.session_.memberCount(), 2);
+        alice.findChildren<QPushButton *>("navButton").at(1)->click();
+        auto *call = alice.findChild<QPushButton *>("conferenceCall");
+        auto *accept = bob.findChild<QPushButton *>("conferenceAccept");
+        QVERIFY(call->isEnabled());
+        call->click();
+        QTRY_COMPARE(bob.findChild<QLabel *>("pageTitle")->text(), QStringLiteral("视频会议"));
+        QVERIFY(accept->isVisible());
+        QVERIFY(!call->isEnabled());
+        accept->click();
+        QTRY_COMPARE_WITH_TIMEOUT(alice.session_.conferenceState(), CS::Running, 15000);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.session_.conferenceState(), CS::Running, 15000);
+        for (auto *window : {&alice, &bob})
+        {
+            auto *local = window->findChild<VideoSurface *>("conferenceLocalVideo");
+            auto *remote = window->findChild<VideoSurface *>("conferenceRemoteVideo");
+            QTRY_VERIFY(local->isValid() && remote->isValid());
+            QTRY_VERIFY(local->hasFrame() && remote->hasFrame());
+            QVERIFY(!remote->grabFramebuffer().isNull());
+            QVERIFY(!window->findChild<QComboBox *>("conferenceCamera")->isEnabled());
+        }
+        auto *hide = alice.findChild<QPushButton *>("conferenceHideCamera");
+        QVERIFY(hide->isEnabled());
+        hide->click();
+        QVERIFY(hide->isChecked());
+        bob.findChild<QPushButton *>("conferenceHangup")->click();
+        QTRY_COMPARE(alice.session_.conferenceState(), CS::Idle);
+        QTRY_VERIFY(!alice.findChild<VideoSurface *>("conferenceRemoteVideo")->hasFrame());
+        QTRY_VERIFY(call->isEnabled());
+        QVERIFY(!hide->isChecked());
     }
 
     void localPreviewDisplaysRealFramesAndStops()

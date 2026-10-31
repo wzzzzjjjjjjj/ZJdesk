@@ -47,6 +47,7 @@ bool isPeerNameValid(const QString &name)
 
 bool isRelayType(const QString &type)
 {
-    return type == "offer" || type == "answer" || type == "ice" || type == "share" || type == "control";
+    return type == "offer" || type == "answer" || type == "ice" || type == "share" || type == "control"
+        || type == "conference";
 }
 } // namespace zjdesk::protocol
