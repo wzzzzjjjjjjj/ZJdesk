@@ -5,7 +5,6 @@
 #include <QMutex>
 #include <QObject>
 #include <QThread>
-#include <QTimer>
 
 namespace zjdesk
 {
@@ -20,6 +19,8 @@ struct ConferenceMailbox
     QMutex mutex;
     quint64 epoch = 0;
     QImage local, remote;
+    bool framePending = false;
+    quint64 localDelivered = 0;
 };
 
 class ConferenceWorker;
@@ -43,6 +44,5 @@ private:
     ConferenceMailbox mailbox_;
     QThread thread_;
     ConferenceWorker *worker_;
-    QTimer frames_;
 };
 } // namespace zjdesk

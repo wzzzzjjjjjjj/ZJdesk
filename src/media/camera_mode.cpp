@@ -1,4 +1,5 @@
 #include "camera_mode.h"
+#include "share_quality.h"
 #ifdef ZJDESK_HAS_GSTREAMER
 #include <gst/gst.h>
 #endif
@@ -11,6 +12,15 @@ QString CameraMode::description() const
         return QStringLiteral("未发现支持的采集模式");
     return QStringLiteral("%1 × %2 · %3 fps").arg(size.width()).arg(size.height())
         .arg(double(fpsNumerator) / fpsDenominator, 0, 'f', 2);
+}
+
+QString cameraOutputCaps(const CameraMode &native, const ShareProfile &profile, const char *format)
+{
+    const bool atNativeRate = qint64(profile.fps) * native.fpsDenominator >= native.fpsNumerator;
+    return QStringLiteral("video/x-raw,format=%1,width=%2,height=%3,framerate=%4/%5")
+        .arg(QString::fromLatin1(format)).arg(profile.size.width()).arg(profile.size.height())
+        .arg(atNativeRate ? native.fpsNumerator : profile.fps)
+        .arg(atNativeRate ? native.fpsDenominator : 1);
 }
 
 CameraMode maximumCameraMode(const QString &advertisedCaps)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "media_engine.h"
+#include <QTimer>
 #include "frame_timing.h"
 #include <QElapsedTimer>
 #include <QJsonObject>

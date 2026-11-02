@@ -1,5 +1,19 @@
 # 验证记录
 
+## 2026-11-02：摄像头清晰度优先自适应（预览与会议）
+
+按用户选择的清晰度优先策略，实现预览及会议摄像头输出自适应：按设备最高原生分辨率及对应最高帧率启动，以 1 秒窗口观察实际处理速度，连续两窗低于目标 85% 才降低输出档位；先保留分辨率降低到 15 fps，持续吃紧才降尺寸，连续 30 个稳定窗口后优先恢复尺寸。摄像头输入仍为最高原生模式，后续 videorate 使用 drop-only，不会造帧。会议不再固定 640×480 / 30 fps，VP8 码率随档位调整，编码线程数按 CPU 核心限制为 1–8。预览与会议交接改为有界事件通知，移除原来的主线程 33 ms 轮询限制。
+
+新增档位降级 / 恢复与分数帧率 / 高帧率 caps 回归。真实会议回归在修改前失败，接收端实际为 640×480、期望 HP 摄像头原生 1280×720（6.298 秒）；修改后通过（6.264 秒），两端是同一台 Windows 上的独立 WebRTC 会话，一端使用物理 HP 摄像头，音频为测试源，没有保存摄像头图片。这不是两台机器或跨网验收。
+
+真实预览测试通过（16.301 秒）：1280×720、目标 30 fps，单个观测窗口采集 30.6931 fps、交接 29.703 fps；模拟主线程持续阻塞后目标降为 24 fps，画面仍为 1280×720。该采样不能当作长期稳定帧率，交接帧率也不是窗口实际呈现帧率。本机摄像头公布最高模式为 1280×720 / 30 fps，未对更高规格物理摄像头作验收。三次真实采集 / 释放复验通过（7.884 秒，分别收到 4、3、3 帧）。
+
+初次增量回归有两个进程异常退出，检查发现头文件变化后仍混有旧编译对象；清理生成的编译对象并重新配置、全量编译后，`build.ps1 -Preset windows-release -Fresh -Deploy` 通过 core 2.25 秒、signaling 4.29 秒、media 117.21 秒，3/3，总计 123.76 秒。随后重新进行上述物理摄像头测试，原生会议界面用例 `conferenceControlsAndFrames` 也通过（6.736 秒）；界面测试使用合成设备、屏幕外不激活的真实 Qt/OpenGL 窗口，没有使用 offscreen 平台或接管用户桌面。
+
+已更新完整可用副本 `C:\Users\29822\AppData\Local\Programs\ZJdesk\zjdesk.exe`，保留其平铺 plugins 布局和 qt.conf。构建、项目部署及可用副本程序 SHA256 均为 `4987751CDB2CCF066DCCE4F742BF92FB05A4E470E2C10962DED2AEC62193D6F9`。验证均从可用副本使用随包依赖运行，清除开发环境变量；临时测试程序和 Qt6Test.dll 随后清除。项目内路径相关 MF 访问差异仍未修复，没有修改系统隐私、ACL 或安全软件。
+
+证据为 `build/camera-quality-conference-before.txt`、`build/camera-quality-preview.txt`、`build/camera-quality-conference-after.txt`、`build/camera-quality-release-camera.txt`、`build/camera-quality-native-conference-ui.txt`、`build/camera-quality-release-clean-build.log`。未验证其他电脑、Ubuntu、长期帧率或跨网会议；自动降档作用于本机输出，未新增会议网络拥塞控制，也不能保证解决摄像头驱动或原生解码瓶颈。用户主窗口预览和系统设置页跳转仍待用户确认。
+
 ## 2026-11-02：桌面权限预检修正与真实摄像头路径对照
 
 用户已开启摄像头权限，但旧预检仍返回 DeniedBySystem，刷新反复弹出授权框。只读确认运行中的 ZJdesk 没有包标识后，移除该 DeviceAccessInformation 预检，改读 Windows 摄像头设备开关和桌面应用开关；任一明确 Deny 才提示授权，两者 Allow 为已开启，缺失或不认识的值为 Unknown。该状态只是开关提示，实际访问仍由系统与采集后端决定，没有修改系统权限。

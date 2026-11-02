@@ -138,6 +138,32 @@ private slots:
         QCOMPARE(quality.profile().fps, zjdesk::ShareQuality::MinimumFps);
     }
 
+    void cameraQualityPreservesClarityBeforeReducingSize()
+    {
+        zjdesk::ShareQuality quality(QSize(1920, 1080), 60, 15);
+        QCOMPARE(quality.profile().fps, 60);
+        QVERIFY(!quality.observe(1, 1));
+        QVERIFY(quality.observe(1, 1));
+        QCOMPARE(quality.profile().fps, 50);
+        while (quality.profile().fps > 15)
+        {
+            QCOMPARE(quality.profile().size, QSize(1920, 1080));
+            QVERIFY(!quality.observe(1, 1));
+            QVERIFY(quality.observe(1, 1));
+        }
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        QVERIFY(!quality.observe(1, 1));
+        QVERIFY(quality.observe(1, 1));
+        QCOMPARE(quality.profile().size, QSize(1600, 900));
+        for (int i = 0; i < 29; ++i) QVERIFY(!quality.observe(60, 60));
+        QVERIFY(quality.observe(60, 60));
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        QCOMPARE(quality.profile().fps, 15);
+        for (int i = 0; i < 29; ++i) QVERIFY(!quality.observe(15, 15));
+        QVERIFY(quality.observe(15, 15));
+        QCOMPARE(quality.profile().fps, 20);
+    }
+
     void shareQualityRestoresResolutionFromLowerFrameRate()
     {
         zjdesk::ShareQuality quality(QSize(1920, 1080));

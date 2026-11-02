@@ -1,5 +1,6 @@
 #include "session/session_coordinator.h"
 #include "signaling/room_server.h"
+#include "media/share_quality.h"
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
@@ -809,6 +810,102 @@ private slots:
         QTRY_COMPARE(session.audioState(), Preview::Running);
         session.stopAudioTest();
         QTRY_COMPARE(session.audioState(), Preview::Stopped);
+    }
+
+    void cameraOutputPreservesFractionalRatesAndAllowsHighFrameRates()
+    {
+        const zjdesk::CameraMode native{{1920, 1080}, 60000, 1001, {}, false};
+        const auto high = zjdesk::cameraOutputCaps(native, {native.size, 60}, "RGB");
+        QVERIFY(high.contains("framerate=60000/1001"));
+        QVERIFY(high.contains("width=1920,height=1080"));
+        const auto lower = zjdesk::cameraOutputCaps(native, {native.size, 24}, "I420");
+        QVERIFY(lower.contains("framerate=24/1"));
+        QVERIFY(lower.contains("format=I420"));
+        const zjdesk::CameraMode fast{{1280, 720}, 120, 1, {}, false};
+        QVERIFY(zjdesk::cameraOutputCaps(fast, {fast.size, 120}, "RGB").contains("framerate=120/1"));
+    }
+
+    void cameraPreviewMeasuresSpeedAndAdaptsWithoutLosingClarity()
+    {
+        if (!qEnvironmentVariableIsSet("ZJDESK_CAMERA_TEST"))
+            QSKIP("Physical camera test requires ZJDESK_CAMERA_TEST=1");
+        zjdesk::SessionCoordinator session;
+        QSignalSpy devices(&session, &zjdesk::SessionCoordinator::devicesChanged);
+        session.refreshDevices();
+        QTRY_VERIFY_WITH_TIMEOUT(!devices.isEmpty(), 15000);
+        QString camera;
+        zjdesk::CameraMode native;
+        for (const auto &device : session.devices())
+            if (camera.isEmpty() && device.kind == "Video/Source")
+            { camera = device.id; native = device.maximumMode; }
+        QVERIFY2(!camera.isEmpty(), "No camera was enumerated");
+        QImage latest;
+        connect(&session, &zjdesk::SessionCoordinator::previewFrame, this,
+            [&latest](const QImage &image) { latest = image; });
+        QVERIFY(session.startPreview(camera));
+        QTRY_VERIFY_WITH_TIMEOUT(session.previewState() == Preview::Running
+            || session.previewState() == Preview::Failed, 15000);
+        QVERIFY2(session.previewState() == Preview::Running, qPrintable(session.previewDetail()));
+        QTRY_VERIFY_WITH_TIMEOUT(session.previewStats().captureFps > 0, 5000);
+        QTest::qWait(6000);
+        const auto measured = session.previewStats();
+        qInfo() << "Camera target/capture/delivery fps:" << measured.targetFps
+                << measured.captureFps << measured.deliveryFps;
+        QCOMPARE(latest.size(), native.size);
+        QVERIFY(measured.captureFps >= measured.targetFps * 0.85);
+        QVERIFY(measured.deliveryFps >= measured.targetFps * 0.85);
+        if (measured.targetFps > 15)
+        {
+            // Block only the consumer; the worker must detect sustained delivery pressure.
+            QThread::msleep(3500);
+            QTRY_VERIFY_WITH_TIMEOUT(session.previewStats().targetFps < measured.targetFps, 5000);
+            QTRY_COMPARE(latest.size(), native.size);
+            QTRY_VERIFY_WITH_TIMEOUT(session.previewStats().captureFps > 0, 5000);
+            qInfo() << "Camera adapted target fps:" << session.previewStats().targetFps;
+        }
+        session.stopPreview();
+        QTRY_COMPARE(session.previewState(), Preview::Stopped);
+    }
+
+    void cameraConferencePreservesNativeResolution()
+    {
+        if (!qEnvironmentVariableIsSet("ZJDESK_CAMERA_TEST"))
+            QSKIP("Physical camera test requires ZJDESK_CAMERA_TEST=1");
+        using CS = zjdesk::SessionCoordinator::ConferenceState;
+        zjdesk::SessionCoordinator alice, bob;
+        QSignalSpy devices(&alice, &zjdesk::SessionCoordinator::devicesChanged);
+        alice.refreshDevices();
+        QTRY_VERIFY_WITH_TIMEOUT(!devices.isEmpty(), 15000);
+        QString camera;
+        QSize expected;
+        for (const auto &device : alice.devices())
+            if (camera.isEmpty() && device.kind == "Video/Source")
+            {
+                camera = device.name;
+                expected = device.maximumMode.size;
+            }
+        QVERIFY2(!camera.isEmpty(), "No camera was enumerated");
+        QVERIFY(alice.setConferenceDevices({camera, "test", "test"}));
+        QVERIFY(bob.setConferenceDevices({"test", "test", "test"}));
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        QVERIFY(alice.join(url, "camera-quality", "Alice"));
+        QVERIFY(bob.join(url, "camera-quality", "Bob"));
+        QTRY_COMPARE(alice.memberCount(), 2);
+        QSignalSpy frames(&bob, &zjdesk::SessionCoordinator::conferenceRemoteFrame);
+        QVERIFY(alice.startConference());
+        QTRY_COMPARE(bob.conferenceState(), CS::Incoming);
+        QVERIFY(bob.acceptConference());
+        QTRY_VERIFY_WITH_TIMEOUT(alice.conferenceState() == CS::Running
+            || alice.conferenceState() == CS::Failed, 20000);
+        QVERIFY2(alice.conferenceState() == CS::Running, qPrintable(alice.conferenceDetail()));
+        QTRY_VERIFY_WITH_TIMEOUT(!frames.isEmpty(), 15000);
+        QCOMPARE(qvariant_cast<QImage>(frames.last().at(0)).size(), expected);
+        qInfo() << "Received camera over local WebRTC:" << expected;
+        alice.stopConference();
+        QTRY_COMPARE(bob.conferenceState(), CS::Idle);
+        QTRY_VERIFY(!alice.conferenceDevicesBusy() && !bob.conferenceDevicesBusy());
     }
 
     void cameraReleasesDevice()
