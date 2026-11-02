@@ -4,6 +4,8 @@
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
+#include <QImage>
+#include <QColor>
 #include <QLabel>
 #include <QMessageBox>
 #include <QComboBox>
@@ -38,6 +40,32 @@ namespace
 // Slightly lossy 4:4:4: preserve native pixels and bound RGB error on text/one-pixel colour lines.
 constexpr int MaximumDesktopChannelError = 24;
 constexpr double MaximumDesktopMeanError = 2;
+
+// 取区域中最深的像素颜色，用来确认提示文字确实是灰色而不是普通文字颜色。
+QColor darkestPixelColor(const QImage &image, const QRect &region)
+{
+    QColor darkest(255, 255, 255);
+    int best = 255 * 3;
+    const QRect area = region.intersected(image.rect());
+    for (int y = area.top(); y <= area.bottom(); ++y)
+        for (int x = area.left(); x <= area.right(); ++x)
+        {
+            const QColor color = image.pixelColor(x, y);
+            const int score = color.red() + color.green() + color.blue();
+            if (score < best)
+            {
+                best = score;
+                darkest = color;
+            }
+        }
+    return darkest;
+}
+
+int colorDistance(const QColor &left, const QColor &right)
+{
+    return qMax(qAbs(left.red() - right.red()),
+        qMax(qAbs(left.green() - right.green()), qAbs(left.blue() - right.blue())));
+}
 
 void waitForPresentation(int milliseconds)
 {
@@ -239,7 +267,7 @@ private slots:
         QCOMPARE(settingsRequests, 0);
         QVERIFY(!window.awaitingCameraPermission_);
         QCOMPARE(window.session_.previewState(), zjdesk::SessionCoordinator::PreviewState::Stopped);
-        QVERIFY(window.sourceCombo_->findData("test") >= 0);
+        QVERIFY(window.sourceCombo_->findData("test") < 0);
         window.session_.cameraPermissionRequired();
         dialog = window.findChild<QMessageBox *>("cameraPermissionDialog");
         QVERIFY(dialog);
@@ -281,6 +309,45 @@ private slots:
         window.session_.openCameraPrivacySettings();
         QCOMPARE(settingsRequests, 2);
         QTRY_COMPARE(settingsFinished.size(), 2);
+    }
+
+    void physicalCameraRefreshAndPreview()
+    {
+        if (!qEnvironmentVariableIsSet("ZJDESK_CAMERA_TEST"))
+            QSKIP("Physical camera test requires ZJDESK_CAMERA_TEST=1");
+        MainWindow window("ws://127.0.0.1:1", {}, "Camera refresh");
+        QSignalSpy devices(&window.session_, &zjdesk::SessionCoordinator::devicesChanged);
+        QTRY_VERIFY_WITH_TIMEOUT(!devices.isEmpty(), 15000);
+        devices.clear();
+        QTRY_VERIFY(window.refreshDevicesButton_->isEnabled());
+        window.refreshDevicesButton_->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!devices.isEmpty(), 15000);
+        QString camera;
+        QSize expectedSize;
+        for (const auto &device : window.session_.devices())
+            if (camera.isEmpty() && device.kind == "Video/Source")
+            {
+                camera = device.id;
+                expectedSize = device.maximumMode.size;
+            }
+        QVERIFY2(!camera.isEmpty(), "Refresh did not enumerate a physical camera");
+        const int cameraIndex = window.sourceCombo_->findData(camera);
+        QVERIFY2(cameraIndex >= 0, "Physical camera was not added to the source selector");
+        window.sourceCombo_->setCurrentIndex(cameraIndex);
+        QSignalSpy frames(&window.session_, &zjdesk::SessionCoordinator::previewFrame);
+        QVERIFY(window.previewButton_->isEnabled());
+        window.previewButton_->click();
+        QTRY_VERIFY_WITH_TIMEOUT(window.session_.previewState() == zjdesk::SessionCoordinator::PreviewState::Running
+            || window.session_.previewState() == zjdesk::SessionCoordinator::PreviewState::Failed, 15000);
+        QVERIFY2(window.session_.previewState() == zjdesk::SessionCoordinator::PreviewState::Running,
+            qPrintable(window.session_.previewDetail()));
+        QTRY_VERIFY_WITH_TIMEOUT(!frames.isEmpty(), 15000);
+        QCOMPARE(qvariant_cast<QImage>(frames.last().at(0)).size(), expectedSize);
+        qInfo() << "Camera selected through window controls:" << window.sourceCombo_->currentText()
+                << expectedSize << "frames:" << frames.size();
+        window.previewButton_->click();
+        QTRY_COMPARE(window.session_.previewState(), zjdesk::SessionCoordinator::PreviewState::Stopped);
+        QTRY_VERIFY(window.refreshDevicesButton_->isEnabled());
     }
 
     void cameraPermissionRefreshResumesAfterPreview()
@@ -1714,7 +1781,10 @@ private slots:
         QVERIFY(window.grab().save("output/ui-diagnostics-small.png"));
         QTest::mouseClick(nav.at(0), Qt::LeftButton);
         QTRY_COMPARE(window.findChild<QLabel *>("pageTitle")->text(), QStringLiteral("协作工作台"));
+        QSignalSpy meetingDevices(&window.session_, &zjdesk::SessionCoordinator::devicesChanged);
         QTest::mouseClick(nav.at(1), Qt::LeftButton);
+        // 进入页面会自动刷新一次设备，等刷新完成后再注入长名称，避免被刷新覆盖。
+        QTRY_VERIFY_WITH_TIMEOUT(!meetingDevices.isEmpty(), 15000);
         window.resize(1040, 720);
         for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
         {
@@ -1780,14 +1850,17 @@ private slots:
             QVERIFY(QTest::qWaitForWindowExposed(&bob));
         }
         QTRY_VERIFY(!aliceDevices.isEmpty() && !bobDevices.isEmpty());
+        aliceDevices.clear();
         alice.findChildren<QPushButton *>("navButton").at(1)->click();
-        auto *preview = alice.findChild<QPushButton *>("previewButton");
         auto *localPreview = alice.findChild<VideoSurface *>("conferenceLocalVideo");
-        preview->click();
+        // 界面不再提供视频测试源，测试源仅通过会话接口驱动媒体层。
+        QVERIFY(alice.session_.startPreview("test"));
         QTRY_VERIFY_WITH_TIMEOUT(localPreview->hasFrame(), 10000);
-        preview->click();
+        alice.session_.stopPreview();
         QTRY_COMPARE(alice.session_.previewState(), zjdesk::SessionCoordinator::PreviewState::Stopped);
         QVERIFY(!localPreview->hasFrame());
+        // 预览期间进入页面触发的设备刷新会被推迟，停止预览后补做，这里等它结束。
+        QTRY_VERIFY_WITH_TIMEOUT(!aliceDevices.isEmpty(), 15000);
         for (auto *window : {&alice, &bob})
         {
             for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
@@ -1801,11 +1874,21 @@ private slots:
             window->findChild<QPushButton *>("meetingJoinButton")->click();
         }
         QTRY_COMPARE(alice.session_.memberCount(), 2);
+        aliceDevices.clear();
         alice.findChildren<QPushButton *>("navButton").at(1)->click();
+        // 再次进入页面会刷新设备并清空注入项，刷新结束后重新注入测试设备。
+        QTRY_VERIFY_WITH_TIMEOUT(!aliceDevices.isEmpty(), 15000);
+        for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
+        {
+            auto *combo = alice.findChild<QComboBox *>(name);
+            QVERIFY(combo);
+            combo->addItem("Test device", "test");
+            combo->setCurrentIndex(combo->count() - 1);
+        }
         auto *call = alice.findChild<QPushButton *>("conferenceCall");
         auto *accept = bob.findChild<QPushButton *>("conferenceAccept");
         QVERIFY(call->isEnabled());
-        preview->click();
+        QVERIFY(alice.session_.startPreview("test"));
         QTRY_VERIFY_WITH_TIMEOUT(localPreview->hasFrame(), 10000);
         call->click();
         QTRY_COMPARE(alice.session_.conferenceState(), CS::Calling);
@@ -1861,9 +1944,25 @@ private slots:
         auto *button = window.findChild<QPushButton *>("previewButton");
         auto *surface = window.findChild<VideoSurface *>("conferenceLocalVideo");
         QVERIFY(button && surface);
-        if (!button->isEnabled())
+        if (!window.session_.mediaEnvironment().ready)
             QSKIP("GStreamer is not enabled in this build");
+        QSignalSpy devices(&window.session_, &zjdesk::SessionCoordinator::devicesChanged);
+        QTRY_VERIFY_WITH_TIMEOUT(!devices.isEmpty(), 15000);
+        QTest::qWait(100);
         QTRY_VERIFY(surface->isValid());
+        // 界面已不再提供“视频测试源”；注入一个合成摄像头，验证预览按钮仍完整驱动媒体层。
+        auto enumerated = window.session_.devices();
+        zjdesk::MediaDevice synthetic;
+        synthetic.id = "test";
+        synthetic.name = QStringLiteral("合成摄像头");
+        synthetic.kind = "Video/Source";
+        enumerated.append(synthetic);
+        window.session_.devices_ = enumerated;
+        window.refreshDevices();
+        const int syntheticIndex = window.sourceCombo_->findData("test");
+        QVERIFY2(syntheticIndex >= 0, "合成摄像头应作为普通设备出现在预览列表里");
+        window.sourceCombo_->setCurrentIndex(syntheticIndex);
+        QTRY_VERIFY(button->isEnabled());
         QTest::mouseClick(button, Qt::LeftButton);
         QTRY_VERIFY_WITH_TIMEOUT(surface->hasFrame(), 10000);
         QCOMPARE(button->text(), QStringLiteral("停止预览"));
@@ -1883,6 +1982,94 @@ private slots:
         QTRY_VERIFY(surface->hasFrame());
     }
 
+    void meetingEntryRefreshesCameraAndHintsMissingDevice()
+    {
+        MainWindow window("ws://127.0.0.1:8765", "demo", "Tester");
+        QSignalSpy devices(&window.session_, &zjdesk::SessionCoordinator::devicesChanged);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        // 先等启动时的设备枚举结束，避免与“进入页面”的刷新重叠、互相清空组合框。
+        QTRY_VERIFY_WITH_TIMEOUT(!devices.isEmpty(), 15000);
+        QTest::qWait(200);
+        auto *camera = window.findChild<QComboBox *>("conferenceCamera");
+        auto *preview = window.findChild<QPushButton *>("previewButton");
+        auto *title = window.findChild<QLabel *>("pageTitle");
+        QVERIFY(camera && preview && title);
+        const auto nav = window.findChildren<QPushButton *>("navButton");
+        QCOMPARE(nav.size(), 3);
+        devices.clear();
+        QTest::mouseClick(nav.at(1), Qt::LeftButton);
+        QCOMPARE(title->text(), QStringLiteral("视频会议"));
+        // 进入视频会议页时自动枚举一次设备，用于检测摄像头是否存在。
+        QTRY_VERIFY_WITH_TIMEOUT(!devices.isEmpty(), 15000);
+        QTest::qWait(200);
+        QCOMPARE(devices.size(), 1);
+        int cameras = 0;
+        for (const auto &device : window.session_.devices())
+            if (device.kind == QLatin1String("Video/Source")) ++cameras;
+        QVERIFY2(window.sourceCombo_->findData("test") < 0, "本地预览不应再提供视频测试源");
+        QVERIFY(window.sourceCombo_->findText(QStringLiteral("视频测试源")) < 0);
+        if (cameras == 0)
+        {
+            QCOMPARE(camera->count(), 0);
+            QCOMPARE(camera->currentIndex(), -1);
+            QCOMPARE(camera->placeholderText(), QStringLiteral("无可用设备"));
+            QVERIFY2(!camera->toolTip().isEmpty(), "无设备提示需要说明原因");
+            QCOMPARE(window.sourceCombo_->count(), 0);
+            QCOMPARE(window.sourceCombo_->placeholderText(), QStringLiteral("无可用设备"));
+            QVERIFY(!preview->isEnabled());
+            qInfo() << "No camera enumerated; camera hint:" << camera->toolTip();
+        }
+        else
+        {
+            QCOMPARE(camera->itemText(0), QStringLiteral("默认设备"));
+            QCOMPARE(camera->count(), cameras + 1);
+            QVERIFY(preview->isEnabled());
+            QCOMPARE(window.sourceCombo_->count(), cameras);
+        }
+        // 枚举结果没有摄像头时，摄像头选择框用灰色字体提示“无可用设备”。
+        // 开发机可能始终能枚举到摄像头，这里用只保留音频设备的枚举结果覆盖该分支。
+        const auto realDevices = window.session_.devices();
+        QList<zjdesk::MediaDevice> audioOnly;
+        for (const auto &device : realDevices)
+            if (device.kind != QLatin1String("Video/Source")) audioOnly.append(device);
+        window.session_.devices_ = audioOnly;
+        window.refreshDevices();
+        QCOMPARE(camera->count(), 0);
+        QCOMPARE(camera->currentIndex(), -1);
+        QCOMPARE(camera->placeholderText(), QStringLiteral("无可用设备"));
+        const QImage hintImage = camera->grab().toImage();
+        const QColor hintColor = darkestPixelColor(hintImage,
+            QRect(0, 0, hintImage.width() / 3, hintImage.height()));
+        QVERIFY2(colorDistance(hintColor, QColor("#8492a1")) <= 40,
+            qPrintable(QStringLiteral("无设备提示应为灰色，实际 RGB %1,%2,%3")
+                .arg(hintColor.red()).arg(hintColor.green()).arg(hintColor.blue())));
+        QVERIFY2(!camera->toolTip().isEmpty(), "无设备提示需要说明原因");
+        QVERIFY(!preview->isEnabled());
+        QVERIFY(window.sourceCombo_->findData("test") < 0);
+        QCOMPARE(window.sourceCombo_->count(), 0);
+        QCOMPARE(window.sourceCombo_->placeholderText(), QStringLiteral("无可用设备"));
+        QVERIFY(QDir().mkpath("output"));
+        QTest::qWait(100);
+        QVERIFY(window.grab().save("output/ui-meeting-no-device.png"));
+        window.session_.devices_ = realDevices;
+        window.refreshDevices();
+        // 再次进入仍然只刷新一次，确认刷新挂在“进入页面”这条路径上。
+        devices.clear();
+        QTest::mouseClick(nav.at(0), Qt::LeftButton);
+        QTRY_COMPARE(title->text(), QStringLiteral("协作工作台"));
+        QTest::mouseClick(nav.at(1), Qt::LeftButton);
+        QTRY_VERIFY_WITH_TIMEOUT(!devices.isEmpty(), 15000);
+        QTest::qWait(200);
+        QCOMPARE(devices.size(), 1);
+        if (cameras == 0)
+        {
+            QCOMPARE(camera->count(), 0);
+            QCOMPARE(camera->placeholderText(), QStringLiteral("无可用设备"));
+            QVERIFY(!preview->isEnabled());
+        }
+    }
+
     void screenShareCapturesDesktopAndDisplaysAtPeer()
     {
         zjdesk::RoomServer server;
@@ -1897,7 +2084,7 @@ private slots:
         auto *bobStatus = bob.findChild<QLabel *>("shareStatus");
         auto *surface = bob.findChild<VideoSurface *>("meetingShareVideo");
         QVERIFY(aliceShare && bobShare && bobStatus && surface);
-        if (!alice.findChild<QPushButton *>("previewButton")->isEnabled())
+        if (!alice.session_.mediaEnvironment().ready)
             QSKIP("GStreamer is not enabled in this build");
         QVERIFY(!aliceShare->isEnabled());
         for (auto *window : {&alice, &bob})

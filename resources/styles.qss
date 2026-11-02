@@ -47,6 +47,8 @@ QLineEdit:hover, QComboBox:hover { border-color: #a6bfb9; }
 QLineEdit:focus, QComboBox:focus { border: 1px solid #247e70; background: #ffffff; }
 QLineEdit:disabled, QComboBox:disabled { background: #f1f4f8; color: #8492a1; border-color: #e4e9ef; }
 QComboBox { padding-right: 28px; }
+/* 没有可用设备时，下拉框只剩灰色占位提示“无可用设备”。 */
+QComboBox[noDevice="true"] { color: #8492a1; }
 QComboBox::drop-down { width: 24px; border: none; }
 QComboBox QAbstractItemView { background: #ffffff; border: 1px solid #dce4ed; selection-background-color: #e5f3ee; selection-color: #24755f; padding: 6px; }
 QPushButton { background: #ffffff; border: 1px solid #d8e1ea; border-radius: 8px; padding: 9px 12px; }

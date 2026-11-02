@@ -19,6 +19,7 @@
 #include <QStyle>
 #include <QStackedWidget>
 #include <QScrollArea>
+#include <QTimer>
 #include <QApplication>
 #include <QKeyEvent>
 #include <QVBoxLayout>
@@ -71,6 +72,47 @@ QIcon navigationIcon(int page)
     }
     pixmap.setDevicePixelRatio(2);
     return QIcon(pixmap);
+}
+
+// QComboBox 只在没有当前项时绘制占位文字，因此无设备时清空列表并把提示写在占位文字里。
+// 占位文字默认沿用普通文字颜色，这里用动态属性让样式表把它改成灰色提示。
+void updateNoDeviceStyle(QComboBox *combo, bool noDevice)
+{
+    if (combo->property("noDevice").toBool() == noDevice) return;
+    combo->setProperty("noDevice", noDevice);
+    combo->style()->unpolish(combo);
+    combo->style()->polish(combo);
+}
+
+void showNoDeviceHint(QComboBox *combo, const QString &reason)
+{
+    combo->clear();
+    combo->setCurrentIndex(-1);
+    combo->setPlaceholderText(QStringLiteral("无可用设备"));
+    combo->setToolTip(reason);
+    updateNoDeviceStyle(combo, true);
+}
+
+void clearNoDeviceHint(QComboBox *combo)
+{
+    combo->setPlaceholderText(QString());
+    combo->setToolTip(QString());
+    updateNoDeviceStyle(combo, false);
+}
+
+QString cameraHintReason(const zjdesk::SessionCoordinator &session)
+{
+    if (!session.mediaEnvironment().ready) return session.mediaEnvironment().description;
+    switch (session.cameraPermissionStatus())
+    {
+    case zjdesk::CameraPermission::Denied:
+        return QStringLiteral("摄像头尚未授权，点击“刷新设备”打开授权引导；授权后返回程序即可使用");
+    case zjdesk::CameraPermission::Unknown:
+        return QStringLiteral("无法预先确认摄像头权限；未检测到摄像头时请检查系统权限或设备占用");
+    case zjdesk::CameraPermission::Allowed:
+        break;
+    }
+    return QStringLiteral("未检测到摄像头设备；连接摄像头后点击“刷新设备”重新检测");
 }
 } // namespace
 
@@ -271,7 +313,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     sourceCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     sourceCombo_->setMinimumContentsLength(12);
     sourceCombo_->setAccessibleName(QStringLiteral("预览视频源"));
-    sourceCombo_->addItem(QStringLiteral("视频测试源"), "test");
+    showNoDeviceHint(sourceCombo_, QStringLiteral("正在检测摄像头设备…"));
     previewLayout->addWidget(sourceCombo_, 1);
     previewButton_ = new QPushButton(QStringLiteral("开始预览"));
     previewButton_->setObjectName("previewButton");
@@ -497,6 +539,11 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         pageTitle->setText(QStringLiteral("视频会议"));
         pageSubtitle->setText(QStringLiteral("与房间中的另一位成员进行双向视频和语音通话。"));
     });
+    // 进入视频会议页时自动枚举一次设备，确认摄像头是否存在；通话中用现有设备，不打断采集。
+    connect(meetingButton, &QPushButton::clicked, this, [this] {
+        if (session_.conferenceState() != zjdesk::SessionCoordinator::ConferenceState::Idle) return;
+        QTimer::singleShot(0, &session_, &zjdesk::SessionCoordinator::refreshDevices);
+    });
     connect(&session_, &zjdesk::SessionCoordinator::conferenceChanged, this, [this, meetingButton] {
         if (session_.conferenceState() == zjdesk::SessionCoordinator::ConferenceState::Incoming) meetingButton->click();
     });
@@ -663,7 +710,11 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     connect(previewButton_, &QPushButton::clicked, this, [this] {
         using Preview = zjdesk::SessionCoordinator::PreviewState;
         if (session_.previewState() == Preview::Stopped || session_.previewState() == Preview::Failed)
-            session_.startPreview(sourceCombo_->currentData().toString());
+        {
+            const auto source = sourceCombo_->currentData().toString();
+            if (source.isEmpty()) return;
+            session_.startPreview(source);
+        }
         else
             session_.stopPreview();
     });
@@ -703,13 +754,24 @@ void MainWindow::refreshDevices()
 {
     if (session_.cameraPermissionStatus() == zjdesk::CameraPermission::Allowed)
         awaitingCameraPermission_ = false;
+    const auto hint = cameraHintReason(session_);
+    int cameras = 0;
+    for (const auto &device : session_.devices())
+        if (device.kind == QLatin1String("Video/Source")) ++cameras;
     for (const auto &entry : {qMakePair("conferenceCamera", "Video/Source"),
                              qMakePair("conferenceMicrophone", "Audio/Source"),
                              qMakePair("conferenceSpeaker", "Audio/Sink")})
     {
         auto *combo = findChild<QComboBox *>(entry.first);
+        const bool camera = QLatin1String(entry.first) == QLatin1String("conferenceCamera");
+        if (camera && cameras == 0)
+        {
+            showNoDeviceHint(combo, hint);
+            continue;
+        }
         const auto selectedDevice = combo->currentData();
         combo->clear();
+        clearNoDeviceHint(combo);
         combo->addItem(QStringLiteral("默认设备"), QString());
         for (const auto &device : session_.devices())
             if (device.kind == entry.second) combo->addItem(device.name, device.name);
@@ -718,25 +780,31 @@ void MainWindow::refreshDevices()
     }
     const auto selected = sourceCombo_->currentData().toString();
     sourceCombo_->clear();
-    sourceCombo_->addItem(QStringLiteral("视频测试源"), "test");
+    clearNoDeviceHint(sourceCombo_);
     QStringList descriptions;
     for (const auto &device : session_.devices())
     {
-        if (device.kind.contains("Video/Source"))
+        if (device.kind == QLatin1String("Video/Source"))
             sourceCombo_->addItem(device.name + " · " + device.maximumMode.description(), device.id);
         const auto description = device.kind + " · " + device.name
             + (device.kind == "Video/Source" ? " · " + device.maximumMode.description() : "");
         if (!descriptions.contains(description))
             descriptions.append(description);
     }
-    const auto index = sourceCombo_->findData(selected);
-    sourceCombo_->setCurrentIndex(index < 0 ? 0 : index);
+    if (sourceCombo_->count() == 0)
+        showNoDeviceHint(sourceCombo_, hint);
+    else
+    {
+        const auto index = sourceCombo_->findData(selected);
+        sourceCombo_->setCurrentIndex(index < 0 ? 0 : index);
+    }
     if (session_.cameraPermissionStatus() == zjdesk::CameraPermission::Denied)
         descriptions.prepend(QStringLiteral("摄像头尚未授权，点击“刷新设备”打开授权引导；授权后返回程序即可使用"));
     else if (session_.cameraPermissionStatus() == zjdesk::CameraPermission::Unknown)
         descriptions.prepend(QStringLiteral("无法预先确认摄像头权限，请选择摄像头开始预览；若失败，请检查系统权限或设备占用"));
     deviceLabel_->setText(!session_.mediaEnvironment().ready ? session_.mediaEnvironment().description
-        : descriptions.isEmpty() ? QStringLiteral("没有可用设备；测试源仍可使用") : descriptions.join('\n'));
+        : descriptions.isEmpty() ? QStringLiteral("没有可用设备；连接摄像头后点击“刷新设备”") : descriptions.join('\n'));
+    refreshPreview();
 }
 
 void MainWindow::refreshPreview()
@@ -745,11 +813,14 @@ void MainWindow::refreshPreview()
     const auto state = session_.previewState();
     const bool idle = state == Preview::Stopped || state == Preview::Failed;
     const bool ready = session_.mediaEnvironment().ready;
-    previewButton_->setEnabled(ready && state != Preview::Stopping && !session_.conferenceDevicesBusy());
+    const bool hasSource = !sourceCombo_->currentData().toString().isEmpty();
+    previewButton_->setEnabled(ready && hasSource && state != Preview::Stopping && !session_.conferenceDevicesBusy());
     previewButton_->setText(idle ? QStringLiteral("开始预览") : QStringLiteral("停止预览"));
     sourceCombo_->setEnabled(ready && idle);
     refreshDevicesButton_->setEnabled(ready && idle);
-    previewLabel_->setText(ready ? session_.previewDetail() : session_.mediaEnvironment().description);
+    previewLabel_->setText(!ready ? session_.mediaEnvironment().description
+        : !hasSource && idle ? QStringLiteral("无可用设备：未检测到摄像头，连接摄像头后点击“刷新设备”。")
+        : session_.previewDetail());
     if (idle && !session_.conferenceActive())
         meetingLocalVideo_->setFrame({});
     const auto audio = session_.audioState();

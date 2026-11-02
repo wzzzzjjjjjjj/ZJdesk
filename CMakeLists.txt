@@ -116,3 +116,35 @@ if(BUILD_TESTING)
         set_tests_properties(desktop PROPERTIES TIMEOUT 90)
     endif()
 endif()
+
+# A low-integrity workspace label otherwise makes its desktop executables run
+# at low integrity, where Windows denies camera access despite enabled consent.
+if(WIN32)
+    find_program(ZJDESK_POWERSHELL NAMES powershell REQUIRED)
+    foreach(runtime_target zjdesk zjdesk-unit-tests zjdesk-integration-tests zjdesk-media-tests zjdesk-ui-tests)
+        if(TARGET ${runtime_target})
+            add_custom_command(TARGET ${runtime_target} POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath
+                    "${ZJDESK_POWERSHELL}" -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                    -File "${CMAKE_CURRENT_SOURCE_DIR}/cmake/SetWindowsRuntimeIntegrity.ps1"
+                    -Executable "$<TARGET_FILE:${runtime_target}>"
+                VERBATIM)
+        endif()
+    endforeach()
+    if(TARGET zjdesk)
+        install(CODE "execute_process(
+            COMMAND \"${CMAKE_COMMAND}\" -E env --unset=PSModulePath
+                \"${ZJDESK_POWERSHELL}\" -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File \"${CMAKE_CURRENT_SOURCE_DIR}/cmake/SetWindowsRuntimeIntegrity.ps1\"
+                -Executable \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/bin/zjdesk.exe\"
+            COMMAND_ERROR_IS_FATAL ANY)")
+    endif()
+    if(BUILD_TESTING)
+        add_test(NAME windows-runtime-integrity
+            COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath
+                "${ZJDESK_POWERSHELL}" -NoProfile -NonInteractive -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts/test_windows_runtime_integrity.ps1"
+                -WorkRoot "${CMAKE_BINARY_DIR}")
+        set_tests_properties(windows-runtime-integrity PROPERTIES TIMEOUT 30)
+    endif()
+endif()

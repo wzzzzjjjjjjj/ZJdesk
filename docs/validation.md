@@ -1,5 +1,17 @@
 # 验证记录
 
+## 2026-11-02：视频会议去测试源、进入页面刷新摄像头与无设备灰字提示
+
+按用户要求移除视频会议页的本地预览视频测试源：“视频会议”页的摄像头选择框与地预览选择框只列出真实摄像头（`kind == "Video/Source"`），合成测试源保留在 MediaEngine，仅供媒体回归通过 `SessionCoordinator::startPreview("test")` 使用。点击左侧“视频会议”时，若通话状态为 Idle，`QTimer::singleShot(0, …)` 触发一次 `SessionCoordinator::refreshDevices()`；通话中（Incoming 及其他非 Idle 状态）不刷新以免打断采集。
+
+没有摄像头时，相关下拉框清空、`setCurrentIndex(-1)`、占位文字为“无可用设备”，动态属性 `noDevice` 配合 `resources/styles.qss` 的 `QComboBox[noDevice="true"] { color: #8492a1; }` 显示灰色提示，悬停提示按权限 / 媒体环境给出原因；此时“开始预览”禁用，`previewLabel_` 显示“无可用设备：未检测到摄像头，连接摄像头后点击“刷新设备”。”，开始预览前若 `currentData()` 为空则直接返回，不再回退测试源。
+
+在 `F:\projects\ZJdesk` 用 windows-debug preset（Qt 6.8.3、GStreamer 1.26.11、MSVC 2022 x64）重新配置并编译，`cmake --build --preset windows-debug --parallel 4` 成功；`build.ps1` 的 core / signaling / media 三组此前通过（media 119.96 秒）。GUI 套件 `zjdesk-ui-tests`（原生 Qt/OpenGL 窗口，未用 offscreen）最终 22 通过、3 失败、6 跳过，117.44 秒；新增用例 `meetingEntryRefreshesCameraAndHintsMissingDevice` 通过，校验进入页面只触发一次 `devicesChanged`、下拉框无 `test` 项、无摄像头时 `count() == 0` / 占位“无可用设备” / 文字色约 `#8492a1` / 预览按钮禁用，并用 `devices_` 的仅音频列表覆盖无设备分支、返回后再次进入仍只刷新一次。截图 `build/windows-debug/bin/output/ui-meeting-no-device.png` 中摄像头与本地预览两个下拉框均为灰色“无可用设备”，“开始预览”禁用，麦克风 / 扬声器为“默认设备”。该机 125% 缩放，逻辑桌面 1536×864（工作区 1536×816）。
+
+三个失败项与本改动无关，均可在本次改动之外复现：`expandedVideoKeepsSurfaceAndRestoresWindow`（`tests/ui/tst_window.cpp:1107`）与 `actualWindowsJoinAndLeave`（`tests/ui/tst_window.cpp:1679`，`surface->isValid()` 为假）把 `apps/client/main_window.cpp`、`resources/styles.qss`、`tests/ui/tst_window.cpp` 暂存到 HEAD 后重新编译（基线 `tst_window.cpp:1040` / `:1612` 同样失败）仍失败，前者因桌面小于默认 1280×820 窗口导致全屏画面不大于普通窗口；`screenShareFrameRates(auto)`（`:1637`）在本机 1920×1080 自动目标 60 fps 时只达到 42–43 fps，固定 30 / 60 fps 两档通过，与验证记录中“稳定 1080p60 未通过”一致。`sharedTextRetainsSinglePixelDetail` 在整套运行时偶发失败、单跑通过，属桌面截取顺序相关的不稳定项。
+
+另注意工作区 `CMakeLists.txt` 与未跟踪的 `cmake/SetWindowsRuntimeIntegrity.ps1`、`tests/scripts/test_windows_runtime_integrity.ps1` 属并行未完成改动，`ctest` 的 `windows-runtime-integrity` 在本环境报 `Fixture did not run at low integrity.`，非本次改动引入，未修改。本机项目路径存在已知摄像头访问限制（MF `0x80070005`），因此本次未在本项目路径下做真实摄像头的进入页面自动枚举验证；Release 构建、Ubuntu 与双机会议未复验。
+
 ## 2026-11-02：合并房间类型功能后的 Windows 回归
 
 在 `F:\projects\ZJdesk` 的 `ZJ-desk` 分支合并 `codex/ZJdesk-2` 并解决冲突后，使用 Qt 6.8.3、GStreamer 1.26.11 运行 Windows Release 构建：core、signaling、media 通过（3/3，125.21 秒）。原生 Windows Qt/OpenGL 后台界面测试的房间入口互斥、窗口布局和会议控制及画面通过（3 项，8.037 秒；窗口未激活，未使用 Qt offscreen 平台）。本次未进行真实双机、Ubuntu、跨网或用户摄像头预览验收。

@@ -1,5 +1,13 @@
 # ZJdesk 项目交接
 
+## 2026-11-02 视频会议设备检测去测试源（当前工作树，未提交）
+
+“视频会议”页不再列出视频测试源：本地预览与会议摄像头选择框只填真实摄像头（`kind == "Video/Source"`），合成测试源仅保留在 MediaEngine，供媒体回归通过 `SessionCoordinator::startPreview("test")` 使用。进入“视频会议”页时若通话状态为 Idle，用 `QTimer::singleShot(0, …)` 触发一次 `SessionCoordinator::refreshDevices()`，返回该页再进入会再次刷新，但通话中不刷新。
+
+没有摄像头时，`refreshDevices()` 把相关下拉框清空并设 `setCurrentIndex(-1)`，`setPlaceholderText("无可用设备")`、`setToolTip(原因)`，通过动态属性 `noDevice` 配合 `resources/styles.qss` 的 `QComboBox[noDevice="true"] { color: #8492a1; }` 显示灰色提示；原因由权限与媒体环境推导（未配置 GStreamer、权限被拒 / 未知、设备缺失）。此时“开始预览”禁用，本地预览区提示“无可用设备：未检测到摄像头，连接摄像头后点击“刷新设备”。”；预览开始时若 `currentData()` 为空直接返回，不再回退测试源。
+
+Windows Debug 下新增用例 `meetingEntryRefreshesCameraAndHintsMissingDevice` 通过，覆盖进入页面只刷新一次、无 `test` 源、无摄像头时的灰字 / 禁用状态与返回再进入；GUI 套件 22 通过 / 3 失败 / 6 跳过，三项失败与本改动无关（两项已在 HEAD 基线复现，一项是本机 1080p60 吞吐限制），见 [验证记录](validation.md)。真机摄像头进入页面后的枚举结果仍需在有物理摄像头的桌面确认。
+
 ## 2026-11-02 房间类型隔离与摄像头自适应（当前工作树）
 
 协作空间仅提供远程控制；视频会议页面提供本地预览、会议和屏幕共享。两个页面独立输入房间码，同一客户端连接或入房时另一入口禁用。服务端按类型和房间码隔离，未提供类型的旧客户端视为协作；会议客户端要求服务端确认类型，旧服务端需要升级。会议禁用远控请求，协作不接收会议呼叫。
