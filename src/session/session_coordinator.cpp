@@ -163,6 +163,8 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
             media_.stopVideo(++previewEpoch_);
         events_.append("media", detail);
         emit previewChanged();
+        if (deviceRefreshPending_ && (previewState_ == PreviewState::Stopped || previewState_ == PreviewState::Failed))
+            refreshDevices();
         startConferenceMediaWhenReady();
     });
     connect(&media_, &MediaEngine::audioStatus, this, [this](quint64 epoch, const QString &status, const QString &detail) {
@@ -289,8 +291,30 @@ void SessionCoordinator::refreshDevices()
 {
     if (previewState_ == PreviewState::Starting || previewState_ == PreviewState::Running
         || previewState_ == PreviewState::Stopping)
+    {
+        deviceRefreshPending_ = true;
         return;
+    }
+    deviceRefreshPending_ = false;
+    cameraPermission_ = zjdesk::cameraPermission();
     media_.refreshDevices();
+}
+
+void SessionCoordinator::requestCameraPermission()
+{
+    refreshDevices();
+    if (cameraPermission_ == CameraPermission::Denied)
+        emit cameraPermissionRequired();
+}
+
+void SessionCoordinator::openCameraPrivacySettings()
+{
+    if (cameraSettingsOpening_) return;
+    cameraSettingsOpening_ = true;
+    cameraSettingsOpener_(this, [this](bool opened, const QString &error) {
+        cameraSettingsOpening_ = false;
+        emit cameraPrivacySettingsFinished(opened, error);
+    });
 }
 
 bool SessionCoordinator::startPreview(const QString &sourceId)

@@ -2,7 +2,7 @@ param(
     [string]$LinuxSsh = 'orbbec@10.11.47.137',
     [string]$LinuxAddress = '10.11.42.4',
     [string]$LinuxRoot = '/home/orbbec/ZJdesk/zjdesk',
-    [string]$WindowsAddress = '10.11.42.3',
+    [string]$WindowsAddress = '',
     [string]$Display = ':1',
     [switch]$SkipBuild
 )
@@ -23,9 +23,16 @@ try {
         $lockStream = [IO.File]::Open((Join-Path $logDir 'launcher.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     } catch { throw 'Another build or launch is already running.' }
     Write-Host 'Checking Linux SSH and display...'
+    if (-not $WindowsAddress) {
+        $WindowsAddress = Find-NetRoute -RemoteIPAddress $LinuxAddress -ErrorAction Stop |
+            Where-Object { $_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress
+        if (-not $WindowsAddress) { throw "Could not select a Windows media address for Linux $LinuxAddress. Pass -WindowsAddress explicitly." }
+    }
     if (-not (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $WindowsAddress })) { throw "Windows media address $WindowsAddress is unavailable." }
-    & ssh -o BatchMode=yes -o ConnectTimeout=8 $LinuxSsh "test -d '$LinuxRoot' && test -r /run/user/1000/gdm/Xauthority && ip -4 -o addr show | grep -Fq ' $LinuxAddress/' && ! ss -lnt | grep -q ':8765 '"
-    if ($LASTEXITCODE -ne 0) { throw 'Linux SSH, desktop, project directory or port 8765 is unavailable.' }
+    Write-Host "Media addresses: Windows $WindowsAddress; Linux $LinuxAddress"
+    & ssh -o BatchMode=yes -o ConnectTimeout=8 $LinuxSsh "test -d '$LinuxRoot' && test -r /run/user/1000/gdm/Xauthority && ip -4 -o addr show | grep -Fq ' $LinuxAddress/' && if ss -lnt | grep -q ':8765 '; then exit 20; fi"
+    if ($LASTEXITCODE -eq 20) { throw 'Linux port 8765 is already in use. Close the existing Linux client/server and retry.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Linux SSH, desktop, project directory or media address is unavailable.' }
     if ($SkipBuild) {
         if (Test-Path -LiteralPath $pendingBuild) { throw 'The previous build did not complete on both machines. Run the build-and-start launcher again.' }
         Write-Host 'Using existing Release binaries; build both machines first after code changes.'

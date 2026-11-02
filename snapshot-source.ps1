@@ -55,6 +55,12 @@ if ($Verify) {
         } finally { $sha.Dispose() }
     } finally { $zip.Dispose() }
 } else {
+    foreach ($name in $sources.Keys) {
+        if ($name.EndsWith('.sh', [StringComparison]::OrdinalIgnoreCase) -and
+            [IO.File]::ReadAllText($sources[$name]).Contains("`r`n")) {
+            throw "Shell script has CRLF line endings: $name. Convert it to LF before building."
+        }
+    }
     if (Test-Path -LiteralPath $Archive) { Remove-Item -LiteralPath $Archive -Force }
     $zip = [IO.Compression.ZipFile]::Open($Archive, [IO.Compression.ZipArchiveMode]::Create, [Text.Encoding]::UTF8)
     try {

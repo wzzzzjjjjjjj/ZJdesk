@@ -1,5 +1,27 @@
 # ZJdesk 项目交接
 
+## 2026-11-02 摄像头启动授权（本地工作树）
+
+Windows 客户端启动只读检查摄像头设备与桌面应用开关，明确关闭时弹出引导。返回程序后重新检查并枚举设备；开关已开启时不重复提示；开关缺失或无法识别时保持 Unknown，显示诊断提示并允许用户尝试预览。实际设备访问由采集后端和系统决定。权限预检状态由 SessionCoordinator 持有，检查和设置入口位于 platform/camera_permission；启动和刷新不会修改系统权限或自动开启摄像头。
+
+本机已开启权限时，原 DeviceAccessInformation 仍报告 DeniedBySystem，导致每次刷新误弹窗。已确认当前 zjdesk.exe 没有包标识，改为读取 HKLM webcam 与 HKCU webcam/NonPackaged 的 Value；不把 Store 应用或 Codex 的单应用开关当作 ZJdesk 桌面权限，也不根据设备枚举成功推定真实采集成功。权限开关存储属于 Windows 实现细节，缺失或变化时按 Unknown 处理。回归已复现旧版失败、新版连续刷新两次无弹窗。
+
+用户先反馈原按钮没有打开页面，之后 Explorer 方案实际出现 `explorer.exe - Application Error` / `0xc0000142`。当前入口已替换为 Windows.System.Launcher 的 `LaunchUriAsync`，在后台 MTA 线程等待异步结果，最多 15 秒；由协调器接收结果、限制重复提交，失败时显示系统错误信息并允许重试。失败后仍等待用户按备用步骤完成手动授权，返回程序时继续复查并刷新设备，该遗漏已通过修复前失败、修复后通过的回归用例验证。原 Explorer 和 Qt 链接启动路径已移除。URI / Launcher 工厂可在当前环境正常获取，但实际设置页跳转仍待用户点击新版确认；`0xc0000142` 的系统根因尚未单独确认。
+
+预览占用期间保留设备刷新请求，预览停止或失败后补做，避免等待授权期间使用测试源导致刷新丢失；该问题已通过修复前失败、修复后通过的回归用例验证。
+
+Windows Release 构建、部署与真实摄像头验证结果见 [验证记录](validation.md)。设置页实际跳转及主窗口中的预览显示仍需用户确认；未运行 Ubuntu 验证。
+
+本机项目路径下仍发生 MF `0x80070005`，而相同二进制移到系统临时目录即可访问摄像头；具体路径限制来源尚未确认。已将完整 Release 复制到 `C:\Users\29822\AppData\Local\Programs\ZJdesk`，入口 `zjdesk.exe` 与项目部署版本一致。在新目录使用随包依赖完成 HP 摄像头 1280×720 实际帧接收及三次采集 / 释放回归；已请用户退出项目内旧程序、打开新入口验证主窗口预览。项目启动脚本仍指向项目内程序，未改动系统隐私、文件 ACL 或安全软件设置。
+
+副本首次遗漏 Qt plugins，用户启动报平台插件错误；现已补齐部署根目录的 plugins / translations / licenses，并将平铺副本 qt.conf 的 Prefix 改为 `.`、Plugins 改为 `plugins`。清除开发环境变量、仅保留 Windows 系统 PATH 后，主程序平台插件启动、原生 Qt/OpenGL 后台界面用例与真实摄像头三次采集 / 释放均通过；具体日志见验证记录。副本入口保持不变。
+
+## 2026-11-01 原生界面视觉更新（本地工作树）
+
+工作台、视频会议和运行诊断统一为深墨色侧栏、浅色卡片和青绿色操作状态；新增导航图标与品牌标识，重排会议设备、画面和控制区，更新无画面时的占位插图。默认窗口为 1280×820，保留 1040×720 最小尺寸。
+
+Windows Release 编译和本地部署完成，core / signaling / media 三组回归通过；core 首次因系统临时目录不可用失败，改用 `build/ui-test-temp` 后通过。`workspaceFitsSmallWindowAndLongNames` 和 `conferenceControlsAndFrames` 通过，覆盖小窗口、40 字昵称、长设备名、页面切换及合成音视频的接听 / 挂断 / 隐藏画面。界面通过 Windows 原生 Qt/OpenGL 窗口在屏幕外生成快照，未使用 Qt offscreen 平台，也未激活用户窗口；图片位于 `build/windows-release/output/ui-*.png`。后台截图需显式设置 `ZJDESK_UI_BACKGROUND_SNAPSHOTS=1`，默认保留原有窗口显示检查。此次未复验默认前台显示路径、全屏、真实摄像头 / 麦克风、跨机远控、Ubuntu 或云端 CI。
+
 ## 2026-10-30 两人视频会议（工作树）
 
 已实现独立的双向 VP8 视频与 Opus 语音会话、呼叫接听和挂断、设备选择及静音 / 隐藏画面控制；会议可与屏幕共享并行。Windows Debug 的 core、signaling、media 回归 3/3 通过，会议使用合成设备和本机 WebRTC 管线测试。会议原生 GUI、真实设备及 Windows / Ubuntu 双机尚未验收。当前无声学回声消除，也没有 STUN / TURN；操作步骤和网络限制见 [两人视频会议](video-conference.md)。

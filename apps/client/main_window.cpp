@@ -14,6 +14,8 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QPropertyAnimation>
+#include <QPainter>
+#include <QPainterPath>
 #include <QStyle>
 #include <QStackedWidget>
 #include <QScrollArea>
@@ -38,13 +40,45 @@ QFrame *card()
     frame->setObjectName("card");
     return frame;
 }
+
+QIcon navigationIcon(int page)
+{
+    QPixmap pixmap(40, 40);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.scale(2, 2);
+    painter.setPen(QPen(QColor("#b9d3d5"), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    if (page == 0)
+    {
+        painter.drawRoundedRect(QRectF(2, 3, 16, 11), 2, 2);
+        painter.drawLine(QPointF(10, 14), QPointF(10, 18));
+        painter.drawLine(QPointF(6, 18), QPointF(14, 18));
+    }
+    else if (page == 1)
+    {
+        painter.drawRoundedRect(QRectF(2, 5, 11, 11), 2, 2);
+        QPainterPath lens;
+        lens.moveTo(13, 9); lens.lineTo(18, 6); lens.lineTo(18, 15); lens.lineTo(13, 12);
+        painter.drawPath(lens);
+    }
+    else
+    {
+        QPainterPath pulse;
+        pulse.moveTo(2, 11); pulse.lineTo(6, 11); pulse.lineTo(9, 4);
+        pulse.lineTo(12, 16); pulse.lineTo(15, 9); pulse.lineTo(18, 9);
+        painter.drawPath(pulse);
+    }
+    pixmap.setDevicePixelRatio(2);
+    return QIcon(pixmap);
+}
 } // namespace
 
 MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QString &name,
                        QWidget *parent) : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("ZJdesk · 跨平台协作工作台"));
-    resize(1200, 780);
+    resize(1280, 820);
     setMinimumSize(1040, 720);
     auto *root = new QWidget;
     setCentralWidget(root);
@@ -56,25 +90,38 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     sidebar->setObjectName("sidebar");
     sidebar->setFixedWidth(180);
     auto *nav = new QVBoxLayout(sidebar);
-    nav->setContentsMargins(20, 30, 20, 24);
-    nav->setSpacing(10);
-    nav->addWidget(text("ZJdesk", "brand"));
+    nav->setContentsMargins(16, 28, 16, 24);
+    nav->setSpacing(8);
+    auto *brandRow = new QHBoxLayout;
+    brandRow->setSpacing(10);
+    auto *brandMark = text("Z", "brandMark");
+    brandMark->setAlignment(Qt::AlignCenter);
+    brandMark->setFixedSize(34, 34);
+    brandRow->addWidget(brandMark);
+    brandRow->addWidget(text("ZJdesk", "brand"));
+    nav->addLayout(brandRow);
+    nav->addSpacing(4);
     nav->addWidget(text(QStringLiteral("让协作跨越系统"), "sidebarSubtitle"));
-    nav->addSpacing(30);
+    nav->addSpacing(32);
+    nav->addWidget(text("WORKSPACE", "navCaption"));
+    nav->addSpacing(4);
     auto *workspaceButton = new QPushButton(QStringLiteral("协作空间"));
     auto *diagnosticsButton = new QPushButton(QStringLiteral("运行诊断"));
     auto *meetingButton = new QPushButton(QStringLiteral("视频会议"));
+    int pageIndex = 0;
     for (auto *button : {workspaceButton, meetingButton, diagnosticsButton})
     {
         button->setObjectName("navButton");
         button->setCheckable(true);
         button->setAutoExclusive(true);
         button->setMinimumHeight(44);
+        button->setIcon(navigationIcon(pageIndex++));
+        button->setIconSize(QSize(20, 20));
         nav->addWidget(button);
     }
     workspaceButton->setChecked(true);
     nav->addStretch();
-    nav->addWidget(text("WINDOWS / LINUX", "sidebarSubtitle"));
+    nav->addWidget(text("WINDOWS + LINUX", "navCaption"));
     nav->addWidget(text(QStringLiteral("屏幕共享  %1").arg(zjdesk::build::Version), "sidebarSubtitle"));
     rootLayout->addWidget(sidebar);
 
@@ -90,6 +137,8 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     auto *titles = new QVBoxLayout;
     auto *pageTitle = text(QStringLiteral("协作工作台"), "pageTitle");
     auto *pageSubtitle = text(QStringLiteral("连接彼此的桌面，专注眼前的协作。"), "muted");
+    titles->setSpacing(5);
+    titles->addWidget(text("ZJDESK  /  COLLABORATION", "eyebrow"));
     titles->addWidget(pageTitle);
     titles->addWidget(pageSubtitle);
     header->addLayout(titles);
@@ -123,12 +172,13 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     roomEdit_->setObjectName("roomId");
     nameEdit_->setObjectName("displayName");
     serverEdit_->setPlaceholderText("ws://192.168.1.100:8765");
-    roomEdit_->setPlaceholderText(QStringLiteral("输入房间码（字母、数字、_ 或 -）"));
+    roomEdit_->setPlaceholderText(QStringLiteral("输入房间码"));
+    roomEdit_->setToolTip(QStringLiteral("1–32 位字母、数字、下划线或连字符，区分大小写"));
     nameEdit_->setPlaceholderText(QStringLiteral("输入你的昵称"));
     roomEdit_->setMaxLength(32);
     nameEdit_->setMaxLength(40);
     const QList<QPair<QString, QLineEdit *>> fields = {
-        {QStringLiteral("信令服务"), serverEdit_}, {QStringLiteral("房间码"), roomEdit_},
+        {QStringLiteral("服务地址"), serverEdit_}, {QStringLiteral("房间码"), roomEdit_},
         {QStringLiteral("你的昵称"), nameEdit_}};
     for (const auto &field : fields)
     {
@@ -154,10 +204,10 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     auto *stageHeader = new QFrame;
     stageHeader->setObjectName("stageHeader");
     auto *remoteLayout = new QHBoxLayout(stageHeader);
-    remoteLayout_ = remoteLayout;
     remoteLayout->setContentsMargins(16, 8, 12, 8);
     remoteLayout->addWidget(text(QStringLiteral("共享画面"), "stageTitle"));
     remoteLayout->addStretch();
+    remoteLayout->addWidget(text("SCREEN / PREVIEW", "stageMeta"));
     expandButton_ = new QPushButton(QStringLiteral("放大画面"));
     expandButton_->setObjectName("expandVideoButton");
     expandButton_->setCheckable(true);
@@ -184,7 +234,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     localName->setWordWrap(true);
     localName->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     members->addRow(text(QStringLiteral("本机"), "fieldLabel"), localName);
-    peerLabel_ = text(QStringLiteral("尚未加入"));
+    peerLabel_ = text(QStringLiteral("尚未加入"), "peerName");
     peerLabel_->setWordWrap(true);
     peerLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     members->addRow(text(QStringLiteral("对方"), "fieldLabel"), peerLabel_);
@@ -241,8 +291,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     shareButton_->setObjectName("shareButton");
     shareButton_->setToolTip(QStringLiteral("将整个主屏幕及鼠标指针发送给房间中的另一位成员"));
     sessionLayout->addWidget(shareButton_);
-    shareLabel_ = text(session_.shareDetail(), "muted");
-    shareLabel_->setObjectName("shareStatus");
+    shareLabel_ = text(session_.shareDetail(), "shareStatus");
     shareLabel_->setWordWrap(true);
     sessionLayout->addWidget(shareLabel_);
     sessionLayout->addWidget(text(QStringLiteral("远程协助"), "sectionTitle"));
@@ -261,7 +310,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     sessionLayout->addLayout(approvalLayout);
     sessionLayout->addWidget(controlLabel_);
     sessionLayout->addStretch();
-    auto *notice = text(QStringLiteral("远程控制需对方本地允许。\n摄像头预览仅在本机显示。"), "muted");
+    auto *notice = text(QStringLiteral("远程控制需对方本地允许。\n摄像头预览仅在本机显示。"), "notice");
     notice->setWordWrap(true);
     sessionLayout->addWidget(notice);
     pages->addWidget(workspace);
@@ -269,41 +318,82 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     auto *meeting = new QWidget;
     auto *meetingLayout = new QVBoxLayout(meeting);
     meetingLayout->setContentsMargins(0, 0, 0, 0);
+    meetingLayout->setSpacing(10);
+    auto *meetingInfo = new QWidget;
+    auto *meetingInfoLayout = new QHBoxLayout(meetingInfo);
+    meetingInfoLayout->setContentsMargins(0, 0, 0, 0);
+    meetingInfoLayout->setSpacing(16);
+    meetingInfoLayout->addWidget(text(QStringLiteral("通话状态"), "sectionTitle"));
     auto *meetingStatus = text(session_.conferenceDetail(), "conferenceStatus");
     meetingStatus->setWordWrap(true);
-    meetingLayout->addWidget(meetingStatus);
-    auto *deviceRow = new QHBoxLayout;
+    meetingStatus->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    meetingInfoLayout->addWidget(meetingStatus, 1);
+    meetingLayout->addWidget(meetingInfo);
+    auto *meetingDevices = card();
+    auto *deviceRow = new QHBoxLayout(meetingDevices);
+    deviceRow->setContentsMargins(16, 10, 16, 12);
+    deviceRow->setSpacing(16);
     for (const auto &entry : {qMakePair("conferenceCamera", QStringLiteral("摄像头")),
                              qMakePair("conferenceMicrophone", QStringLiteral("麦克风")),
                              qMakePair("conferenceSpeaker", QStringLiteral("扬声器"))})
     {
-        deviceRow->addWidget(text(entry.second));
+        auto *deviceColumn = new QVBoxLayout;
+        deviceColumn->setSpacing(6);
+        auto *deviceTitle = text(entry.second, "fieldLabel");
+        deviceColumn->addWidget(deviceTitle);
         auto *combo = new QComboBox;
         combo->setObjectName(entry.first);
         combo->setAccessibleName(entry.second);
         combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
         combo->setMinimumContentsLength(8);
         combo->addItem(QStringLiteral("默认设备"), QString());
-        deviceRow->addWidget(combo, 1);
+        deviceTitle->setBuddy(combo);
+        deviceColumn->addWidget(combo);
+        deviceRow->addLayout(deviceColumn, 1);
     }
-    meetingLayout->addLayout(deviceRow);
+    meetingLayout->addWidget(meetingDevices);
     auto *views = new QHBoxLayout;
+    views->setSpacing(14);
     auto *localConference = new VideoSurface;
     localConference->setObjectName("conferenceLocalVideo");
+    localConference->setMinimumHeight(140);
     localConference->setFrameCaption(QStringLiteral("本机摄像头 · 接听后发送"));
+    localConference->setParticipant(QStringLiteral("你的画面"), QStringLiteral("接听后开启摄像头与麦克风"));
     auto *remoteConference = new VideoSurface;
     remoteConference->setObjectName("conferenceRemoteVideo");
+    remoteConference->setMinimumHeight(140);
     remoteConference->setFrameCaption(QStringLiteral("对方摄像头"));
-    views->addWidget(localConference, 1);
-    views->addWidget(remoteConference, 2);
+    remoteConference->setParticipant(QStringLiteral("等待通话连接"), QStringLiteral("加入房间，邀请另一位成员开始视频会议"));
+    for (const auto &entry : {qMakePair(localConference, QStringLiteral("本机画面")),
+                             qMakePair(remoteConference, QStringLiteral("对方画面"))})
+    {
+        auto *tile = new QWidget;
+        auto *tileLayout = new QVBoxLayout(tile);
+        tileLayout->setContentsMargins(0, 0, 0, 0);
+        tileLayout->setSpacing(0);
+        auto *tileHeader = new QFrame;
+        tileHeader->setObjectName("stageHeader");
+        auto *tileTitle = new QHBoxLayout(tileHeader);
+        tileTitle->setContentsMargins(14, 8, 14, 8);
+        tileTitle->addWidget(text(entry.second, "stageTitle"));
+        tileLayout->addWidget(tileHeader);
+        tileLayout->addWidget(entry.first, 1);
+        views->addWidget(tile, entry.first == localConference ? 1 : 2);
+    }
     meetingLayout->addLayout(views, 1);
-    auto *meetingControls = new QHBoxLayout;
+    auto *controlsCard = card();
+    auto *meetingControls = new QHBoxLayout(controlsCard);
+    meetingControls->setContentsMargins(12, 10, 12, 10);
+    meetingControls->setSpacing(8);
     auto *call = new QPushButton(QStringLiteral("发起视频会议"));
     call->setObjectName("conferenceCall");
+    call->setProperty("role", "primary");
     auto *accept = new QPushButton(QStringLiteral("接听"));
     accept->setObjectName("conferenceAccept");
+    accept->setProperty("role", "primary");
     auto *hangup = new QPushButton(QStringLiteral("挂断"));
     hangup->setObjectName("conferenceHangup");
+    hangup->setProperty("role", "danger");
     auto *muteMic = new QPushButton(QStringLiteral("麦克风静音"));
     muteMic->setObjectName("conferenceMuteMicrophone");
     auto *hideCamera = new QPushButton(QStringLiteral("隐藏画面"));
@@ -312,9 +402,13 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     auto *muteSpeaker = new QPushButton(QStringLiteral("扬声器静音"));
     muteSpeaker->setObjectName("conferenceMuteSpeaker");
     for (auto *button : {muteMic, hideCamera, muteSpeaker}) button->setCheckable(true);
-    for (auto *button : {call, accept, hangup, muteMic, hideCamera, muteSpeaker}) meetingControls->addWidget(button);
-    meetingLayout->addLayout(meetingControls);
-    meetingLayout->addWidget(text(QStringLiteral("接听后采集摄像头与麦克风；建议佩戴耳机，避免扬声器回声。设备需在呼叫前选择。"), "muted"));
+    for (auto *button : {call, accept, hangup}) meetingControls->addWidget(button);
+    meetingControls->addStretch();
+    for (auto *button : {muteMic, hideCamera, muteSpeaker}) meetingControls->addWidget(button);
+    meetingLayout->addWidget(controlsCard);
+    auto *meetingNotice = text(QStringLiteral("设备请在呼叫前选择。建议佩戴耳机，减少扬声器回声。"), "muted");
+    meetingNotice->setWordWrap(true);
+    meetingLayout->addWidget(meetingNotice);
     pages->addWidget(meeting);
     auto selectMeetingDevices = [this] {
         return session_.setConferenceDevices({findChild<QComboBox *>("conferenceCamera")->currentData().toString(),
@@ -452,6 +546,48 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     connect(session_.events(), &zjdesk::EventLog::appended, logView_, &QPlainTextEdit::appendPlainText);
     connect(exportButton, &QPushButton::clicked, this, &MainWindow::exportEvents);
     connect(&session_, &zjdesk::SessionCoordinator::devicesChanged, this, &MainWindow::refreshDevices);
+    connect(&session_, &zjdesk::SessionCoordinator::cameraPermissionRequired, this, [this] {
+        if (findChild<QMessageBox *>("cameraPermissionDialog")) return;
+        auto *dialog = new QMessageBox(QMessageBox::Information, QStringLiteral("摄像头授权"),
+            QStringLiteral("使用摄像头预览和视频会议需要摄像头权限。\n\n"
+                           "请在 Windows 设置中允许摄像头访问，并允许桌面应用使用摄像头。"
+                           "\n\n"
+                           "授权后返回本程序，摄像头列表会自动刷新。"), QMessageBox::NoButton, this);
+        dialog->setObjectName("cameraPermissionDialog");
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        auto *authorize = dialog->addButton(QStringLiteral("打开 Windows 摄像头设置"), QMessageBox::AcceptRole);
+        dialog->addButton(QStringLiteral("暂不使用"), QMessageBox::RejectRole);
+        connect(dialog, &QMessageBox::buttonClicked, this, [this, authorize](QAbstractButton *button) {
+            if (button != authorize) return;
+            awaitingCameraPermission_ = true;
+            session_.openCameraPrivacySettings();
+        });
+        dialog->open();
+    });
+    connect(&session_, &zjdesk::SessionCoordinator::cameraPrivacySettingsFinished, this,
+        [this](bool opened, const QString &detail) {
+            if (opened)
+            {
+                session_.refreshDevices();
+                return;
+            }
+            const auto message = QStringLiteral("无法打开 Windows 摄像头设置。\n%1\n\n"
+                "请按 Win+R，输入 ms-settings:privacy-webcam 后回车；"
+                "也可以前往 Windows 设置 → 隐私和安全性 → 摄像头开启权限。").arg(detail);
+            deviceLabel_->setText(message);
+            auto *error = new QMessageBox(QMessageBox::Warning, QStringLiteral("打开设置失败"),
+                message, QMessageBox::Ok, this);
+            error->setObjectName("cameraSettingsError");
+            error->setAttribute(Qt::WA_DeleteOnClose);
+            error->open();
+        });
+    connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
+        if (state == Qt::ApplicationActive && awaitingCameraPermission_)
+        {
+            session_.refreshDevices();
+            awaitingCameraPermission_ = session_.cameraPermissionStatus() != zjdesk::CameraPermission::Allowed;
+        }
+    });
     connect(&session_, &zjdesk::SessionCoordinator::previewChanged, this, &MainWindow::refreshPreview);
     connect(&session_, &zjdesk::SessionCoordinator::audioChanged, this, &MainWindow::refreshPreview);
     connect(&session_, &zjdesk::SessionCoordinator::previewFrame, this, [this](const QImage &image) {
@@ -486,7 +622,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         else
             session_.stopAudioTest();
     });
-    connect(refreshDevicesButton_, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::refreshDevices);
+    connect(refreshDevicesButton_, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::requestCameraPermission);
     auto *statsTimer = new QTimer(this);
     connect(statsTimer, &QTimer::timeout, this, [this] {
         session_.reportSharePresentation(video_->presentedFrames(),
@@ -504,8 +640,15 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     QTimer::singleShot(0, &session_, &zjdesk::SessionCoordinator::refreshDevices);
 }
 
+void MainWindow::requestCameraPermission()
+{
+    session_.requestCameraPermission();
+}
+
 void MainWindow::refreshDevices()
 {
+    if (session_.cameraPermissionStatus() == zjdesk::CameraPermission::Allowed)
+        awaitingCameraPermission_ = false;
     for (const auto &entry : {qMakePair("conferenceCamera", "Video/Source"),
                              qMakePair("conferenceMicrophone", "Audio/Source"),
                              qMakePair("conferenceSpeaker", "Audio/Sink")})
@@ -534,6 +677,10 @@ void MainWindow::refreshDevices()
     }
     const auto index = sourceCombo_->findData(selected);
     sourceCombo_->setCurrentIndex(index < 0 ? 0 : index);
+    if (session_.cameraPermissionStatus() == zjdesk::CameraPermission::Denied)
+        descriptions.prepend(QStringLiteral("摄像头尚未授权，点击“刷新设备”打开授权引导；授权后返回程序即可使用"));
+    else if (session_.cameraPermissionStatus() == zjdesk::CameraPermission::Unknown)
+        descriptions.prepend(QStringLiteral("无法预先确认摄像头权限，请选择摄像头开始预览；若失败，请检查系统权限或设备占用"));
     deviceLabel_->setText(!session_.mediaEnvironment().ready ? session_.mediaEnvironment().description
         : descriptions.isEmpty() ? QStringLiteral("没有可用设备；测试源仍可使用") : descriptions.join('\n'));
 }
@@ -584,25 +731,16 @@ void MainWindow::expandVideo(bool expanded)
     session_.sendRemoteInput({{"kind", "release"}});
     for (auto *widget : normalWidgets_)
         widget->setVisible(!expanded);
-    expandButton_->setText(expanded ? QStringLiteral("退出放大 (Esc)") : QStringLiteral("放大画面"));
     contentLayout_->setContentsMargins(expanded ? QMargins() : QMargins(30, 26, 30, 22));
     contentLayout_->setSpacing(expanded ? 0 : 18);
     workspaceLayout_->setSpacing(expanded ? 0 : 14);
     if (expanded)
     {
         normalWindowState_ = windowState();
-        remoteLayout_->removeWidget(expandButton_);
-        expandButton_->setParent(video_);
-        expandButton_->adjustSize();
-        expandButton_->show();
-        expandButton_->raise();
         showFullScreen();
     }
     else
     {
-        expandButton_->setParent(remoteLayout_->parentWidget());
-        remoteLayout_->addWidget(expandButton_);
-        expandButton_->show();
         setWindowState(normalWindowState_);
     }
     refreshShare();
@@ -612,8 +750,6 @@ void MainWindow::expandVideo(bool expanded)
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
-    if (watched == video_ && event->type() == QEvent::Resize && expandButton_->isChecked())
-        expandButton_->move(qMax(0, video_->width() - expandButton_->width() - 12), 12);
     if (event->type() == QEvent::KeyPress && expandButton_->isChecked()
         && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)
     {

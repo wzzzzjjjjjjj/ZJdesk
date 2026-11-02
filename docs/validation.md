@@ -1,5 +1,59 @@
 # 验证记录
 
+## 2026-11-02：桌面权限预检修正与真实摄像头路径对照
+
+用户已开启摄像头权限，但旧预检仍返回 DeniedBySystem，刷新反复弹出授权框。只读确认运行中的 ZJdesk 没有包标识后，移除该 DeviceAccessInformation 预检，改读 Windows 摄像头设备开关和桌面应用开关；任一明确 Deny 才提示授权，两者 Allow 为已开启，缺失或不认识的值为 Unknown。该状态只是开关提示，实际访问仍由系统与采集后端决定，没有修改系统权限。
+
+新增 9 组开关组合回归；当前机器连续两次刷新无授权框的界面用例在修复前失败、修复后通过（2.553 秒，含初始化 / 清理共 3 项）。异步设置成功 / 失败用例通过（3.058 秒，共 4 项），预览占用后延迟刷新用例通过（2.527 秒）。`build.ps1 -Preset windows-release -Deploy` 通过 core 2.16 秒、signaling 4.35 秒、media 118.10 秒，3/3，总计 124.61 秒；常规 media 结果不包含需显式启用的真实摄像头测试。
+
+用户从资源管理器启动项目内新版后仍只有测试源。项目目录内 `cameraReleasesDevice` 的普通缓存和新缓存尝试均失败于 `No camera was enumerated`，MF 日志有 `0x80070005`；SDK 原目录的设备工具却可枚举 HP 摄像头。最小探针对照表明，提前初始化 COM 或 CoInitializeSecurity 没有改善。进一步复制相同 SDK 工具做对照：原 SDK 目录与系统临时目录成功，项目 `build` 目录失败，两份文件 SHA256 相同（`5C0179DF3743206B4A5E2BCA2A7AE7677E38A8E142F6969DEE4025FE473B946D`）。这证实存在路径相关访问差异，具体系统或安全软件原因尚未确认，未修改 ACL 或关闭安全软件。
+
+同一个 ZJdesk 媒体测试程序复制到系统临时目录后，`cameraReleasesDevice` 通过（8.376 秒）：枚举 HP Wide Vision HD Camera，实际收到 1280×720 帧，连续三次采集 / 释放分别收到 3、3、4 帧。将完整 Release 运行目录复制到 `C:\Users\29822\AppData\Local\Programs\ZJdesk` 后，在该目录使用随包 Qt / GStreamer 再次通过（17.770 秒，三次分别收到 4、3、3 帧）。设备公布最高模式为 NV12 1280×720 @ 30 fps；本测试没有测量长期有效帧率，没有保存摄像头图片。
+
+可用副本入口为 `C:\Users\29822\AppData\Local\Programs\ZJdesk\zjdesk.exe`，与项目部署程序 SHA256 均为 `12F81A89A9347082E40E2F0239C161D4500B28E7090FA0601F838506B928F292`。项目内原路径访问问题仍存在，未将复制副本称作原路径修复；用户主窗口实际预览及设置页跳转仍待确认，未执行 Ubuntu 或跨网验收。
+
+首次副本只复制了部署目录的 `bin`，遗漏相邻 `plugins`，而 `qt.conf` 仍为 `Prefix = ..`。用户启动主程序出现 “This application failed to start because no Qt platform plugin could be initialized.”；之前无 GUI 的摄像头用例不能覆盖这一部署错误。已补齐 `plugins`、`translations`、`licenses`，并将此平铺副本的 `qt.conf` 改为 `Prefix = .`、`Plugins = plugins`。原项目部署的 bin / plugins 布局保持原样。
+
+修正后从独立子进程验证：PATH 仅含 Windows 系统目录，清除 Qt / QML / GStreamer 开发环境变量，主程序 `--version` 返回 0，日志确认加载随包 `plugins/platforms/qwindows.dll`。同一运行目录的原生界面用例 `workspaceFitsSmallWindowAndLongNames` 通过（15.449 秒），实际 Qt/OpenGL 窗口放在屏幕外且不激活，没有使用 offscreen 平台；随后真实摄像头三次采集 / 释放通过（7.252 秒，分别收到 4、3、3 帧）。临时测试程序和 Qt6Test.dll 验证后已从副本删除。证据为 `build/camera-local-install-clean-start.txt`、`build/camera-local-install-native-ui.txt`、`build/camera-local-install-clean-camera.txt`；后台复验脚本为生成物 `build/camera-local-install-verify.ps1`。用户实际点击预览仍待确认。
+
+证据为 `build/camera-desktop-consent-{before,after,dialog,deferred}.txt`、`build/camera-desktop-consent-build.log`、`build/camera-desktop-consent-physical*.txt`、`build/camera-desktop-consent-mf.log`、`build/camera-init-*.txt`、`build/camera-sdk-{monitor-relocated,preserved-name,temp-location}.txt`、`build/camera-desktop-consent-physical-temp-location.txt`、`build/camera-physical-local-install.txt`。最小初始化探针及编译脚本仅在 `build` 内，没有引入生产初始化改动。
+
+## 2026-11-02：替换实际失败的 Explorer 设置启动路径
+
+用户点击上一版按钮后出现 `explorer.exe - Application Error`，提示“应用程序无法正常启动(0xc0000142)”。这证明创建进程成功不能作为设置页已打开的证据；该系统错误的根因尚未单独确认。
+
+当前入口改用 Windows.System.Launcher 的 `LaunchUriAsync`，目标仍为 `ms-settings:privacy-webcam`，移除 Explorer / Qt 链接启动路径。后台 MTA 线程读取异步完成结果，最多等待 15 秒，超时尝试取消；COM 对象在所属线程释放，完成通知绑定协调器生命周期。协调器限制并发请求，失败显示系统错误信息，完成后可重试；成功回调和返回程序时均触发权限复查，预览占用时仍保留延迟刷新。
+
+MSVC2022 / Qt 6.8.3 / Windows SDK 10.0.19041.0 编译通过。只读原生探针执行 MTA 初始化、获取 URI 工厂、创建摄像头设置 URI、获取 Launcher 工厂，四步均返回 `0x00000000`；没有调用 LaunchUriAsync 或打开系统窗口，不能据此证明设置页实际跳转。
+
+集中审查发现：失败分支原先清除等待授权标志，但警告仍提示手动打开设置，导致用户按备用步骤授权后返回程序不会自动刷新。现保留等待状态直至确认权限；新增回归在修复前失败，修复后通过。同时提前监听设备信号，仅在仍等待权限时要求返回程序触发新刷新，避免已授权机器在成功回调中提前刷新造成测试误报。复核异步回调、重试、COM 及事件资源生命周期，未发现其他明确逻辑问题。
+
+异步成功 / 失败两行界面用例通过（3.279 秒，含初始化 / 清理共 4 项），覆盖回调前等待、重复点击去重、错误内容、手动授权返回刷新、失败后重试和不自动采集；延迟刷新用例通过（2.556 秒）。用例替换系统打开函数，没有切换用户桌面。补审修复后执行 `build.ps1 -Preset windows-release -Deploy`：core 2.16 秒、signaling 4.33 秒、media 117.10 秒，3/3 通过，总计 123.59 秒。部署与构建程序 SHA256 均为 `3D957A6081CBFCE9112A11650E36C1E2E00695ECFA834F49DBB807863C7477A1`。
+
+实际页面跳转、用户授权后的摄像头出图仍待用户确认；本次未执行 Ubuntu 或跨网验收。证据：`build/camera-settings-abi-probe.log`、`build/camera-settings-winrt-review-before.txt`、`build/camera-settings-winrt-review-after.txt`、`build/camera-settings-winrt-review-refresh.txt`、`build/camera-settings-winrt-review-build.log`。
+
+## 2026-11-02：摄像头设置页首次跳转修正（后续用户实测失败）
+
+用户反馈点击原授权按钮后没有打开任何页面。原实现只有 Qt 系统链接调用，之前的 URL 拦截测试不能证明系统设置实际启动。首次修正曾改为优先通过 Windows 目录中的 explorer.exe 打开 `ms-settings:privacy-webcam`，进程创建失败时回退到 Qt；两种调用均失败则显示独立警告弹窗和备用打开步骤。后续用户截图确认此方案实际失败，当前替代实现见上节。
+
+新增设置启动成功 / 失败两行界面用例，替换协调器内的系统打开函数，避免测试实际切换用户桌面。失败分支修复前因缺少警告弹窗失败，修复后两行通过（3.879 秒，含初始化 / 清理共 4 项）；原延迟刷新用例复测通过（2.937 秒）。这些验证覆盖按钮调用、拒绝、去重、失败反馈、返回后的状态复查和设备刷新，不代表 Windows 原生启动路径或用户授权已验收。
+
+执行 `build.ps1 -Preset windows-release -Deploy`：core 2.39 秒、signaling 4.27 秒、media 118.49 秒，3/3 通过，总计 125.16 秒。部署程序与构建程序 SHA256 一致。已复核路径边界、参数传递、失败时的等待状态、弹窗父对象与自动销毁、相关调用方，未发现其他明确逻辑问题。实际设置页跳转及授权后摄像头出图待用户点击新版确认；本次未执行 Ubuntu 或跨网验收。
+
+证据：`build/camera-settings-navigation-before.txt`、`build/camera-settings-navigation-after.txt`、`build/camera-settings-deferred-refresh-after.txt`、`build/camera-settings-navigation-build.log`。
+
+## 2026-11-02：Windows 启动摄像头权限检查
+
+新增 Windows 系统访问状态检查、启动授权引导、打开 `ms-settings:privacy-webcam`、返回后的状态复查和设备刷新。此未打包桌面程序通过系统设置完成授权；程序内的确认按钮不能代替系统授权，拒绝引导也不会启动采集。
+
+执行 `build.ps1 -Preset windows-release -Deploy`，MSVC2022 / Qt 6.8.3 / GStreamer 1.26.11：core 13.86 秒、signaling 4.39 秒、media 117.58 秒，3/3 通过，总计 135.84 秒。TEMP / TMP 使用 `build/ui-test-temp`。部署与构建的 zjdesk.exe SHA256 一致。新增 core 用例检查当前系统状态、授权引导信号及检查时不启动预览。
+
+单独运行 `cameraPermissionDialogDoesNotGrantAccessItself`，1 个功能用例及初始化 / 清理均通过，3.277 秒；覆盖重复提示去重、暂不使用、保留测试源、正确设置 URL、返回时重新检查并刷新设备，以及系统仍未授权时继续保留等待状态。测试拦截系统设置 URL，并抑制授权对话框的屏幕显示，不接管桌面；这属于界面逻辑验证，不代表真实用户点击系统设置或 OpenGL 显示验收。
+
+集中审查复现并修复了预览占用时丢失授权后设备刷新请求的问题：协调器保留一次待刷新请求，预览停止或失败后补做；设备刷新确认已授权后结束界面的等待状态。新增 `cameraPermissionRefreshResumesAfterPreview`，修复前在停止预览后等待设备变更失败，修复后通过（3.482 秒）；原授权弹窗用例复测通过（3.501 秒）。再次执行 Release 构建、部署，core / signaling / media 分别 2.57 / 4.30 / 117.76 秒，3/3 通过，总计 124.64 秒；部署程序与构建程序 SHA256 一致。复核了本轮相关差异、调用方、COM 对象释放、异步预览状态与弹窗生命周期，未发现其他明确逻辑问题。证据位于 `build/camera-review-before.txt`、`build/camera-review-after.txt`、`build/camera-review-dialog-after.txt` 和 `build/camera-permission-review-build.log`。
+
+当前 Codex 启动上下文的原生探针仍返回 `DeviceAccessStatus=3`（DeniedBySystem）。没有修改隐私设置；真实用户授权后的设备出现与摄像头出图仍待验证。Ubuntu、跨机远控及云端 CI 未在本次执行。构建与测试证据位于 `build/camera-permission-build.log`、`build/camera-permission-ui.txt`。
+
 ## 2026-10-31：会议更改合入 ZJ-desk
 
 在 `F:\projects\ZJdesk` 的合并结果上，Windows Debug 客户端和测试均编译成功，signaling 与 media 分别通过（4.51 / 121.43 秒）。首次 `build.ps1` 的 core 测试中，`eventLogBoundedAndExported` 无法在默认临时目录创建 `QTemporaryDir`；仅对测试进程将 TEMP / TMP 指向 `build/test-temp` 后，core 全套通过（0.40 秒）。会议原生 GUI 与真实设备、跨机验收仍未执行。

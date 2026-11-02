@@ -1,5 +1,6 @@
 #include "diagnostics/event_log.h"
 #include "platform/platform_info.h"
+#include "platform/camera_permission_p.h"
 #include "protocol/message.h"
 #include "remote-control/control_session.h"
 #include "session/session_coordinator.h"
@@ -15,6 +16,44 @@ class CoreTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void desktopCameraConsent_data()
+    {
+        QTest::addColumn<QString>("deviceConsent");
+        QTest::addColumn<QString>("desktopConsent");
+        QTest::addColumn<zjdesk::CameraPermission>("expected");
+        using Permission = zjdesk::CameraPermission;
+        QTest::newRow("both-enabled") << QStringLiteral("Allow") << QStringLiteral("Allow") << Permission::Allowed;
+        QTest::newRow("device-disabled") << QStringLiteral("Deny") << QStringLiteral("Allow") << Permission::Denied;
+        QTest::newRow("desktop-disabled") << QStringLiteral("Allow") << QStringLiteral("Deny") << Permission::Denied;
+        QTest::newRow("both-disabled") << QStringLiteral("Deny") << QStringLiteral("Deny") << Permission::Denied;
+        QTest::newRow("missing-device") << QString{} << QStringLiteral("Allow") << Permission::Unknown;
+        QTest::newRow("missing-desktop") << QStringLiteral("Allow") << QString{} << Permission::Unknown;
+        QTest::newRow("missing-both") << QString{} << QString{} << Permission::Unknown;
+        QTest::newRow("unrecognized-consent") << QStringLiteral("Prompt") << QStringLiteral("Allow") << Permission::Unknown;
+        QTest::newRow("denial-with-unknown") << QString{} << QStringLiteral("Deny") << Permission::Denied;
+    }
+
+    void desktopCameraConsent()
+    {
+        QFETCH(QString, deviceConsent);
+        QFETCH(QString, desktopConsent);
+        QFETCH(zjdesk::CameraPermission, expected);
+        QCOMPARE(zjdesk::detail::desktopCameraPermission(deviceConsent, desktopConsent), expected);
+    }
+
+    void cameraPermissionRequestReflectsSystemAccess()
+    {
+        zjdesk::SessionCoordinator session;
+        QSignalSpy required(&session, &zjdesk::SessionCoordinator::cameraPermissionRequired);
+        session.requestCameraPermission();
+        const auto permission = zjdesk::cameraPermission();
+        QCOMPARE(session.cameraPermissionStatus(), permission);
+        QCOMPARE(required.size(), permission == zjdesk::CameraPermission::Denied ? 1 : 0);
+        QCOMPARE(session.previewState(), zjdesk::SessionCoordinator::PreviewState::Stopped);
+        session.requestCameraPermission();
+        QCOMPARE(required.size(), permission == zjdesk::CameraPermission::Denied ? 2 : 0);
+    }
+
     void congestionBudgetCapsStartupAndAllowsLowBandwidth()
     {
         const auto defaults = zjdesk::CongestionBudget::fromMaximum({}, 8294400);

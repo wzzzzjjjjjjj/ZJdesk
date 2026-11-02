@@ -4,11 +4,15 @@
 #include "media/media_engine.h"
 #include "media/conference_media.h"
 #include "media/screen_share.h"
+#include "platform/camera_permission.h"
 #include "remote-control/control_session.h"
 #include "remote-control/input_injector.h"
 #include "signaling/signaling_client.h"
 #include <QElapsedTimer>
 #include <QTimer>
+#include <functional>
+
+class WindowTests;
 
 namespace zjdesk
 {
@@ -35,6 +39,9 @@ public:
     const MediaEnvironment &mediaEnvironment() const { return media_.environment(); }
     const QList<MediaDevice> &devices() const { return devices_; }
     void refreshDevices();
+    CameraPermission cameraPermissionStatus() const { return cameraPermission_; }
+    void requestCameraPermission();
+    void openCameraPrivacySettings();
     bool startPreview(const QString &sourceId);
     void stopPreview();
     bool startAudioTest(bool audible = true);
@@ -80,6 +87,8 @@ signals:
     void trafficChanged();
     void negotiationReceived(const zjdesk::protocol::Message &message);
     void devicesChanged();
+    void cameraPermissionRequired();
+    void cameraPrivacySettingsFinished(bool opened, const QString &error);
     void previewChanged();
     void audioChanged();
     void previewFrame(const QImage &image);
@@ -96,6 +105,9 @@ signals:
     void conferenceAudioReceived(quint64 buffers, double peak);
 
 private:
+    friend class ::WindowTests;
+    std::function<void(QObject *, CameraSettingsCompletion)> cameraSettingsOpener_ = zjdesk::openCameraPrivacySettings;
+    bool cameraSettingsOpening_ = false;
     void receive(const protocol::Message &message);
     void changeState(State state, const QString &detail);
     void fail(const QString &reason);
@@ -156,6 +168,8 @@ private:
     bool receivingScreen_ = false;
     ShareStats shareStats_;
     QList<MediaDevice> devices_;
+    CameraPermission cameraPermission_ = CameraPermission::Unknown;
+    bool deviceRefreshPending_ = false;
     PreviewState previewState_ = PreviewState::Stopped;
     PreviewState audioState_ = PreviewState::Stopped;
     QString previewDetail_ = QStringLiteral("本地预览未启动");

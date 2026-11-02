@@ -9,7 +9,6 @@ class QComboBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
-class QHBoxLayout;
 class QVBoxLayout;
 class QPropertyAnimation;
 class VideoSurface;
@@ -20,6 +19,7 @@ class MainWindow final : public QMainWindow
 public:
     explicit MainWindow(const QString &serverUrl, const QString &roomId, const QString &name,
                         QWidget *parent = nullptr);
+    void requestCameraPermission();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -38,7 +38,6 @@ private:
     QPushButton *expandButton_ = nullptr;
     QVBoxLayout *contentLayout_ = nullptr;
     QVBoxLayout *workspaceLayout_ = nullptr;
-    QHBoxLayout *remoteLayout_ = nullptr;
     zjdesk::SessionCoordinator session_;
     QLineEdit *serverEdit_ = nullptr;
     QLineEdit *roomEdit_ = nullptr;
@@ -56,6 +55,7 @@ private:
     QPushButton *previewButton_ = nullptr;
     QPushButton *audioButton_ = nullptr;
     QPushButton *refreshDevicesButton_ = nullptr;
+    bool awaitingCameraPermission_ = false;
     QLabel *previewLabel_ = nullptr;
     QLabel *audioLabel_ = nullptr;
     QLabel *deviceLabel_ = nullptr;

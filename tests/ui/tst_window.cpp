@@ -5,6 +5,7 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QLabel>
+#include <QMessageBox>
 #include <QComboBox>
 #include <QOpenGLWidget>
 #include <QPushButton>
@@ -24,6 +25,7 @@
 #include <QSlider>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSettings>
 #include <ctime>
 #include <algorithm>
 #include <QtTest>
@@ -125,10 +127,151 @@ private:
 };
 } // namespace
 
+class CameraSettingsHandler : public QObject
+{
+public:
+    bool eventFilter(QObject *object, QEvent *event) override
+    {
+        if (event->type() == QEvent::Polish && (object->objectName() == "cameraPermissionDialog"
+            || object->objectName() == "cameraSettingsError"))
+        {
+            // Exercise dialog logic without showing a system window or taking focus.
+            static_cast<QWidget *>(object)->setAttribute(Qt::WA_DontShowOnScreen);
+        }
+        return false;
+    }
+};
+
 class WindowTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void enabledDesktopCameraSettingsDoNotPromptAgain()
+    {
+#ifdef Q_OS_WIN
+        const QSettings device(QStringLiteral("HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam"), QSettings::NativeFormat);
+        const QSettings desktop(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam\\NonPackaged"), QSettings::NativeFormat);
+        if (device.value("Value").toString() != "Allow" || desktop.value("Value").toString() != "Allow")
+            QSKIP("Requires enabled device and desktop camera settings; never changes system permissions");
+        CameraSettingsHandler handler;
+        qApp->installEventFilter(&handler);
+        const auto cleanup = qScopeGuard([&handler] { qApp->removeEventFilter(&handler); });
+        MainWindow window("ws://127.0.0.1:1", {}, "Enabled desktop camera");
+        QSignalSpy required(&window.session_, &zjdesk::SessionCoordinator::cameraPermissionRequired);
+        QSignalSpy devices(&window.session_, &zjdesk::SessionCoordinator::devicesChanged);
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            devices.clear();
+            window.refreshDevicesButton_->click();
+            QCOMPARE(window.session_.cameraPermissionStatus(), zjdesk::CameraPermission::Allowed);
+            QCOMPARE(required.size(), 0);
+            QVERIFY(!window.findChild<QMessageBox *>("cameraPermissionDialog"));
+            QTRY_VERIFY(!devices.isEmpty());
+        }
+        QCOMPARE(window.session_.previewState(), zjdesk::SessionCoordinator::PreviewState::Stopped);
+#else
+        QSKIP("Windows desktop camera settings regression");
+#endif
+    }
+
+    void cameraPermissionDialogDoesNotGrantAccessItself_data()
+    {
+        QTest::addColumn<bool>("launchSucceeded");
+        QTest::newRow("settings-launch-accepted") << true;
+        QTest::newRow("settings-launch-failed") << false;
+    }
+
+    void cameraPermissionDialogDoesNotGrantAccessItself()
+    {
+        QFETCH(bool, launchSucceeded);
+        CameraSettingsHandler handler;
+        qApp->installEventFilter(&handler);
+        const auto cleanup = qScopeGuard([&handler] {
+            qApp->removeEventFilter(&handler);
+        });
+        MainWindow window("ws://127.0.0.1:1", {}, "Camera permission");
+        int settingsRequests = 0;
+        window.session_.cameraSettingsOpener_ = [&](QObject *context, zjdesk::CameraSettingsCompletion completed) {
+            ++settingsRequests;
+            QTimer::singleShot(0, context, [completed, launchSucceeded] {
+                completed(launchSucceeded, launchSucceeded ? QString{} : QStringLiteral("模拟系统启动错误"));
+            });
+        };
+        window.session_.cameraPermissionRequired();
+        auto *dialog = window.findChild<QMessageBox *>("cameraPermissionDialog");
+        QVERIFY(dialog);
+        window.session_.cameraPermissionRequired();
+        QCOMPARE(window.findChildren<QMessageBox *>("cameraPermissionDialog").size(), 1);
+        for (auto *button : dialog->buttons())
+            if (dialog->buttonRole(button) == QMessageBox::RejectRole) button->click();
+        QTRY_VERIFY(!window.findChild<QMessageBox *>("cameraPermissionDialog"));
+        QCOMPARE(settingsRequests, 0);
+        QVERIFY(!window.awaitingCameraPermission_);
+        QCOMPARE(window.session_.previewState(), zjdesk::SessionCoordinator::PreviewState::Stopped);
+        QVERIFY(window.sourceCombo_->findData("test") >= 0);
+        window.session_.cameraPermissionRequired();
+        dialog = window.findChild<QMessageBox *>("cameraPermissionDialog");
+        QVERIFY(dialog);
+        QSignalSpy settingsFinished(&window.session_, &zjdesk::SessionCoordinator::cameraPrivacySettingsFinished);
+        QSignalSpy devices(&window.session_, &zjdesk::SessionCoordinator::devicesChanged);
+        for (auto *button : dialog->buttons())
+            if (dialog->buttonRole(button) == QMessageBox::AcceptRole) button->click();
+        QCOMPARE(settingsRequests, 1);
+        QVERIFY(window.awaitingCameraPermission_);
+        QVERIFY(settingsFinished.isEmpty());
+        window.session_.openCameraPrivacySettings();
+        QCOMPARE(settingsRequests, 1);
+        QTRY_COMPARE(settingsFinished.size(), 1);
+        QCOMPARE(settingsFinished.first().first().toBool(), launchSucceeded);
+        if (launchSucceeded)
+        {
+            QTRY_VERIFY(!devices.isEmpty());
+        }
+        else
+        {
+            auto *error = window.findChild<QMessageBox *>("cameraSettingsError");
+            QVERIFY(error);
+            QVERIFY(error->text().contains(QStringLiteral("无法打开")));
+            QVERIFY(error->text().contains(QStringLiteral("模拟系统启动错误")));
+            if (window.session_.cameraPermissionStatus() != zjdesk::CameraPermission::Allowed)
+                QVERIFY(window.awaitingCameraPermission_);
+            error->button(QMessageBox::Ok)->click();
+            QTRY_VERIFY(!window.findChild<QMessageBox *>("cameraSettingsError"));
+        }
+        const bool awaitingPermission = window.awaitingCameraPermission_;
+        devices.clear();
+        qApp->applicationStateChanged(Qt::ApplicationActive);
+        QCOMPARE(window.session_.cameraPermissionStatus(), zjdesk::cameraPermission());
+        QCOMPARE(window.awaitingCameraPermission_,
+            window.session_.cameraPermissionStatus() != zjdesk::CameraPermission::Allowed);
+        if (awaitingPermission)
+            QTRY_VERIFY(!devices.isEmpty());
+        QCOMPARE(window.session_.previewState(), zjdesk::SessionCoordinator::PreviewState::Stopped);
+        window.session_.openCameraPrivacySettings();
+        QCOMPARE(settingsRequests, 2);
+        QTRY_COMPARE(settingsFinished.size(), 2);
+    }
+
+    void cameraPermissionRefreshResumesAfterPreview()
+    {
+        MainWindow window("ws://127.0.0.1:1", {}, "Deferred camera refresh");
+        if (!window.session_.mediaEnvironment().ready)
+            QSKIP("Media SDK is required for the synthetic preview");
+        QVERIFY(window.session_.startPreview("test"));
+        QTRY_COMPARE(window.session_.previewState(), zjdesk::SessionCoordinator::PreviewState::Running);
+        window.awaitingCameraPermission_ = true;
+        QSignalSpy devices(&window.session_, &zjdesk::SessionCoordinator::devicesChanged);
+        qApp->applicationStateChanged(Qt::ApplicationActive);
+        QTest::qWait(100);
+        QVERIFY(devices.isEmpty());
+        window.session_.stopPreview();
+        QTRY_COMPARE(window.session_.previewState(), zjdesk::SessionCoordinator::PreviewState::Stopped);
+        QTRY_VERIFY(!devices.isEmpty());
+        QCOMPARE(window.session_.cameraPermissionStatus(), zjdesk::cameraPermission());
+        QCOMPARE(window.awaitingCameraPermission_,
+            window.session_.cameraPermissionStatus() != zjdesk::CameraPermission::Allowed);
+    }
+
     void physicalDesktopAcrossMachines()
     {
         if (qEnvironmentVariable("ZJDESK_PHYSICAL_RECEIVER") != "1")
@@ -822,6 +965,26 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(observation().value("fixtureCompleted").toBool(), 10000);
     }
 
+    void expandedVideoEscHidesButton()
+    {
+        MainWindow window("ws://127.0.0.1:8765", "demo", "Viewer");
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window.show();
+        auto *surface = window.findChild<VideoSurface *>();
+        auto *expand = window.findChild<QPushButton *>("expandVideoButton");
+        QVERIFY(surface);
+        QVERIFY(expand && expand->isVisible());
+        for (const auto modifiers : {Qt::NoModifier, Qt::ControlModifier})
+        {
+            expand->click();
+            QTRY_VERIFY(window.isFullScreen());
+            QVERIFY(!expand->isVisible());
+            QTest::keyClick(surface, Qt::Key_Escape, modifiers);
+            QTRY_VERIFY(!window.isFullScreen());
+            QVERIFY(expand->isVisible());
+        }
+    }
+
     void expandedVideoKeepsSurfaceAndRestoresWindow()
     {
         MainWindow window("ws://127.0.0.1:8765", "demo", "Viewer");
@@ -842,6 +1005,7 @@ private slots:
         QSignalSpy input(surface, &VideoSurface::remoteInput);
         expand->click();
         QTRY_VERIFY(window.isFullScreen());
+        QVERIFY(!expand->isVisible());
         QTRY_VERIFY(surface->width() > normalSize.width() && surface->height() > normalSize.height());
         QCOMPARE(window.findChild<VideoSurface *>(), surface);
         surface->setControlEnabled(true);
@@ -862,7 +1026,14 @@ private slots:
         QTest::keyClick(surface, Qt::Key_Escape, Qt::ControlModifier);
         QTRY_VERIFY(!window.isFullScreen());
         QTRY_COMPARE(window.geometry(), normalGeometry);
+        QVERIFY(expand->isVisible());
         QVERIFY(window.findChild<QPushButton *>("primaryButton")->isVisible());
+        expand->click();
+        QTRY_VERIFY(window.isFullScreen());
+        QVERIFY(!expand->isVisible());
+        QTest::keyClick(surface, Qt::Key_Escape);
+        QTRY_VERIFY(!window.isFullScreen());
+        QVERIFY(expand->isVisible());
     }
 
     void controlSurfaceRejectsLetterboxAndReleasesOnFocusLoss()
@@ -1441,11 +1612,29 @@ private slots:
         const auto url = QString("ws://127.0.0.1:%1").arg(server.port());
         const QString longName(40, QChar(0x534f));
         MainWindow window(url, "demo", longName);
+        const bool backgroundSnapshots = qEnvironmentVariableIntValue("ZJDESK_UI_BACKGROUND_SNAPSHOTS") == 1;
+        if (backgroundSnapshots)
+        {
+            // Opt-in native snapshots without activating the user's desktop.
+            window.setWindowFlag(Qt::Tool);
+            window.setWindowFlag(Qt::WindowDoesNotAcceptFocus);
+            window.setAttribute(Qt::WA_ShowWithoutActivating);
+            window.move(window.screen()->virtualGeometry().left() - 2000, 0);
+        }
         window.resize(1040, 720);
         window.show();
-        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        if (backgroundSnapshots)
+        {
+            QTRY_VERIFY(window.isVisible());
+        }
+        else
+        {
+            QVERIFY(QTest::qWaitForWindowExposed(&window));
+        }
         QCOMPARE(window.size(), QSize(1040, 720));
         auto *surface = window.findChild<VideoSurface *>();
+        QVERIFY(!surface->grabFramebuffer().isNull());
+        QTRY_VERIFY(surface->isValid());
         QVERIFY(surface->width() >= 450);
         QVERIFY(surface->height() >= 300);
         for (auto *widget : {static_cast<QWidget *>(surface),
@@ -1466,13 +1655,13 @@ private slots:
         panel->verticalScrollBar()->setValue(0);
         QTest::qWait(100);
         QVERIFY(QDir().mkpath("output"));
-        QVERIFY(window.screen()->grabWindow(window.winId()).save("output/ui-workspace-small.png"));
+        QVERIFY(window.grab().save("output/ui-workspace-small.png"));
         window.findChild<QLineEdit *>("serverAddress")->setText("http://invalid");
         QTest::mouseClick(window.findChild<QPushButton *>("primaryButton"), Qt::LeftButton);
         QTRY_COMPARE(window.findChild<QLabel *>("statusBadge")->text(), QStringLiteral("连接失败"));
         QVERIFY(window.findChild<QLineEdit *>("serverAddress")->isEnabled());
         QTest::qWait(200);
-        QVERIFY(window.screen()->grabWindow(window.winId()).save("output/ui-connection-error.png"));
+        QVERIFY(window.grab().save("output/ui-connection-error.png"));
         window.findChild<QLineEdit *>("serverAddress")->setText(url);
         QTest::mouseClick(window.findChild<QPushButton *>("primaryButton"), Qt::LeftButton);
         QTRY_COMPARE(window.findChild<QLabel *>("statusBadge")->text(), QStringLiteral("等待成员"));
@@ -1482,16 +1671,54 @@ private slots:
         QCOMPARE(window.size(), QSize(1040, 720));
         window.resize(1280, 820);
         QTest::qWait(200);
-        QVERIFY(window.screen()->grabWindow(window.winId()).save("output/ui-workspace-large.png"));
+        QVERIFY(window.grab().save("output/ui-workspace-large.png"));
         const auto nav = window.findChildren<QPushButton *>("navButton");
         QCOMPARE(nav.size(), 3);
         nav.at(2)->setFocus();
         QTest::keyClick(nav.at(2), Qt::Key_Space);
         QTRY_COMPARE(window.findChild<QLabel *>("pageTitle")->text(), QStringLiteral("运行诊断"));
         QTest::qWait(100);
-        QVERIFY(window.screen()->grabWindow(window.winId()).save("output/ui-diagnostics-large.png"));
+        QVERIFY(window.grab().save("output/ui-diagnostics-large.png"));
+        window.resize(1040, 720);
+        QTest::qWait(100);
+        QCOMPARE(window.size(), QSize(1040, 720));
+        auto *log = window.findChild<QPlainTextEdit *>();
+        QVERIFY(window.rect().contains(QRect(log->mapTo(&window, QPoint()), log->size())));
+        QVERIFY(window.grab().save("output/ui-diagnostics-small.png"));
         QTest::mouseClick(nav.at(0), Qt::LeftButton);
         QTRY_COMPARE(window.findChild<QLabel *>("pageTitle")->text(), QStringLiteral("协作工作台"));
+        QTest::mouseClick(nav.at(1), Qt::LeftButton);
+        window.resize(1040, 720);
+        for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
+        {
+            auto *combo = window.findChild<QComboBox *>(name);
+            combo->addItem(QStringLiteral("USB 音视频设备 · 高清摄像头与立体声麦克风阵列（长设备名称）"), "test");
+            combo->setCurrentIndex(combo->count() - 1);
+        }
+        QTest::qWait(100);
+        QCOMPARE(window.size(), QSize(1040, 720));
+        for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker",
+                 "conferenceCall", "conferenceHangup", "conferenceMuteMicrophone", "conferenceHideCamera",
+                 "conferenceMuteSpeaker", "conferenceLocalVideo", "conferenceRemoteVideo"})
+        {
+            auto *widget = window.findChild<QWidget *>(name);
+            QVERIFY(widget && widget->isVisible());
+            QVERIFY2(window.rect().contains(QRect(widget->mapTo(&window, QPoint()), widget->size())), name);
+        }
+        QVERIFY(!window.findChild<VideoSurface *>("conferenceLocalVideo")->grabFramebuffer().isNull());
+        QVERIFY(!window.findChild<VideoSurface *>("conferenceRemoteVideo")->grabFramebuffer().isNull());
+        QVERIFY(window.grab().save("output/ui-meeting-small.png"));
+        window.resize(1280, 820);
+        QTest::qWait(100);
+        QVERIFY(window.grab().save("output/ui-meeting-large.png"));
+        window.session_.leave();
+        peer.leave();
+        window.findChild<QLineEdit *>("displayName")->setText(QStringLiteral("本机用户"));
+        window.findChild<QLineEdit *>("serverAddress")->setText("ws://127.0.0.1:8765");
+        QTest::mouseClick(nav.at(0), Qt::LeftButton);
+        panel->verticalScrollBar()->setValue(0);
+        QTest::qWait(100);
+        QVERIFY(window.grab().save("output/ui-workspace-preview.png"));
     }
 
     void conferenceControlsAndFrames()
@@ -1501,12 +1728,30 @@ private slots:
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
         const auto url = QString("ws://127.0.0.1:%1").arg(server.port());
         MainWindow alice(url, "conference-ui", "Alice"), bob(url, "conference-ui", "Bob");
+        const bool backgroundSnapshots = qEnvironmentVariableIntValue("ZJDESK_UI_BACKGROUND_SNAPSHOTS") == 1;
+        if (backgroundSnapshots)
+        {
+            for (auto *window : {&alice, &bob})
+            {
+                window->setWindowFlag(Qt::Tool);
+                window->setWindowFlag(Qt::WindowDoesNotAcceptFocus);
+                window->setAttribute(Qt::WA_ShowWithoutActivating);
+                window->move(window->screen()->virtualGeometry().left() - 2000, 0);
+            }
+        }
         if (!alice.session_.mediaEnvironment().ready) QSKIP("GStreamer is not enabled in this build");
         QSignalSpy aliceDevices(&alice.session_, &zjdesk::SessionCoordinator::devicesChanged);
         QSignalSpy bobDevices(&bob.session_, &zjdesk::SessionCoordinator::devicesChanged);
         alice.show(); bob.show();
-        QVERIFY(QTest::qWaitForWindowExposed(&alice));
-        QVERIFY(QTest::qWaitForWindowExposed(&bob));
+        if (backgroundSnapshots)
+        {
+            QTRY_VERIFY(alice.isVisible() && bob.isVisible());
+        }
+        else
+        {
+            QVERIFY(QTest::qWaitForWindowExposed(&alice));
+            QVERIFY(QTest::qWaitForWindowExposed(&bob));
+        }
         QTRY_VERIFY(!aliceDevices.isEmpty() && !bobDevices.isEmpty());
         for (auto *window : {&alice, &bob})
         {
@@ -1535,6 +1780,8 @@ private slots:
         {
             auto *local = window->findChild<VideoSurface *>("conferenceLocalVideo");
             auto *remote = window->findChild<VideoSurface *>("conferenceRemoteVideo");
+            QVERIFY(!local->grabFramebuffer().isNull());
+            QVERIFY(!remote->grabFramebuffer().isNull());
             QTRY_VERIFY(local->isValid() && remote->isValid());
             QTRY_VERIFY(local->hasFrame() && remote->hasFrame());
             QVERIFY(!remote->grabFramebuffer().isNull());
@@ -1544,6 +1791,9 @@ private slots:
         QVERIFY(hide->isEnabled());
         hide->click();
         QVERIFY(hide->isChecked());
+        QVERIFY(QDir().mkpath("output"));
+        QTest::qWait(100);
+        QVERIFY(alice.grab().save("output/ui-meeting-running.png"));
         bob.findChild<QPushButton *>("conferenceHangup")->click();
         QTRY_COMPARE(alice.session_.conferenceState(), CS::Idle);
         QTRY_VERIFY(!alice.findChild<VideoSurface *>("conferenceRemoteVideo")->hasFrame());

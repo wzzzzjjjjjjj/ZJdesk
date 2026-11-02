@@ -41,8 +41,12 @@ add_library(zjdesk_client_core STATIC
     src/media/share_quality.cpp src/media/share_quality.h
     src/media/frame_timing.h
     src/media/congestion_budget.h
-    src/platform/platform_info.cpp src/platform/platform_info.h)
+    src/platform/platform_info.cpp src/platform/platform_info.h
+    src/platform/camera_permission.cpp src/platform/camera_permission.h src/platform/camera_permission_p.h)
 target_link_libraries(zjdesk_client_core PUBLIC zjdesk_protocol Qt6::Gui Qt6::Network Qt6::WebSockets)
+if(WIN32)
+    target_link_libraries(zjdesk_client_core PRIVATE windowsapp)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(X11 REQUIRED)
     if(NOT TARGET X11::Xtst OR NOT TARGET X11::Xfixes)

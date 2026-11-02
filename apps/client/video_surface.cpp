@@ -92,43 +92,48 @@ void VideoSurface::paintGL()
         return;
     }
     QLinearGradient background(0, 0, width(), height());
-    background.setColorAt(0, QColor("#102735"));
-    background.setColorAt(1, QColor("#203e4b"));
+    background.setColorAt(0, QColor("#122333"));
+    background.setColorAt(1, QColor("#1a3845"));
     painter.fillRect(rect(), background);
-    painter.setPen(QPen(QColor(148, 195, 199, 14), 1));
-    for (int x = 24; x < width(); x += 40)
-        painter.drawLine(x, 0, x, height());
-    for (int y = 24; y < height(); y += 40)
-        painter.drawLine(0, y, width(), y);
-    const QPointF center(width() / 2.0, height() / 2.0 - 34);
-    QRadialGradient glow(center, 160);
-    glow.setColorAt(0, QColor(57, 164, 145, 45));
-    glow.setColorAt(1, QColor(57, 164, 145, 0));
+    const bool compact = height() < 240;
+    const QPointF center(width() / 2.0, height() / 2.0 - (compact ? 32 : 38));
+    const qreal radius = compact ? qMin(30.0, height() / 6.0) : 52;
+    QRadialGradient glow(center, radius * 4);
+    glow.setColorAt(0, QColor(73, 174, 157, 32));
+    glow.setColorAt(1, QColor(73, 174, 157, 0));
     painter.fillRect(rect(), glow);
-    painter.setPen(QPen(QColor("#3a6c75"), 1));
-    painter.setBrush(QColor("#1a3946"));
-    painter.drawRoundedRect(QRectF(center.x() - 58, center.y() - 44, 116, 82), 12, 12);
-    painter.setPen(QPen(QColor("#83cbbd"), 2));
-    painter.setBrush(QColor("#244b55"));
-    painter.drawRoundedRect(QRectF(center.x() - 34, center.y() - 26, 68, 44), 5, 5);
-    painter.drawLine(QPointF(center.x(), center.y() + 19), QPointF(center.x(), center.y() + 27));
-    painter.drawLine(QPointF(center.x() - 14, center.y() + 27), QPointF(center.x() + 14, center.y() + 27));
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(130, 190, 185, 17), 1));
+    painter.drawEllipse(center, radius * 2.8, radius * 2.8);
+    painter.drawEllipse(center, radius * 1.9, radius * 1.9);
+    painter.save();
+    painter.translate(center);
+    painter.scale(radius / 52, radius / 52);
+    painter.setPen(QPen(QColor("#3c6974"), 1));
+    painter.setBrush(QColor("#1c3b49"));
+    painter.drawRoundedRect(QRectF(-52, -42, 104, 84), 20, 20);
+    painter.setPen(QPen(QColor("#93d6c5"), 2));
+    painter.setBrush(QColor("#254d58"));
+    painter.drawRoundedRect(QRectF(-30, -23, 60, 39), 5, 5);
+    painter.drawLine(QPointF(0, 17), QPointF(0, 25));
+    painter.drawLine(QPointF(-12, 25), QPointF(12, 25));
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor("#83cbbd"));
-    painter.drawEllipse(QPointF(center.x() + 46, center.y() - 32), 3, 3);
+    painter.setBrush(QColor("#93d6c5"));
+    painter.drawEllipse(QPointF(40, -30), 3, 3);
+    painter.restore();
     auto font = painter.font();
-    font.setPointSize(13);
+    font.setPointSize(compact ? 11 : 14);
     font.setWeight(QFont::DemiBold);
     painter.setFont(font);
     painter.setPen(QColor("#e3f2f4"));
-    const QRect titleRect(24, int(center.y()) + 56, width() - 48, 30);
+    const QRect titleRect(24, int(center.y() + radius) + 12, width() - 48, 28);
     painter.drawText(titleRect, Qt::AlignCenter,
         painter.fontMetrics().elidedText(name_, Qt::ElideRight, titleRect.width()));
     font.setPointSize(9);
     font.setBold(false);
     painter.setFont(font);
-    painter.setPen(QColor("#a9c3ce"));
-    painter.drawText(QRect(28, int(center.y()) + 94, width() - 56, 52),
+    painter.setPen(QColor("#8eaeba"));
+    painter.drawText(QRect(24, titleRect.bottom() + 6, width() - 48, compact ? 32 : 44),
                      Qt::AlignHCenter | Qt::TextWordWrap, caption_);
 }
 
