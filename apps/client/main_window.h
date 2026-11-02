@@ -43,6 +43,10 @@ private:
     QLineEdit *roomEdit_ = nullptr;
     QLineEdit *nameEdit_ = nullptr;
     QPushButton *joinButton_ = nullptr;
+    QLineEdit *meetingServerEdit_ = nullptr;
+    QLineEdit *meetingRoomEdit_ = nullptr;
+    QLineEdit *meetingNameEdit_ = nullptr;
+    QPushButton *meetingJoinButton_ = nullptr;
     QLabel *statusLabel_ = nullptr;
     QPropertyAnimation *statusAnimation_ = nullptr;
     QLabel *statusDetail_ = nullptr;
@@ -51,6 +55,8 @@ private:
     QLabel *trafficLabel_ = nullptr;
     QPlainTextEdit *logView_ = nullptr;
     VideoSurface *video_ = nullptr;
+    VideoSurface *meetingLocalVideo_ = nullptr;
+    VideoSurface *meetingShareVideo_ = nullptr;
     QComboBox *sourceCombo_ = nullptr;
     QPushButton *previewButton_ = nullptr;
     QPushButton *audioButton_ = nullptr;

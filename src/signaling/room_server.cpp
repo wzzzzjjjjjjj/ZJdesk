@@ -127,20 +127,23 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
     {
         const auto room = message->payload.value("roomId").toString();
         const auto name = message->payload.value("name").toString().trimmed();
+        const auto roomType = message->payload.value("roomType").toString("assistance");
         if (!peers_[socket].room.isEmpty())
             return reject(socket, "already_joined");
-        if (!protocol::isRoomIdValid(room) || !protocol::isPeerNameValid(name))
+        if (!protocol::isRoomIdValid(room) || !protocol::isPeerNameValid(name)
+            || (roomType != "assistance" && roomType != "meeting"))
             return reject(socket, "invalid_join");
-        if (rooms_.value(room).size() >= 2)
+        const auto roomKey = roomType + QChar(0x1f) + room;
+        if (rooms_.value(roomKey).size() >= 2)
             return reject(socket, "room_full");
         QJsonArray members;
-        for (auto *member : rooms_.value(room))
+        for (auto *member : rooms_.value(roomKey))
             members.append(QJsonObject{{"peerId", peers_[member].id}, {"name", peers_[member].name}});
-        peers_[socket].room = room;
+        peers_[socket].room = roomKey;
         peers_[socket].name = name;
-        rooms_[room].append(socket);
+        rooms_[roomKey].append(socket);
         send(socket, {"joined", {{"roomId", room}, {"peerId", peers_[socket].id},
-                                 {"peers", members}, {"initiator", members.isEmpty()}}});
+                                 {"roomType", roomType}, {"peers", members}, {"initiator", members.isEmpty()}}});
         if (auto *other = otherPeer(socket))
             send(other, {"peer_joined", {{"peerId", peers_[socket].id}, {"name", name}}});
         emit event("Participant joined; room count: " + QString::number(rooms_.size()));

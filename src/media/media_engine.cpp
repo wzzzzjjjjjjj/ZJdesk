@@ -1,7 +1,10 @@
 #include "media_engine.h"
+#include "share_quality.h"
 #include <QElapsedTimer>
 #include <QHash>
 #include <QMutexLocker>
+#include <QTimer>
+#include <memory>
 #ifdef ZJDESK_HAS_GSTREAMER
 #include <gst/app/gstappsink.h>
 #include <gst/video/video.h>
@@ -87,6 +90,8 @@ public:
 #ifdef ZJDESK_HAS_GSTREAMER
         releaseVideo();
         videoEpoch_ = epoch;
+        quality_.reset();
+        nativeMode_ = {};
         QString error;
         GError *parseError = nullptr;
         if (sourceId == "test")
@@ -100,8 +105,12 @@ public:
         {
             auto *source = gst_device_create_element(devices_.value(sourceId), "camera");
             const auto mode = modes_.value(sourceId);
-            const auto tail = QString("capsfilter caps=\"%1\" ! %2videoconvert ! "
-                "video/x-raw,format=RGB ! appsink name=frames max-buffers=1 "
+            nativeMode_ = mode;
+            if (!mode.size.isEmpty())
+                quality_ = std::make_unique<ShareQuality>(mode.size,
+                    qRound(double(mode.fpsNumerator) / mode.fpsDenominator), 15);
+            const auto tail = QString("capsfilter caps=\"%1\" ! %2videorate drop-only=true ! videoscale ! "
+                "videoconvert ! capsfilter name=cameraquality ! appsink name=frames max-buffers=1 "
                 "drop=true sync=false wait-on-eos=false")
                 .arg(mode.caps, mode.jpeg ? "jpegdec ! " : "");
             auto *conversion = mode.caps.isEmpty() ? nullptr
@@ -137,8 +146,16 @@ public:
         }
         sink_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(video_), "frames"));
         videoBus_ = gst_element_get_bus(video_);
+        if (quality_)
+            applyCameraQuality();
+        else
+        {
+            QMutexLocker lock(&mailbox_->mutex);
+            mailbox_->stats.targetFps = 30;
+        }
         startup_.restart();
         firstFrame_ = false;
+        performance_.invalidate();
         if (!sink_ || gst_element_set_state(video_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
         {
             releaseVideo();
@@ -156,6 +173,7 @@ public:
     {
 #ifdef ZJDESK_HAS_GSTREAMER
         releaseVideo();
+        quality_.reset();
 #endif
         emit videoStatus(epoch, "stopped", QStringLiteral("本地预览已停止"));
     }
@@ -218,6 +236,7 @@ signals:
     void devicesReady(const QList<zjdesk::MediaDevice> &devices, const QString &error);
     void videoStatus(quint64 epoch, const QString &status, const QString &detail);
     void audioStatus(quint64 epoch, const QString &status, const QString &detail);
+    void frameAvailable(quint64 epoch);
 
 private:
 #ifdef ZJDESK_HAS_GSTREAMER
@@ -258,6 +277,51 @@ private:
         audioBus_ = nullptr;
     }
 
+    void applyCameraQuality()
+    {
+        const auto capsText = cameraOutputCaps(nativeMode_, quality_->profile(), "RGB");
+        auto *filter = gst_bin_get_by_name(GST_BIN(video_), "cameraquality");
+        auto *caps = gst_caps_from_string(capsText.toUtf8().constData());
+        g_object_set(filter, "caps", caps, nullptr);
+        gst_caps_unref(caps);
+        gst_object_unref(filter);
+        QMutexLocker lock(&mailbox_->mutex);
+        mailbox_->stats.targetFps = qMin(double(quality_->profile().fps),
+            double(nativeMode_.fpsNumerator) / nativeMode_.fpsDenominator);
+    }
+
+    void measureCameraPerformance()
+    {
+        if (!firstFrame_)
+            return;
+        PreviewStats stats;
+        { QMutexLocker lock(&mailbox_->mutex); stats = mailbox_->stats; }
+        if (!performance_.isValid())
+        {
+            performance_.start();
+            previousCaptured_ = stats.capturedFrames;
+            previousDelivered_ = stats.deliveredFrames;
+            return;
+        }
+        const auto elapsed = performance_.elapsed();
+        if (elapsed < 1000)
+            return;
+        const double capture = (stats.capturedFrames - previousCaptured_) * 1000.0 / elapsed;
+        const double delivery = (stats.deliveredFrames - previousDelivered_) * 1000.0 / elapsed;
+        previousCaptured_ = stats.capturedFrames;
+        previousDelivered_ = stats.deliveredFrames;
+        performance_.restart();
+        { QMutexLocker lock(&mailbox_->mutex);
+          mailbox_->stats.captureFps = capture; mailbox_->stats.deliveryFps = delivery; }
+        if (quality_ && quality_->observe(capture, delivery))
+        {
+            applyCameraQuality();
+            firstFrame_ = false;
+            startup_.restart();
+            performance_.invalidate();
+        }
+    }
+
     void ensureTimer()
     {
         if (!pollTimer_)
@@ -265,7 +329,10 @@ private:
             pollTimer_ = new QTimer(this);
             connect(pollTimer_, &QTimer::timeout, this, &MediaWorker::poll);
         }
-        pollTimer_->start(10);
+        pollTimer_->setTimerType(Qt::PreciseTimer);
+        double fps;
+        { QMutexLocker lock(&mailbox_->mutex); fps = mailbox_->stats.targetFps; }
+        pollTimer_->start(video_ ? qBound(1, int(500 / qMax(1.0, fps)), 10) : 10);
     }
 
     QString busError(GstBus *bus)
@@ -309,28 +376,39 @@ private:
                     const QImage image(static_cast<const uchar *>(GST_VIDEO_FRAME_PLANE_DATA(&frame, 0)),
                         GST_VIDEO_FRAME_WIDTH(&frame), GST_VIDEO_FRAME_HEIGHT(&frame),
                         GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0), QImage::Format_RGB888);
+                    bool notify = false;
                     {
                         QMutexLocker lock(&mailbox_->mutex);
                         if (mailbox_->epoch == videoEpoch_)
                         {
                             if (!mailbox_->image.isNull())
                                 ++mailbox_->stats.droppedFrames;
+                            else
+                                notify = true;
                             mailbox_->image = image.copy();
                             ++mailbox_->stats.capturedFrames;
                             mailbox_->stats.pendingFrames = 1;
                         }
                     }
+                    if (notify)
+                        emit frameAvailable(videoEpoch_);
                     gst_video_frame_unmap(&frame);
-                    if (!firstFrame_)
+                    if (!firstFrame_ && (!quality_ || (QSize(info.width, info.height) == quality_->profile().size
+                        && qAbs(double(info.fps_n) / qMax(1, info.fps_d)
+                            - qMin(double(quality_->profile().fps), double(nativeMode_.fpsNumerator)
+                                / nativeMode_.fpsDenominator)) < 0.1)))
                     {
                         firstFrame_ = true;
-                        emit videoStatus(videoEpoch_, "running", QStringLiteral("本地预览 · %1 × %2 · %3 fps")
+                        emit videoStatus(videoEpoch_, "running", QStringLiteral("本地预览%1 · %2 × %3 · 目标 %4 fps")
+                            .arg(quality_ ? QStringLiteral("（清晰度优先·自动）") : QString{})
                             .arg(info.width).arg(info.height)
                             .arg(info.fps_d ? double(info.fps_n) / info.fps_d : 0, 0, 'f', 2));
                     }
                 }
                 gst_sample_unref(sample);
             }
+            if (video_)
+                measureCameraPerformance();
             if (video_ && !firstFrame_ && startup_.elapsed() > 8000)
             {
                 releaseVideo();
@@ -377,6 +455,10 @@ private:
     GstBus *audioBus_ = nullptr;
     QTimer *pollTimer_ = nullptr;
     QElapsedTimer startup_;
+    QElapsedTimer performance_;
+    std::unique_ptr<ShareQuality> quality_;
+    CameraMode nativeMode_;
+    quint64 previousCaptured_ = 0, previousDelivered_ = 0;
     QElapsedTimer audioStartup_;
     quint64 videoEpoch_ = 0;
     quint64 audioEpoch_ = 0;
@@ -396,26 +478,26 @@ MediaEngine::MediaEngine(QObject *parent) : QObject(parent), environment_(MediaE
     connect(worker_, &MediaWorker::devicesReady, this, &MediaEngine::devicesReady);
     connect(worker_, &MediaWorker::videoStatus, this, &MediaEngine::videoStatus);
     connect(worker_, &MediaWorker::audioStatus, this, &MediaEngine::audioStatus);
-    connect(&frameTimer_, &QTimer::timeout, this, [this] {
+    connect(worker_, &MediaWorker::frameAvailable, this, [this](quint64 epoch) {
         QImage image;
-        quint64 epoch;
         {
             QMutexLocker lock(&mailbox_.mutex);
+            if (mailbox_.epoch != epoch)
+                return;
             image.swap(mailbox_.image);
-            epoch = mailbox_.epoch;
             mailbox_.stats.pendingFrames = 0;
+            if (!image.isNull())
+                ++mailbox_.stats.deliveredFrames;
         }
         if (!image.isNull())
             emit frameReady(epoch, image);
     });
-    frameTimer_.start(33);
     thread_.setObjectName("media-worker");
     thread_.start();
 }
 
 MediaEngine::~MediaEngine()
 {
-    frameTimer_.stop();
     QMetaObject::invokeMethod(worker_, [this] { worker_->shutdown(); }, Qt::BlockingQueuedConnection);
     thread_.quit();
     thread_.wait();

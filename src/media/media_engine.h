@@ -7,7 +7,6 @@
 #include <QMutex>
 #include <QObject>
 #include <QThread>
-#include <QTimer>
 
 namespace zjdesk
 {
@@ -24,6 +23,10 @@ struct PreviewStats
     quint64 capturedFrames = 0;
     quint64 droppedFrames = 0;
     int pendingFrames = 0;
+    quint64 deliveredFrames = 0;
+    double captureFps = 0;
+    double deliveryFps = 0;
+    double targetFps = 0;
 };
 
 // One owned image is shared across threads; the appsink holds at most one more.
@@ -62,7 +65,6 @@ private:
     mutable PreviewMailbox mailbox_;
     QThread thread_;
     MediaWorker *worker_ = nullptr;
-    QTimer frameTimer_;
 };
 } // namespace zjdesk
 

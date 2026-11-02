@@ -22,14 +22,16 @@ class SessionCoordinator final : public QObject
 public:
     enum class State { Idle, Connecting, Joining, WaitingForPeer, PeerAvailable, Failed };
     Q_ENUM(State)
+    enum class RoomType { Assistance, Meeting };
     enum class PreviewState { Stopped, Starting, Running, Stopping, Failed };
     Q_ENUM(PreviewState)
     explicit SessionCoordinator(QObject *parent = nullptr);
     ~SessionCoordinator() override;
-    bool join(const QUrl &url, const QString &roomId, const QString &name);
+    bool join(const QUrl &url, const QString &roomId, const QString &name, RoomType type = RoomType::Assistance);
     void leave();
     bool sendNegotiation(const QString &type, const QJsonObject &payload);
     State state() const { return state_; }
+    RoomType roomType() const { return roomType_; }
     QString detail() const { return detail_; }
     QString peerName() const { return peerName_; }
     int memberCount() const;
@@ -179,6 +181,7 @@ private:
     State state_ = State::Idle;
     QString detail_ = QStringLiteral("尚未加入房间");
     QString roomId_;
+    RoomType roomType_ = RoomType::Assistance;
     QString name_;
     QString peerId_;
     QString peerName_;

@@ -70,7 +70,7 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
         if (ready)
         {
             screen_.sendControl({{"action", "capabilities"},
-                {"control", !receivingScreen_ && desktopSource_ && input_.available()}}, shareEpoch_);
+                {"control", roomType_ == RoomType::Assistance && !receivingScreen_ && desktopSource_ && input_.available()}}, shareEpoch_);
             if (remoteState_ == RemoteState::Controlled)
                 sendControlGrant();
         }
@@ -187,7 +187,8 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
         if (state_ != State::Connecting)
             return;
         changeState(State::Joining, QStringLiteral("已连接，正在加入房间"));
-        if (!signaling_.send({"join", {{"roomId", roomId_}, {"name", name_}}}))
+        if (!signaling_.send({"join", {{"roomId", roomId_}, {"name", name_},
+            {"roomType", roomType_ == RoomType::Meeting ? "meeting" : "assistance"}}}))
             fail(QStringLiteral("入会请求发送失败"));
     });
     connect(&signaling_, &SignalingClient::messageReceived, this, &SessionCoordinator::receive);
@@ -216,10 +217,11 @@ int SessionCoordinator::memberCount() const
     return state_ == State::PeerAvailable ? 2 : 0;
 }
 
-bool SessionCoordinator::join(const QUrl &url, const QString &roomId, const QString &name)
+bool SessionCoordinator::join(const QUrl &url, const QString &roomId, const QString &name, RoomType type)
 {
     if (state_ != State::Idle && state_ != State::Failed)
         return false;
+    roomType_ = type;
     if (!url.isValid() || (url.scheme() != "ws" && url.scheme() != "wss")
         || url.host().isEmpty() || !url.userInfo().isEmpty()
         || !protocol::isRoomIdValid(roomId) || !protocol::isPeerNameValid(name))
@@ -271,7 +273,7 @@ void SessionCoordinator::changeState(State state, const QString &detail)
     emit stateChanged(state);
     if (state == State::PeerAvailable)
         sendNegotiation("control", {{"action", "capabilities"},
-            {"control", input_.available() && media_.environment().ready}});
+            {"control", roomType_ == RoomType::Assistance && input_.available() && media_.environment().ready}});
 }
 
 void SessionCoordinator::fail(const QString &reason)
@@ -444,7 +446,7 @@ void SessionCoordinator::clearScreenShare(bool notifyPeer)
 
 bool SessionCoordinator::canRequestControl() const
 {
-    return state_ == State::PeerAvailable && media_.environment().ready
+    return roomType_ == RoomType::Assistance && state_ == State::PeerAvailable && media_.environment().ready
         && peerControllable_ && remoteState_ == RemoteState::Idle
         && ((!screenActive() && shareState_ != PreviewState::Stopping)
             || (receivingScreen_ && shareState_ == PreviewState::Running && controlChannelReady_));
@@ -734,6 +736,8 @@ void SessionCoordinator::receiveControl(const QJsonObject &message)
 
 void SessionCoordinator::receiveControlRequest(const QJsonObject &message)
 {
+    if (roomType_ != RoomType::Assistance)
+        return;
     const auto action = message.value("action").toString();
     const auto requestId = message.value("requestId").toString();
     if (action == "capabilities")
@@ -809,7 +813,7 @@ bool SessionCoordinator::setConferenceDevices(const ConferenceDevices &devices)
 
 bool SessionCoordinator::startConference()
 {
-    if (state_ != State::PeerAvailable || conferenceActive() || !media_.environment().ready)
+    if (roomType_ != RoomType::Meeting || state_ != State::PeerAvailable || conferenceActive() || !media_.environment().ready)
         return false;
     conferenceId_ = QUuid::createUuid().toString(QUuid::Id128);
     conferenceState_ = ConferenceState::Calling;
@@ -890,6 +894,8 @@ void SessionCoordinator::clearConference(bool notifyPeer)
 
 void SessionCoordinator::receiveConference(const QJsonObject &payload)
 {
+    if (roomType_ != RoomType::Meeting)
+        return;
     const auto id = payload.value("sessionId").toString();
     const auto action = payload.value("action").toString();
     if (action == "start")
@@ -944,6 +950,10 @@ void SessionCoordinator::receive(const protocol::Message &message)
     {
         if (message.payload.value("roomId").toString() != roomId_)
             return fail(QStringLiteral("服务返回了不匹配的房间"));
+        const auto type = message.payload.value("roomType").toString();
+        if ((roomType_ == RoomType::Meeting && type != "meeting")
+            || (roomType_ == RoomType::Assistance && !type.isEmpty() && type != "assistance"))
+            return fail(QStringLiteral("信令服务不支持所选房间类型，请更新服务端"));
         deadline_.stop();
         ownPeerId_ = message.payload.value("peerId").toString();
         const auto peers = message.payload.value("peers").toArray();

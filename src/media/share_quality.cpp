@@ -2,16 +2,19 @@
 
 namespace zjdesk
 {
-ShareQuality::ShareQuality(const QSize &nativeSize, int maximumFps)
+ShareQuality::ShareQuality(const QSize &nativeSize, int maximumFps, int minimumFps)
 {
     const auto native = nativeSize.isEmpty() ? QSize(1920, 1080) : nativeSize;
     maximumFps = maximumFps > 0 ? qBound(5, maximumFps, 240) : 60;
+    minimumFps = qBound(5, minimumFps, maximumFps);
     QList<int> frameRates;
     frameRates.append(maximumFps);
     // 原分辨率内只保留手感可用的帧率；低于 MinimumFps 的档位只留到最后一级尺寸。
-    for (int fps : {240, 165, 144, 120, 90, 60, 50, 45, 40, 30, MinimumFps})
-        if (fps < maximumFps && !frameRates.contains(fps))
+    for (int fps : {240, 165, 144, 120, 90, 60, 50, 45, 40, 30, 24, 20, 15, 10, 5})
+        if (fps < maximumFps && fps >= minimumFps && !frameRates.contains(fps))
             frameRates.append(fps);
+    if (!frameRates.contains(minimumFps))
+        frameRates.append(minimumFps);
     QList<QSize> sizes{native};
     QSize previous = native;
     for (const QSize &limit : {QSize(1920, 1080), QSize(1600, 900), QSize(1280, 720),

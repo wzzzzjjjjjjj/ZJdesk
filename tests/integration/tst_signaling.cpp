@@ -2,6 +2,7 @@
 #include "signaling/room_server.h"
 #include <QNetworkProxy>
 #include <QWebSocket>
+#include <QWebSocketServer>
 #include <QtTest>
 
 using State = zjdesk::SessionCoordinator::State;
@@ -10,6 +11,57 @@ class SignalingTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void roomTypesIsolateIdenticalCodes()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        const QString room(32, 'a');
+        using RoomType = zjdesk::SessionCoordinator::RoomType;
+        zjdesk::SessionCoordinator assistanceA, assistanceB, meetingA, meetingB;
+        QVERIFY(assistanceA.join(url, room, "A"));
+        QVERIFY(meetingA.join(url, room, "M", RoomType::Meeting));
+        QTRY_COMPARE(assistanceA.state(), State::WaitingForPeer);
+        QTRY_COMPARE(meetingA.state(), State::WaitingForPeer);
+        QVERIFY(!assistanceA.join(url, room, "A", RoomType::Meeting));
+        QCOMPARE(assistanceA.state(), State::WaitingForPeer);
+        QVERIFY(!meetingA.join(url, room, "M", RoomType::Assistance));
+        QCOMPARE(meetingA.state(), State::WaitingForPeer);
+        QVERIFY(!meetingA.canRequestControl());
+        QCOMPARE(server.roomCount(), 2);
+        QVERIFY(assistanceB.join(url, room, "B"));
+        QVERIFY(meetingB.join(url, room, "N", RoomType::Meeting));
+        QTRY_COMPARE(assistanceA.state(), State::PeerAvailable);
+        QTRY_COMPARE(meetingA.state(), State::PeerAvailable);
+        QVERIFY(!assistanceA.startConference());
+        QVERIFY(!meetingA.canRequestControl());
+        QCOMPARE(assistanceA.peerName(), QString("B"));
+        QCOMPARE(meetingA.peerName(), QString("N"));
+        meetingB.leave();
+        QTRY_COMPARE(meetingA.state(), State::WaitingForPeer);
+        QCOMPARE(assistanceA.state(), State::PeerAvailable);
+    }
+
+    void meetingRejectsLegacyServer()
+    {
+        QWebSocketServer server(QStringLiteral("legacy"), QWebSocketServer::NonSecureMode);
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        connect(&server, &QWebSocketServer::newConnection, &server, [&server] {
+            auto *socket = server.nextPendingConnection();
+            QObject::connect(socket, &QWebSocket::textMessageReceived, socket, [socket](const QString &text) {
+                const auto message = zjdesk::protocol::decode(text);
+                if (message && message->type == "join")
+                    socket->sendTextMessage(zjdesk::protocol::encode({"joined", {{"roomId", "room"},
+                        {"peerId", "peer"}, {"peers", QJsonArray{}}}}));
+            });
+        });
+        zjdesk::SessionCoordinator client;
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.serverPort()));
+        QVERIFY(client.join(url, "room", "Tester", zjdesk::SessionCoordinator::RoomType::Meeting));
+        QTRY_COMPARE(client.state(), State::Failed);
+        QVERIFY(client.detail().contains(QStringLiteral("更新服务端")));
+    }
+
     void conferenceSignalingIsBoundToRoomAndSender()
     {
         zjdesk::RoomServer server;

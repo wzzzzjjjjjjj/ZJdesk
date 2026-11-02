@@ -5,6 +5,7 @@
 
 namespace zjdesk
 {
+struct ShareProfile;
 struct CameraMode
 {
     QSize size;
@@ -17,4 +18,6 @@ struct CameraMode
 
 // Select one advertised mode: pixel count first, then frame rate.
 CameraMode maximumCameraMode(const QString &advertisedCaps);
+// Keep the native fractional rate when the selected profile reaches the device limit.
+QString cameraOutputCaps(const CameraMode &native, const ShareProfile &profile, const char *format);
 } // namespace zjdesk

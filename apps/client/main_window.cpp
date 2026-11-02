@@ -108,6 +108,8 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     auto *workspaceButton = new QPushButton(QStringLiteral("协作空间"));
     auto *diagnosticsButton = new QPushButton(QStringLiteral("运行诊断"));
     auto *meetingButton = new QPushButton(QStringLiteral("视频会议"));
+    workspaceButton->setAccessibleName(QStringLiteral("协作空间"));
+    meetingButton->setAccessibleName(QStringLiteral("视频会议"));
     int pageIndex = 0;
     for (auto *button : {workspaceButton, meetingButton, diagnosticsButton})
     {
@@ -280,20 +282,16 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     refreshDevicesButton_ = new QPushButton(QStringLiteral("刷新设备"));
     previewLayout->addWidget(refreshDevicesButton_);
     previewColumn->addLayout(previewLayout);
-    workspaceLayout->addWidget(previewCard);
     previewLabel_ = text(session_.previewDetail(), "muted");
     previewLabel_->setObjectName("previewStatus");
     previewLabel_->setWordWrap(true);
     previewColumn->addWidget(previewLabel_);
 
-    sessionLayout->addWidget(text(QStringLiteral("屏幕共享"), "sectionTitle"));
     shareButton_ = new QPushButton(QStringLiteral("共享主屏幕"));
     shareButton_->setObjectName("shareButton");
     shareButton_->setToolTip(QStringLiteral("将整个主屏幕及鼠标指针发送给房间中的另一位成员"));
-    sessionLayout->addWidget(shareButton_);
     shareLabel_ = text(session_.shareDetail(), "shareStatus");
     shareLabel_->setWordWrap(true);
-    sessionLayout->addWidget(shareLabel_);
     sessionLayout->addWidget(text(QStringLiteral("远程协助"), "sectionTitle"));
     controlButton_ = new QPushButton(QStringLiteral("请求控制 Linux"));
     controlButton_->setObjectName("controlButton");
@@ -310,7 +308,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     sessionLayout->addLayout(approvalLayout);
     sessionLayout->addWidget(controlLabel_);
     sessionLayout->addStretch();
-    auto *notice = text(QStringLiteral("远程控制需对方本地允许。\n摄像头预览仅在本机显示。"), "notice");
+    auto *notice = text(QStringLiteral("远程控制需对方本地允许。"), "notice");
     notice->setWordWrap(true);
     sessionLayout->addWidget(notice);
     pages->addWidget(workspace);
@@ -319,6 +317,38 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     auto *meetingLayout = new QVBoxLayout(meeting);
     meetingLayout->setContentsMargins(0, 0, 0, 0);
     meetingLayout->setSpacing(10);
+    auto *meetingConnection = card();
+    auto *meetingConnectionLayout = new QHBoxLayout(meetingConnection);
+    meetingConnectionLayout->setContentsMargins(20, 12, 20, 12);
+    meetingServerEdit_ = new QLineEdit(serverUrl);
+    meetingRoomEdit_ = new QLineEdit;
+    meetingNameEdit_ = new QLineEdit(name);
+    meetingServerEdit_->setObjectName("meetingServerAddress");
+    meetingRoomEdit_->setObjectName("meetingRoomId");
+    meetingNameEdit_->setObjectName("meetingDisplayName");
+    meetingRoomEdit_->setPlaceholderText(QStringLiteral("输入会议房间码"));
+    meetingRoomEdit_->setMaxLength(32);
+    meetingNameEdit_->setMaxLength(40);
+    for (const auto &field : QList<QPair<QString, QLineEdit *>>{
+        {QStringLiteral("服务地址"), meetingServerEdit_}, {QStringLiteral("会议房间码"), meetingRoomEdit_},
+        {QStringLiteral("你的昵称"), meetingNameEdit_}})
+    {
+        auto *column = new QVBoxLayout;
+        auto *label = text(field.first, "fieldLabel");
+        label->setBuddy(field.second);
+        field.second->setAccessibleName(field.first);
+        column->addWidget(label);
+        column->addWidget(field.second);
+        meetingConnectionLayout->addLayout(column, field.second == meetingServerEdit_ ? 3 : 2);
+    }
+    meetingJoinButton_ = new QPushButton(QStringLiteral("加入会议房间"));
+    meetingJoinButton_->setObjectName("meetingJoinButton");
+    meetingConnectionLayout->addWidget(meetingJoinButton_, 0, Qt::AlignBottom);
+    meetingLayout->addWidget(meetingConnection);
+    connect(serverEdit_, &QLineEdit::textChanged, meetingServerEdit_, &QLineEdit::setText);
+    connect(meetingServerEdit_, &QLineEdit::textChanged, serverEdit_, &QLineEdit::setText);
+    connect(nameEdit_, &QLineEdit::textChanged, meetingNameEdit_, &QLineEdit::setText);
+    connect(meetingNameEdit_, &QLineEdit::textChanged, nameEdit_, &QLineEdit::setText);
     auto *meetingInfo = new QWidget;
     auto *meetingInfoLayout = new QHBoxLayout(meetingInfo);
     meetingInfoLayout->setContentsMargins(0, 0, 0, 0);
@@ -352,20 +382,27 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         deviceRow->addLayout(deviceColumn, 1);
     }
     meetingLayout->addWidget(meetingDevices);
+    meetingLayout->addWidget(previewCard);
     auto *views = new QHBoxLayout;
     views->setSpacing(14);
     auto *localConference = new VideoSurface;
+    meetingLocalVideo_ = localConference;
     localConference->setObjectName("conferenceLocalVideo");
-    localConference->setMinimumHeight(140);
+    localConference->setMinimumSize(140, 140);
     localConference->setFrameCaption(QStringLiteral("本机摄像头 · 接听后发送"));
     localConference->setParticipant(QStringLiteral("你的画面"), QStringLiteral("接听后开启摄像头与麦克风"));
     auto *remoteConference = new VideoSurface;
     remoteConference->setObjectName("conferenceRemoteVideo");
-    remoteConference->setMinimumHeight(140);
+    remoteConference->setMinimumSize(140, 140);
     remoteConference->setFrameCaption(QStringLiteral("对方摄像头"));
     remoteConference->setParticipant(QStringLiteral("等待通话连接"), QStringLiteral("加入房间，邀请另一位成员开始视频会议"));
+    meetingShareVideo_ = new VideoSurface;
+    meetingShareVideo_->setObjectName("meetingShareVideo");
+    meetingShareVideo_->setMinimumSize(140, 140);
+    meetingShareVideo_->setParticipant(QStringLiteral("屏幕共享"), QStringLiteral("共享主屏幕后在此显示"));
     for (const auto &entry : {qMakePair(localConference, QStringLiteral("本机画面")),
-                             qMakePair(remoteConference, QStringLiteral("对方画面"))})
+                             qMakePair(remoteConference, QStringLiteral("对方画面")),
+                             qMakePair(meetingShareVideo_, QStringLiteral("屏幕共享"))})
     {
         auto *tile = new QWidget;
         auto *tileLayout = new QVBoxLayout(tile);
@@ -378,7 +415,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         tileTitle->addWidget(text(entry.second, "stageTitle"));
         tileLayout->addWidget(tileHeader);
         tileLayout->addWidget(entry.first, 1);
-        views->addWidget(tile, entry.first == localConference ? 1 : 2);
+        views->addWidget(tile, entry.first == meetingShareVideo_ ? 2 : 1);
     }
     meetingLayout->addLayout(views, 1);
     auto *controlsCard = card();
@@ -405,7 +442,9 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     for (auto *button : {call, accept, hangup}) meetingControls->addWidget(button);
     meetingControls->addStretch();
     for (auto *button : {muteMic, hideCamera, muteSpeaker}) meetingControls->addWidget(button);
+    meetingControls->addWidget(shareButton_);
     meetingLayout->addWidget(controlsCard);
+    meetingLayout->addWidget(shareLabel_);
     auto *meetingNotice = text(QStringLiteral("设备请在呼叫前选择。建议佩戴耳机，减少扬声器回声。"), "muted");
     meetingNotice->setWordWrap(true);
     meetingLayout->addWidget(meetingNotice);
@@ -432,13 +471,15 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         using CS = zjdesk::SessionCoordinator::ConferenceState;
         const auto state = session_.conferenceState();
         const bool mediaActive = state == CS::Connecting || state == CS::Running;
-        call->setEnabled(!session_.conferenceActive() && session_.mediaEnvironment().ready
+        call->setEnabled(session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting
+            && !session_.conferenceActive() && session_.mediaEnvironment().ready
             && session_.state() == zjdesk::SessionCoordinator::State::PeerAvailable);
         accept->setVisible(state == CS::Incoming);
         accept->setEnabled(session_.mediaEnvironment().ready);
         hangup->setEnabled(session_.conferenceActive());
         hangup->setText(state == CS::Incoming ? QStringLiteral("拒绝") : QStringLiteral("挂断"));
-        meetingStatus->setText(session_.conferenceDetail());
+        meetingStatus->setText((session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting
+            ? session_.detail() : QStringLiteral("尚未加入会议房间")) + QStringLiteral(" · ") + session_.conferenceDetail());
         meetingButton->setText(state == CS::Incoming ? QStringLiteral("视频会议 · 来电") : QStringLiteral("视频会议"));
         for (auto *button : {muteMic, hideCamera, muteSpeaker})
         {
@@ -537,6 +578,14 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         else
             session_.leave();
     });
+    connect(meetingJoinButton_, &QPushButton::clicked, this, [this] {
+        using State = zjdesk::SessionCoordinator::State;
+        if (session_.state() == State::Idle || session_.state() == State::Failed)
+            session_.join(QUrl(meetingServerEdit_->text().trimmed()), meetingRoomEdit_->text().trimmed(),
+                meetingNameEdit_->text().trimmed(), zjdesk::SessionCoordinator::RoomType::Meeting);
+        else
+            session_.leave();
+    });
     connect(nameEdit_, &QLineEdit::textChanged, findChild<QLabel *>("localName"), &QLabel::setText);
     connect(&session_, &zjdesk::SessionCoordinator::stateChanged, this, &MainWindow::refreshSession);
     connect(&session_, &zjdesk::SessionCoordinator::membersChanged, this, &MainWindow::refreshSession);
@@ -591,10 +640,13 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     connect(&session_, &zjdesk::SessionCoordinator::previewChanged, this, &MainWindow::refreshPreview);
     connect(&session_, &zjdesk::SessionCoordinator::audioChanged, this, &MainWindow::refreshPreview);
     connect(&session_, &zjdesk::SessionCoordinator::previewFrame, this, [this](const QImage &image) {
-        if (!session_.screenActive())
-            video_->setFrame(image);
+        using CS = zjdesk::SessionCoordinator::ConferenceState;
+        if (session_.conferenceState() != CS::Connecting && session_.conferenceState() != CS::Running)
+            meetingLocalVideo_->setFrame(image);
     });
-    connect(&session_, &zjdesk::SessionCoordinator::shareFrame, video_, &VideoSurface::setFrame);
+    connect(&session_, &zjdesk::SessionCoordinator::shareFrame, this, [this](const QImage &image) {
+        (session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting ? meetingShareVideo_ : video_)->setFrame(image);
+    });
     connect(&session_, &zjdesk::SessionCoordinator::remoteCursorChanged, video_, &VideoSurface::setRemoteCursor);
     connect(&session_, &zjdesk::SessionCoordinator::shareChanged, this, &MainWindow::refreshShare);
     connect(&session_, &zjdesk::SessionCoordinator::remoteChanged, this, &MainWindow::refreshControl);
@@ -625,12 +677,14 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     connect(refreshDevicesButton_, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::requestCameraPermission);
     auto *statsTimer = new QTimer(this);
     connect(statsTimer, &QTimer::timeout, this, [this] {
-        session_.reportSharePresentation(video_->presentedFrames(),
-            video_->isVisible() && !isMinimized() && isActiveWindow(), video_->takePresentationGapMaxMs(),
-            video_->presentationStatistics());
+        auto *surface = session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting ? meetingShareVideo_ : video_;
+        session_.reportSharePresentation(surface->presentedFrames(),
+            surface->isVisible() && !isMinimized() && isActiveWindow(), surface->takePresentationGapMaxMs(),
+            surface->presentationStatistics());
         const auto stats = session_.previewStats();
-        previewStatsLabel_->setText(QStringLiteral("采集 %1 帧 · 丢弃 %2 帧 · 待显示 %3 帧")
-            .arg(stats.capturedFrames).arg(stats.droppedFrames).arg(stats.pendingFrames));
+        previewStatsLabel_->setText(QStringLiteral("采集 %1 / 交接 %2 fps（目标 %3）· 丢弃 %4 帧 · 待显示 %5 帧")
+            .arg(stats.captureFps, 0, 'f', 1).arg(stats.deliveryFps, 0, 'f', 1)
+            .arg(stats.targetFps, 0, 'f', 1).arg(stats.droppedFrames).arg(stats.pendingFrames));
     });
     statsTimer->start(1000);
     session_.events()->append("application", QStringLiteral("工作台已启动"));
@@ -696,8 +750,8 @@ void MainWindow::refreshPreview()
     sourceCombo_->setEnabled(ready && idle);
     refreshDevicesButton_->setEnabled(ready && idle);
     previewLabel_->setText(ready ? session_.previewDetail() : session_.mediaEnvironment().description);
-    if (idle && !session_.screenActive())
-        video_->setFrame({});
+    if (idle && !session_.conferenceActive())
+        meetingLocalVideo_->setFrame({});
     const auto audio = session_.audioState();
     audioButton_->setEnabled(ready && audio != Preview::Stopping && !session_.conferenceDevicesBusy());
     audioButton_->setText(audio == Preview::Stopped || audio == Preview::Failed
@@ -710,7 +764,8 @@ void MainWindow::refreshPreview()
 void MainWindow::refreshShare()
 {
     using Preview = zjdesk::SessionCoordinator::PreviewState;
-    shareButton_->setEnabled(session_.mediaEnvironment().ready
+    shareButton_->setEnabled(session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting
+        && session_.mediaEnvironment().ready
         && session_.state() == zjdesk::SessionCoordinator::State::PeerAvailable
         && !session_.receivingScreen() && session_.shareState() != Preview::Stopping);
     shareButton_->setText(session_.shareState() == Preview::Stopping ? QStringLiteral("正在停止")
@@ -722,7 +777,7 @@ void MainWindow::refreshShare()
         : session_.detail());
     video_->setFrameCaption(expandButton_->isChecked() ? QString() : session_.screenActive()
         ? session_.receivingScreen() ? QStringLiteral("对方的屏幕") : QStringLiteral("主屏幕 · 正在共享给对方")
-        : QStringLiteral("本地预览 · 尚未发送给对方"));
+        : QStringLiteral("等待远程控制画面"));
     refreshControl();
 }
 
@@ -784,11 +839,20 @@ void MainWindow::refreshSession()
     serverEdit_->setEnabled(idle);
     roomEdit_->setEnabled(idle);
     nameEdit_->setEnabled(idle);
-    joinButton_->setText(idle ? QStringLiteral("加入房间")
+    meetingServerEdit_->setEnabled(idle);
+    meetingRoomEdit_->setEnabled(idle);
+    meetingNameEdit_->setEnabled(idle);
+    const bool meeting = session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting;
+    joinButton_->setEnabled(idle || !meeting);
+    meetingJoinButton_->setEnabled(idle || meeting);
+    joinButton_->setText(idle || meeting ? QStringLiteral("加入房间")
         : state == State::Connecting || state == State::Joining ? QStringLiteral("取消连接") : QStringLiteral("离开房间"));
+    meetingJoinButton_->setText(idle || !meeting ? QStringLiteral("加入会议房间")
+        : state == State::Connecting || state == State::Joining ? QStringLiteral("取消连接") : QStringLiteral("离开会议房间"));
     const QString labels[] = {QStringLiteral("未加入房间"), QStringLiteral("正在连接"), QStringLiteral("正在入会"),
         QStringLiteral("等待成员"), QStringLiteral("双方已入会"), QStringLiteral("连接失败")};
-    const auto label = labels[static_cast<int>(state)];
+    const auto label = (idle ? QString() : meeting ? QStringLiteral("会议 · ") : QStringLiteral("协作 · "))
+        + labels[static_cast<int>(state)];
     if (statusLabel_->text() != label)
     {
         statusLabel_->setText(label);
@@ -804,7 +868,7 @@ void MainWindow::refreshSession()
     peerLabel_->setText(session_.peerName().isEmpty() ? QStringLiteral("尚未加入") : session_.peerName());
     refreshShare();
     if (state == State::PeerAvailable)
-        video_->setParticipant(session_.peerName(), QStringLiteral("对方已就绪，可共享屏幕或请求远程控制"));
+        video_->setParticipant(session_.peerName(), QStringLiteral("对方已就绪，可请求远程控制"));
     else
         video_->setParticipant(QStringLiteral("等待另一位成员"),
                               state == State::Failed ? session_.detail() : QStringLiteral("双方加入同一房间后，这里将显示远端画面"));

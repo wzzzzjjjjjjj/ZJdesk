@@ -1,8 +1,12 @@
 #include "conference_media.h"
+#include "camera_mode.h"
+#include "share_quality.h"
 #include <QElapsedTimer>
 #include <QMutexLocker>
+#include <QTimer>
 #include <memory>
 #include <cmath>
+#include <atomic>
 #ifdef ZJDESK_HAS_GSTREAMER
 #define GST_USE_UNSTABLE_API
 #include <gst/app/gstappsink.h>
@@ -56,12 +60,12 @@ public:
         audioBuffers_ = 0;
         const char *description =
             "webrtcbin name=rtc bundle-policy=max-bundle latency=100 "
-            "videoconvert name=videoentry ! videoscale ! videorate ! "
-            "video/x-raw,format=I420,width=640,height=480,framerate=30/1 ! videobalance name=cameragate ! tee name=v "
+            "videorate name=videoentry drop-only=true ! videoscale ! videoconvert ! "
+            "capsfilter name=cameraprofile ! videobalance name=cameragate ! tee name=v "
             "v. ! queue max-size-buffers=1 leaky=downstream ! videoconvert ! video/x-raw,format=RGB ! "
             "appsink name=local max-buffers=1 drop=true sync=false async=false wait-on-eos=false "
             "v. ! queue max-size-buffers=2 leaky=downstream ! videoconvert ! "
-            "vp8enc deadline=1 cpu-used=8 threads=2 target-bitrate=800000 keyframe-max-dist=60 ! "
+            "vp8enc name=cameraencoder deadline=1 cpu-used=8 keyframe-max-dist=60 ! "
             "rtpvp8pay pt=96 ! application/x-rtp,media=video,encoding-name=VP8,payload=96,clock-rate=90000 ! rtc. "
             "audioconvert name=audioentry ! audioresample ! audio/x-raw,rate=48000,channels=1 ! "
             "volume name=microphonegate ! opusenc bitrate=32000 ! rtpopuspay pt=97 ! "
@@ -86,7 +90,13 @@ public:
         audio_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "audioframes"));
         bus_ = gst_element_get_bus(pipeline_);
         QString deviceError;
-        auto *camera = device(devices.camera, "Video/Source", "videotestsrc", deviceError);
+        auto *camera = device(devices.camera, "Video/Source", "videotestsrc", deviceError, &nativeMode_);
+        if (camera && nativeMode_.size.isEmpty())
+        {
+            gst_object_unref(camera);
+            camera = nullptr;
+            deviceError = QStringLiteral("摄像头未公布可用的采集模式");
+        }
         auto *microphone = device(devices.microphone, "Audio/Source", "audiotestsrc", deviceError);
         auto *speaker = device(devices.speaker, "Audio/Sink", "fakesink", deviceError);
         if (!camera || !microphone || !speaker)
@@ -96,6 +106,21 @@ public:
             if (speaker) gst_object_unref(speaker);
             return fail(deviceError);
         }
+        quality_ = std::make_unique<ShareQuality>(nativeMode_.size,
+            qRound(double(nativeMode_.fpsNumerator) / nativeMode_.fpsDenominator), 15);
+        applyCameraQuality();
+        auto *encoder = gst_bin_get_by_name(GST_BIN(pipeline_), "cameraencoder");
+        g_object_set(encoder, "threads", qBound(1, QThread::idealThreadCount() - 1, 8), nullptr);
+        auto *encoded = gst_element_get_static_pad(encoder, "src");
+        encodedFrames_ = 0;
+        gst_pad_add_probe(encoded, GST_PAD_PROBE_TYPE_BUFFER,
+            [](GstPad *, GstPadProbeInfo *, gpointer data) {
+                ++*static_cast<std::atomic<quint64> *>(data);
+                return GST_PAD_PROBE_OK;
+            }, &encodedFrames_, nullptr);
+        gst_object_unref(encoded);
+        gst_object_unref(encoder);
+        performance_.invalidate();
         // The output must not wait for remote preroll before local live capture can start.
         if (g_object_class_find_property(G_OBJECT_GET_CLASS(speaker), "async"))
             g_object_set(speaker, "async", FALSE, nullptr);
@@ -103,15 +128,28 @@ public:
         auto *videoEntry = gst_bin_get_by_name(GST_BIN(pipeline_), "videoentry");
         auto *audioEntry = gst_bin_get_by_name(GST_BIN(pipeline_), "audioentry");
         auto *outputEntry = gst_bin_get_by_name(GST_BIN(pipeline_), "outputentry");
-        // Decode device-native raw/JPEG formats before the fixed conference encoder.
+        // Decode the highest native camera mode before adapting the encoder output.
         auto *decode = gst_element_factory_make("decodebin", nullptr);
-        bool linked = decode && gst_bin_add(GST_BIN(pipeline_), decode);
+        auto *captureMode = gst_element_factory_make("capsfilter", nullptr);
+        bool linked = decode && captureMode;
+        if (linked)
+        {
+            auto *caps = gst_caps_from_string(nativeMode_.caps.toUtf8().constData());
+            g_object_set(captureMode, "caps", caps, nullptr);
+            gst_caps_unref(caps);
+            gst_bin_add_many(GST_BIN(pipeline_), decode, captureMode, nullptr);
+        }
+        else
+        {
+            if (decode) gst_object_unref(decode);
+            if (captureMode) gst_object_unref(captureMode);
+        }
         if (linked)
         {
             auto *pad = gst_element_get_static_pad(videoEntry, "sink");
             g_signal_connect_data(decode, "pad-added", G_CALLBACK(decodedCamera), pad,
                 [](gpointer value, GClosure *) { gst_object_unref(value); }, GConnectFlags(0));
-            linked = gst_element_link(camera, decode);
+            linked = gst_element_link_many(camera, captureMode, decode, nullptr);
         }
         linked = linked && gst_element_link(microphone, audioEntry) && gst_element_link(outputEntry, speaker);
         gst_object_unref(videoEntry);
@@ -139,10 +177,10 @@ public:
         if (!timer_)
         {
             timer_ = new QTimer(this);
-            timer_->setInterval(10);
+            timer_->setTimerType(Qt::PreciseTimer);
             connect(timer_, &QTimer::timeout, this, &ConferenceWorker::poll);
         }
-        timer_->start();
+        timer_->start(qBound(1, int(500.0 / quality_->profile().fps), 10));
 #else
         Q_UNUSED(offerer)
         Q_UNUSED(devices)
@@ -208,6 +246,8 @@ public:
         for (auto *object : {GST_OBJECT(rtc_), GST_OBJECT(local_), GST_OBJECT(remote_), GST_OBJECT(audio_), GST_OBJECT(bus_)})
             if (object) gst_object_unref(object);
         rtc_ = nullptr; local_ = remote_ = audio_ = nullptr; bus_ = nullptr;
+        quality_.reset();
+        remoteFrameRate_ = 30;
         pendingIce_.clear();
         descriptionPending_ = false;
 #endif
@@ -216,6 +256,7 @@ signals:
     void negotiationReady(quint64 epoch, const QString &type, const QJsonObject &payload);
     void statusChanged(quint64 epoch, const QString &status, const QString &detail);
     void receivedAudio(quint64 epoch, quint64 buffers, double peak);
+    void framesAvailable(quint64 epoch);
 private:
     ConferenceMailbox *mailbox_;
     quint64 epoch_ = 0;
@@ -226,6 +267,12 @@ private:
     GstBus *bus_ = nullptr;
     QTimer *timer_ = nullptr;
     QElapsedTimer started_;
+    QElapsedTimer performance_;
+    std::unique_ptr<ShareQuality> quality_;
+    CameraMode nativeMode_;
+    std::atomic<quint64> encodedFrames_{0};
+    quint64 previousEncoded_ = 0, previousDelivered_ = 0;
+    double remoteFrameRate_ = 30;
     bool offerer_ = false, offered_ = false, remoteReady_ = false, running_ = false, descriptionPending_ = false, sawRemote_ = false;
     QList<QJsonObject> pendingIce_;
     quint64 audioBuffers_ = 0;
@@ -245,7 +292,8 @@ private:
             function(worker);
         }, Qt::QueuedConnection);
     }
-    static GstElement *device(const QString &name, const char *kind, const char *test, QString &error)
+    static GstElement *device(const QString &name, const char *kind, const char *test, QString &error,
+        CameraMode *mode = nullptr)
     {
         if (name == "test")
         {
@@ -253,6 +301,7 @@ private:
             if (element && QByteArray(test) != "fakesink") g_object_set(element, "is-live", TRUE, nullptr);
             if (element && QByteArray(test) == "fakesink") g_object_set(element, "async", FALSE, nullptr);
             if (!element) error = QStringLiteral("会议测试插件不可用");
+            if (mode) *mode = maximumCameraMode("video/x-raw,width=640,height=480,framerate=30/1");
             return element;
         }
         auto *monitor = gst_device_monitor_new();
@@ -273,7 +322,17 @@ private:
             if (factory && QByteArray(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory))) == "ksvideosrc")
                 gst_object_unref(element);
             else
+            {
                 result = element;
+                if (mode)
+                {
+                    auto *caps = gst_device_get_caps(d);
+                    auto *text = gst_caps_to_string(caps);
+                    *mode = maximumCameraMode(QString::fromUtf8(text));
+                    g_free(text);
+                    gst_caps_unref(caps);
+                }
+            }
         }
         g_list_free_full(devices, gst_object_unref);
         gst_device_monitor_stop(monitor); gst_object_unref(monitor);
@@ -358,7 +417,52 @@ private:
         });
     }
     void fail(const QString &detail) { shutdown(); emit statusChanged(epoch_, "failed", detail); }
-    static QImage pull(GstAppSink *sink)
+    void applyCameraQuality()
+    {
+        const auto profile = quality_->profile();
+        auto *filter = gst_bin_get_by_name(GST_BIN(pipeline_), "cameraprofile");
+        auto *caps = gst_caps_from_string(cameraOutputCaps(nativeMode_, profile, "I420").toUtf8().constData());
+        g_object_set(filter, "caps", caps, nullptr);
+        gst_caps_unref(caps);
+        gst_object_unref(filter);
+        auto *encoder = gst_bin_get_by_name(GST_BIN(pipeline_), "cameraencoder");
+        g_object_set(encoder, "target-bitrate", profile.bitrate(), nullptr);
+        gst_object_unref(encoder);
+        if (running_)
+            emit statusChanged(epoch_, "running", cameraDetail());
+    }
+    QString cameraDetail() const
+    {
+        const auto profile = quality_->profile();
+        return QStringLiteral("双向视频与语音已连接 · 本机摄像头（清晰度优先·自动）%1 × %2 · 目标 %3 fps")
+            .arg(profile.size.width()).arg(profile.size.height())
+            .arg(qMin(double(profile.fps), double(nativeMode_.fpsNumerator) / nativeMode_.fpsDenominator), 0, 'f', 2);
+    }
+    void measureCameraPerformance()
+    {
+        if (!running_) return;
+        quint64 delivered;
+        { QMutexLocker lock(&mailbox_->mutex); delivered = mailbox_->localDelivered; }
+        const quint64 encoded = encodedFrames_.load();
+        if (!performance_.isValid())
+        {
+            performance_.start();
+            previousEncoded_ = encoded; previousDelivered_ = delivered;
+            return;
+        }
+        const auto elapsed = performance_.elapsed();
+        if (elapsed < 1000) return;
+        const double encodedFps = (encoded - previousEncoded_) * 1000.0 / elapsed;
+        const double deliveredFps = (delivered - previousDelivered_) * 1000.0 / elapsed;
+        previousEncoded_ = encoded; previousDelivered_ = delivered;
+        performance_.restart();
+        if (quality_->observe(encodedFps, deliveredFps))
+        {
+            applyCameraQuality();
+            performance_.invalidate();
+        }
+    }
+    static QImage pull(GstAppSink *sink, double *frameRate)
     {
         QImage image;
         if (auto *sample = gst_app_sink_try_pull_sample(sink, 0))
@@ -370,6 +474,7 @@ private:
             {
                 image = QImage(static_cast<const uchar *>(GST_VIDEO_FRAME_PLANE_DATA(&frame, 0)),
                     info.width, info.height, GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0), QImage::Format_RGB888).copy();
+                if (info.fps_d > 0 && info.fps_n > 0) *frameRate = double(info.fps_n) / info.fps_d;
                 gst_video_frame_unmap(&frame);
             }
             gst_sample_unref(sample);
@@ -392,14 +497,21 @@ private:
             gst_message_unref(message);
             if (!detail.isEmpty()) return fail(detail);
         }
-        auto local = pull(local_), remote = pull(remote_);
+        double localFrameRate = quality_->profile().fps;
+        auto local = pull(local_, &localFrameRate), remote = pull(remote_, &remoteFrameRate_);
+        const double cadence = qMax(localFrameRate, remoteFrameRate_);
+        timer_->setInterval(qBound(1, int(500 / qMax(1.0, cadence)), 10));
         if (!remote.isNull()) sawRemote_ = true;
+        bool notify = false;
         { QMutexLocker lock(&mailbox_->mutex);
           if (mailbox_->epoch == epoch_)
           {
+              if ((!local.isNull() || !remote.isNull()) && !mailbox_->framePending)
+              { mailbox_->framePending = true; notify = true; }
               if (!local.isNull()) mailbox_->local = std::move(local);
               if (!remote.isNull()) mailbox_->remote = std::move(remote);
           } }
+        if (notify) emit framesAvailable(epoch_);
         double peak = 0;
         bool audioReceived = false;
         while (auto *sample = gst_app_sink_try_pull_sample(audio_, 0))
@@ -421,7 +533,8 @@ private:
             || state == GST_WEBRTC_PEER_CONNECTION_STATE_DISCONNECTED)
             return fail(QStringLiteral("会议媒体连接已断开"));
         if (!running_ && state == GST_WEBRTC_PEER_CONNECTION_STATE_CONNECTED && audioBuffers_ > 0 && sawRemote_)
-        { running_ = true; emit statusChanged(epoch_, "running", QStringLiteral("双向视频与语音已连接")); }
+        { running_ = true; emit statusChanged(epoch_, "running", cameraDetail()); }
+        measureCameraPerformance();
         if (!running_ && started_.elapsed() > 45000) fail(QStringLiteral("会议媒体连接超时"));
     }
 #endif
@@ -435,31 +548,33 @@ ConferenceMedia::ConferenceMedia(QObject *parent) : QObject(parent), worker_(new
     connect(worker_, &ConferenceWorker::statusChanged, this, &ConferenceMedia::statusChanged);
     connect(worker_, &ConferenceWorker::receivedAudio, this, &ConferenceMedia::receivedAudio);
     thread_.start();
-    frames_.setInterval(33);
-    connect(&frames_, &QTimer::timeout, this, [this] {
-        QImage local, remote; quint64 epoch;
-        { QMutexLocker lock(&mailbox_.mutex); epoch = mailbox_.epoch;
-          local.swap(mailbox_.local); remote.swap(mailbox_.remote); }
+    connect(worker_, &ConferenceWorker::framesAvailable, this, [this](quint64 epoch) {
+        QImage local, remote;
+        { QMutexLocker lock(&mailbox_.mutex);
+          if (mailbox_.epoch != epoch) return;
+          local.swap(mailbox_.local); remote.swap(mailbox_.remote);
+          mailbox_.framePending = false;
+          if (!local.isNull()) ++mailbox_.localDelivered;
+        }
         if (!local.isNull()) emit localFrame(epoch, local);
         if (!remote.isNull()) emit remoteFrame(epoch, remote);
     });
 }
 ConferenceMedia::~ConferenceMedia()
 {
-    frames_.stop();
     QMetaObject::invokeMethod(worker_, [this] { worker_->shutdown(); }, Qt::BlockingQueuedConnection);
     thread_.quit(); thread_.wait();
 }
 void ConferenceMedia::start(bool offerer, const ConferenceDevices &devices, quint64 epoch)
 {
-    { QMutexLocker lock(&mailbox_.mutex); mailbox_.epoch = epoch; mailbox_.local = {}; mailbox_.remote = {}; }
-    frames_.start();
+    { QMutexLocker lock(&mailbox_.mutex); mailbox_.epoch = epoch; mailbox_.local = {}; mailbox_.remote = {};
+      mailbox_.framePending = false; mailbox_.localDelivered = 0; }
     QMetaObject::invokeMethod(worker_, [=] { worker_->start(offerer, devices, epoch); }, Qt::QueuedConnection);
 }
 void ConferenceMedia::stop(quint64 epoch)
 {
-    frames_.stop();
-    { QMutexLocker lock(&mailbox_.mutex); mailbox_.epoch = epoch; mailbox_.local = {}; mailbox_.remote = {}; }
+    { QMutexLocker lock(&mailbox_.mutex); mailbox_.epoch = epoch; mailbox_.local = {}; mailbox_.remote = {};
+      mailbox_.framePending = false; }
     QMetaObject::invokeMethod(worker_, [=] { worker_->stop(epoch); }, Qt::QueuedConnection);
 }
 void ConferenceMedia::negotiate(const QString &type, const QJsonObject &payload, quint64 epoch)
