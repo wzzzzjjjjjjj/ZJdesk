@@ -1,5 +1,7 @@
 # 架构与扩展约定
 
+协作和会议使用同一个 `SessionCoordinator`，连接或入房期间禁止同时加入另一房间。信令 `join` 携带 `roomType`，服务端按房间类型和原始房间码联合隔离；未携带类型的旧客户端按协作处理。会议客户端必须在 `joined` 响应中收到 `meeting` 类型确认，避免旧服务忽略类型后混入协作房间。会议禁用远控能力和请求；协作远控仍在本地授权后自动传输桌面。
+
 会议使用独立 `ConferenceMedia` 工作线程与 WebRTC 管线，通过 `conference` 中继消息和
 `sessionId` 区分会话，支持 `start`、`accept`、`stop`、`offer`、`answer` 和 `ice`。
 服务校验消息、绑定实际发送者并检查转发后的消息长度；使用会议需要同步更新服务端。

@@ -146,6 +146,37 @@ class WindowTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void roomEntriesAreMutuallyExclusive()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const auto url = QString("ws://127.0.0.1:%1").arg(server.port());
+        MainWindow window(url, "room", "Tester");
+        auto *assistance = window.findChild<QPushButton *>("primaryButton");
+        auto *meeting = window.findChild<QPushButton *>("meetingJoinButton");
+        auto *meetingRoom = window.findChild<QLineEdit *>("meetingRoomId");
+        QVERIFY(assistance && meeting && meetingRoom);
+        meeting->click();
+        QCOMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Failed);
+        QCOMPARE(window.session_.roomType(), zjdesk::SessionCoordinator::RoomType::Meeting);
+        auto *meetingStatus = window.findChild<QLabel *>("conferenceStatus");
+        QVERIFY(meetingStatus);
+        QVERIFY(meetingStatus->text().contains(window.session_.detail()));
+        meetingRoom->setText("room");
+        assistance->click();
+        QVERIFY(!meeting->isEnabled());
+        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        assistance->click();
+        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
+        QVERIFY(meeting->isEnabled());
+        meeting->click();
+        QVERIFY(!assistance->isEnabled());
+        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        meeting->click();
+        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
+        QVERIFY(assistance->isEnabled());
+    }
+
     void enabledDesktopCameraSettingsDoNotPromptAgain()
     {
 #ifdef Q_OS_WIN
@@ -331,7 +362,7 @@ private slots:
         auto *allow = window.findChild<QPushButton *>("allowControlButton");
         auto *stop = window.findChild<QPushButton *>("stopControlButton");
         auto *status = window.findChild<QLabel *>("controlStatus");
-        QTRY_VERIFY_WITH_TIMEOUT(share->isEnabled(), 120000);
+        QTRY_COMPARE_WITH_TIMEOUT(window.session_.state(), zjdesk::SessionCoordinator::State::PeerAvailable, 120000);
         QWidget target(nullptr, Qt::Tool | Qt::WindowStaysOnTopHint);
         target.setWindowTitle("ZJdesk remote input validation");
         target.setGeometry(50, 50, 600, 300);
@@ -1584,10 +1615,10 @@ private slots:
         aliceRoom->setText("room_123");
         bobRoom->setText("room_123");
         QTest::mouseClick(aliceJoin, Qt::LeftButton);
-        QTRY_COMPARE(aliceStatus->text(), QStringLiteral("等待成员"));
+        QTRY_COMPARE(aliceStatus->text(), QStringLiteral("协作 · 等待成员"));
         QTest::mouseClick(bobJoin, Qt::LeftButton);
-        QTRY_COMPARE(aliceStatus->text(), QStringLiteral("双方已入会"));
-        QTRY_COMPARE(bobStatus->text(), QStringLiteral("双方已入会"));
+        QTRY_COMPARE(aliceStatus->text(), QStringLiteral("协作 · 双方已入会"));
+        QTRY_COMPARE(bobStatus->text(), QStringLiteral("协作 · 双方已入会"));
         QCOMPARE(members->text(), QStringLiteral("2 / 2 人"));
         QVERIFY(QDir().mkpath("output"));
         alice.raise();
@@ -1600,7 +1631,7 @@ private slots:
         QTest::qWait(100);
         QVERIFY(alice.screen()->grabWindow(alice.winId()).save("output/ui-diagnostics.png"));
         QTest::mouseClick(bobJoin, Qt::LeftButton);
-        QTRY_COMPARE(aliceStatus->text(), QStringLiteral("等待成员"));
+        QTRY_COMPARE(aliceStatus->text(), QStringLiteral("协作 · 等待成员"));
         QTest::mouseClick(aliceJoin, Qt::LeftButton);
         QTRY_COMPARE(server.roomCount(), 0);
     }
@@ -1637,11 +1668,7 @@ private slots:
         QTRY_VERIFY(surface->isValid());
         QVERIFY(surface->width() >= 450);
         QVERIFY(surface->height() >= 300);
-        for (auto *widget : {static_cast<QWidget *>(surface),
-                 window.findChild<QWidget *>("previewSource"),
-                 window.findChild<QWidget *>("previewButton"),
-                 window.findChild<QWidget *>("audioTestButton"),
-                 window.findChild<QWidget *>("primaryButton")})
+        for (auto *widget : {static_cast<QWidget *>(surface), window.findChild<QWidget *>("primaryButton")})
         {
             QVERIFY(widget);
             const QRect bounds(widget->mapTo(&window, QPoint()), widget->size());
@@ -1664,7 +1691,7 @@ private slots:
         QVERIFY(window.grab().save("output/ui-connection-error.png"));
         window.findChild<QLineEdit *>("serverAddress")->setText(url);
         QTest::mouseClick(window.findChild<QPushButton *>("primaryButton"), Qt::LeftButton);
-        QTRY_COMPARE(window.findChild<QLabel *>("statusBadge")->text(), QStringLiteral("等待成员"));
+        QTRY_COMPARE(window.findChild<QLabel *>("statusBadge")->text(), QStringLiteral("协作 · 等待成员"));
         zjdesk::SessionCoordinator peer;
         QVERIFY(peer.join(QUrl(url), "demo", longName));
         QTRY_COMPARE(window.session_.memberCount(), 2);
@@ -1699,7 +1726,7 @@ private slots:
         QCOMPARE(window.size(), QSize(1040, 720));
         for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker",
                  "conferenceCall", "conferenceHangup", "conferenceMuteMicrophone", "conferenceHideCamera",
-                 "conferenceMuteSpeaker", "conferenceLocalVideo", "conferenceRemoteVideo"})
+                 "conferenceMuteSpeaker", "conferenceLocalVideo", "conferenceRemoteVideo", "meetingShareVideo"})
         {
             auto *widget = window.findChild<QWidget *>(name);
             QVERIFY(widget && widget->isVisible());
@@ -1753,6 +1780,14 @@ private slots:
             QVERIFY(QTest::qWaitForWindowExposed(&bob));
         }
         QTRY_VERIFY(!aliceDevices.isEmpty() && !bobDevices.isEmpty());
+        alice.findChildren<QPushButton *>("navButton").at(1)->click();
+        auto *preview = alice.findChild<QPushButton *>("previewButton");
+        auto *localPreview = alice.findChild<VideoSurface *>("conferenceLocalVideo");
+        preview->click();
+        QTRY_VERIFY_WITH_TIMEOUT(localPreview->hasFrame(), 10000);
+        preview->click();
+        QTRY_COMPARE(alice.session_.previewState(), zjdesk::SessionCoordinator::PreviewState::Stopped);
+        QVERIFY(!localPreview->hasFrame());
         for (auto *window : {&alice, &bob})
         {
             for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
@@ -1762,14 +1797,22 @@ private slots:
                 combo->addItem("Test device", "test");
                 combo->setCurrentIndex(combo->count() - 1);
             }
-            window->findChild<QPushButton *>("primaryButton")->click();
+            window->findChild<QLineEdit *>("meetingRoomId")->setText("conference-ui");
+            window->findChild<QPushButton *>("meetingJoinButton")->click();
         }
         QTRY_COMPARE(alice.session_.memberCount(), 2);
         alice.findChildren<QPushButton *>("navButton").at(1)->click();
         auto *call = alice.findChild<QPushButton *>("conferenceCall");
         auto *accept = bob.findChild<QPushButton *>("conferenceAccept");
         QVERIFY(call->isEnabled());
+        preview->click();
+        QTRY_VERIFY_WITH_TIMEOUT(localPreview->hasFrame(), 10000);
         call->click();
+        QTRY_COMPARE(alice.session_.conferenceState(), CS::Calling);
+        const auto duringCall = localPreview->grabFramebuffer();
+        QTest::qWait(300);
+        QVERIFY(!duringCall.isNull());
+        QVERIFY(duringCall != localPreview->grabFramebuffer());
         QTRY_COMPARE(bob.findChild<QLabel *>("pageTitle")->text(), QStringLiteral("视频会议"));
         QVERIFY(accept->isVisible());
         QVERIFY(!call->isEnabled());
@@ -1788,6 +1831,14 @@ private slots:
             QVERIFY(!window->findChild<QComboBox *>("conferenceCamera")->isEnabled());
         }
         auto *hide = alice.findChild<QPushButton *>("conferenceHideCamera");
+        QVERIFY(alice.findChild<QPushButton *>("shareButton")->isEnabled());
+        QVERIFY(alice.session_.startScreenShare("test", 15));
+        QTRY_VERIFY_WITH_TIMEOUT(alice.findChild<VideoSurface *>("meetingShareVideo")->hasFrame(), 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(bob.findChild<VideoSurface *>("meetingShareVideo")->hasFrame(), 15000);
+        QVERIFY(!bob.findChild<QPushButton *>("shareButton")->isEnabled());
+        alice.session_.stopScreenShare();
+        QTRY_VERIFY(!bob.findChild<VideoSurface *>("meetingShareVideo")->hasFrame());
+        QCOMPARE(alice.session_.conferenceState(), CS::Running);
         QVERIFY(hide->isEnabled());
         hide->click();
         QVERIFY(hide->isChecked());
@@ -1806,8 +1857,9 @@ private slots:
         MainWindow window("ws://127.0.0.1:8765", "demo", "Tester");
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.findChildren<QPushButton *>("navButton").at(1)->click();
         auto *button = window.findChild<QPushButton *>("previewButton");
-        auto *surface = dynamic_cast<VideoSurface *>(window.findChild<QOpenGLWidget *>());
+        auto *surface = window.findChild<VideoSurface *>("conferenceLocalVideo");
         QVERIFY(button && surface);
         if (!button->isEnabled())
             QSKIP("GStreamer is not enabled in this build");
@@ -1843,13 +1895,17 @@ private slots:
         auto *aliceShare = alice.findChild<QPushButton *>("shareButton");
         auto *bobShare = bob.findChild<QPushButton *>("shareButton");
         auto *bobStatus = bob.findChild<QLabel *>("shareStatus");
-        auto *surface = dynamic_cast<VideoSurface *>(bob.findChild<QOpenGLWidget *>());
+        auto *surface = bob.findChild<VideoSurface *>("meetingShareVideo");
         QVERIFY(aliceShare && bobShare && bobStatus && surface);
         if (!alice.findChild<QPushButton *>("previewButton")->isEnabled())
             QSKIP("GStreamer is not enabled in this build");
         QVERIFY(!aliceShare->isEnabled());
-        alice.findChild<QPushButton *>("primaryButton")->click();
-        bob.findChild<QPushButton *>("primaryButton")->click();
+        for (auto *window : {&alice, &bob})
+        {
+            window->findChildren<QPushButton *>("navButton").at(1)->click();
+            window->findChild<QLineEdit *>("meetingRoomId")->setText("desktop");
+            window->findChild<QPushButton *>("meetingJoinButton")->click();
+        }
         QTRY_VERIFY(aliceShare->isEnabled());
         // A known visible desktop marker proves the peer receives captured pixels.
         QWidget marker(nullptr, Qt::Tool | Qt::WindowStaysOnTopHint);
@@ -1895,9 +1951,9 @@ private slots:
         QVERIFY(!surface->hasFrame());
         QTRY_VERIFY(bobShare->isEnabled());
         bobShare->click();
-        auto *aliceSurface = dynamic_cast<VideoSurface *>(alice.findChild<QOpenGLWidget *>());
+        auto *aliceSurface = alice.findChild<VideoSurface *>("meetingShareVideo");
         QTRY_VERIFY_WITH_TIMEOUT(aliceSurface->hasFrame(), 20000);
-        bob.findChild<QPushButton *>("primaryButton")->click();
+        bob.findChild<QPushButton *>("meetingJoinButton")->click();
         QTRY_VERIFY(!aliceSurface->hasFrame());
         QVERIFY(!aliceShare->isEnabled());
     }

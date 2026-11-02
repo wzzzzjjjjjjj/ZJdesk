@@ -27,8 +27,8 @@ private slots:
         QSignalSpy bf(&bob, &zjdesk::SessionCoordinator::conferenceRemoteFrame);
         QSignalSpy aa(&alice, &zjdesk::SessionCoordinator::conferenceAudioReceived);
         QSignalSpy ba(&bob, &zjdesk::SessionCoordinator::conferenceAudioReceived);
-        QVERIFY(alice.join(url, "conference-media", "Alice"));
-        QVERIFY(bob.join(url, "conference-media", "Bob"));
+        QVERIFY(alice.join(url, "conference-media", "Alice", zjdesk::SessionCoordinator::RoomType::Meeting));
+        QVERIFY(bob.join(url, "conference-media", "Bob", zjdesk::SessionCoordinator::RoomType::Meeting));
         QTRY_COMPARE(alice.memberCount(), 2);
         QTRY_COMPARE(bob.memberCount(), 2);
         QVERIFY(alice.startPreview("test"));
@@ -91,8 +91,8 @@ private slots:
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
         const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
         zjdesk::SessionCoordinator alice, bob;
-        QVERIFY(alice.join(url, "conference-state", "Alice"));
-        QVERIFY(bob.join(url, "conference-state", "Bob"));
+        QVERIFY(alice.join(url, "conference-state", "Alice", zjdesk::SessionCoordinator::RoomType::Meeting));
+        QVERIFY(bob.join(url, "conference-state", "Bob", zjdesk::SessionCoordinator::RoomType::Meeting));
         QTRY_COMPARE(alice.memberCount(), 2);
         QTRY_COMPARE(bob.memberCount(), 2);
         QVERIFY(alice.startConference());
@@ -118,8 +118,8 @@ private slots:
         zjdesk::SessionCoordinator alice, bob;
         QVERIFY(alice.setConferenceDevices({"missing-camera-for-regression", "test", "test"}));
         QVERIFY(bob.setConferenceDevices({"test", "test", "test"}));
-        QVERIFY(alice.join(url, "conference-failure", "Alice"));
-        QVERIFY(bob.join(url, "conference-failure", "Bob"));
+        QVERIFY(alice.join(url, "conference-failure", "Alice", zjdesk::SessionCoordinator::RoomType::Meeting));
+        QVERIFY(bob.join(url, "conference-failure", "Bob", zjdesk::SessionCoordinator::RoomType::Meeting));
         QTRY_COMPARE(alice.memberCount(), 2);
         QVERIFY(alice.startConference());
         QTRY_COMPARE(bob.conferenceState(), CS::Incoming);
@@ -890,8 +890,8 @@ private slots:
         zjdesk::RoomServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
         const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
-        QVERIFY(alice.join(url, "camera-quality", "Alice"));
-        QVERIFY(bob.join(url, "camera-quality", "Bob"));
+        QVERIFY(alice.join(url, "camera-quality", "Alice", zjdesk::SessionCoordinator::RoomType::Meeting));
+        QVERIFY(bob.join(url, "camera-quality", "Bob", zjdesk::SessionCoordinator::RoomType::Meeting));
         QTRY_COMPARE(alice.memberCount(), 2);
         QSignalSpy frames(&bob, &zjdesk::SessionCoordinator::conferenceRemoteFrame);
         QVERIFY(alice.startConference());
