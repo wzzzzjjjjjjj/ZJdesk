@@ -1,5 +1,9 @@
 # 验证记录
 
+## 2026-11-02：合并房间类型功能后的 Windows 回归
+
+在 `F:\projects\ZJdesk` 的 `ZJ-desk` 分支合并 `codex/ZJdesk-2` 并解决冲突后，使用 Qt 6.8.3、GStreamer 1.26.11 运行 Windows Release 构建：core、signaling、media 通过（3/3，125.21 秒）。原生 Windows Qt/OpenGL 后台界面测试的房间入口互斥、窗口布局和会议控制及画面通过（3 项，8.037 秒；窗口未激活，未使用 Qt offscreen 平台）。本次未进行真实双机、Ubuntu、跨网或用户摄像头预览验收。
+
 ## 2026-11-02：房间隔离、会议界面及摄像头自适应
 
 在 `C:\Users\29822\.codex\worktrees\852a\ZJdesk` 的 `codex/ZJdesk-2` 工作树，以 Windows Release、Qt 6.8.3 和 GStreamer 1.26.11 构建。core、signaling、media 三组测试通过（3/3，129.30 秒）；信令回归覆盖相同 32 位房间码的类型隔离、同时入房互斥及会议拒绝旧服务端。随后仅调整会议页面布局并重新构建应用和 UI 测试。
