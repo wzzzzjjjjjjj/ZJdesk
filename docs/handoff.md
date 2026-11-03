@@ -1,5 +1,11 @@
 # ZJdesk 项目交接
 
+## 2026-11-03 Windows 与 Linux 双向文件复制（codex/ZJdesk-2，未提交）
+
+仅在 `C:\Users\29822\.codex\worktrees\bfbd\ZJdesk` 实现。Linux X11 授权远控后，双向读取文件管理器的文件剪贴板，复用 `zjdesk-control` 通道分块传到对端临时目录，完成后发布原生文件剪贴板（Windows CF_HDROP、Linux GNOME 文件列表），文件管理器可 Ctrl+V。反向单独协商能力、路由和维护批次，兼容旧版单向对端；导入的剪贴板带标记，不自动传回。支持多选、中文文件名及目录（含空目录），最多 4096 项；不传符号链接，不删除源文件。停止控制 / 断线取消未完成批次，已完成文件保留到客户端退出。双方必须更新；文本、普通共享 / 会议同步未实现。
+
+真实双机连续 5/5 轮完成双向文件复制，验证 Windows CF_HDROP / Shell 拷贝及 Linux X11 GTK 剪贴板 / GIO 拷贝，覆盖中文目录、300004 字节二进制、空文件 / 目录及不自动传回。Windows 常规回归 5/5、Linux 4/4 均通过，两端 Release 已部署；另有双向授权代次、旧版回退、路径拒绝和本机复制覆盖回归。文件按请求逐块发送，不无界排队；低带宽网络下仍共享控制通道及带宽。通道关闭移到管线 NULL 之前，并最多等待一秒完成流重置，避免在已销毁的 SCTP 上发起重置。完整证据与验证限制见 [文件剪贴板验证](validation-file-clipboard.md)。
+
 ## 2026-11-03 移除独立本地预览（codex/ZJdesk-1，未提交）
 
 修改前核对 `codex/ZJdesk-1` 与 `codex/ZJdesk-2` 均为 `bac3584127986e511e0a7062db526c516b65afa8`，提交差异为 0 / 0，当前工作树干净。仅在 `C:\Users\29822\.codex\worktrees\e37f\ZJdesk` 修改。

@@ -31,6 +31,7 @@ add_library(zjdesk_client_core STATIC
     src/signaling/signaling_client.cpp src/signaling/signaling_client.h
     src/session/session_coordinator.cpp src/session/session_coordinator.h
     src/remote-control/control_session.cpp src/remote-control/control_session.h
+    src/remote-control/file_clipboard.cpp src/remote-control/file_clipboard.h
     src/remote-control/input_injector.cpp src/remote-control/input_injector.h
     src/diagnostics/event_log.cpp src/diagnostics/event_log.h
     src/media/media_environment.cpp src/media/media_environment.h
@@ -91,13 +92,16 @@ endif()
 if(BUILD_TESTING)
     find_package(Qt6 6.8 REQUIRED COMPONENTS Test)
     qt_add_executable(zjdesk-unit-tests tests/unit/tst_core.cpp)
+    qt_add_executable(zjdesk-file-tests tests/unit/tst_file_clipboard.cpp)
+    target_link_libraries(zjdesk-file-tests PRIVATE zjdesk_client_core Qt6::Test)
     target_link_libraries(zjdesk-unit-tests PRIVATE zjdesk_client_core Qt6::Test)
     qt_add_executable(zjdesk-integration-tests tests/integration/tst_signaling.cpp)
     target_link_libraries(zjdesk-integration-tests PRIVATE zjdesk_client_core zjdesk_signaling Qt6::Test)
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/test-results")
     add_test(NAME core COMMAND zjdesk-unit-tests -o "${CMAKE_BINARY_DIR}/test-results/core.xml,junitxml")
+    add_test(NAME file-clipboard COMMAND zjdesk-file-tests -o "${CMAKE_BINARY_DIR}/test-results/file-clipboard.xml,junitxml")
     add_test(NAME signaling COMMAND zjdesk-integration-tests -o "${CMAKE_BINARY_DIR}/test-results/signaling.xml,junitxml")
-    set_tests_properties(core signaling PROPERTIES TIMEOUT 30)
+    set_tests_properties(core signaling file-clipboard PROPERTIES TIMEOUT 30)
     if(ZJDESK_ENABLE_GSTREAMER)
         qt_add_executable(zjdesk-media-tests tests/integration/tst_media.cpp)
         target_link_libraries(zjdesk-media-tests PRIVATE zjdesk_client_core zjdesk_signaling Qt6::Test)
@@ -121,7 +125,7 @@ endif()
 # at low integrity, where Windows denies camera access despite enabled consent.
 if(WIN32)
     find_program(ZJDESK_POWERSHELL NAMES powershell REQUIRED)
-    foreach(runtime_target zjdesk zjdesk-unit-tests zjdesk-integration-tests zjdesk-media-tests zjdesk-ui-tests)
+    foreach(runtime_target zjdesk zjdesk-unit-tests zjdesk-file-tests zjdesk-integration-tests zjdesk-media-tests zjdesk-ui-tests)
         if(TARGET ${runtime_target})
             add_custom_command(TARGET ${runtime_target} POST_BUILD
                 COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath

@@ -6,6 +6,7 @@
 #include "media/screen_share.h"
 #include "platform/camera_permission.h"
 #include "remote-control/control_session.h"
+#include "remote-control/file_clipboard.h"
 #include "remote-control/input_injector.h"
 #include "signaling/signaling_client.h"
 #include <QElapsedTimer>
@@ -65,7 +66,7 @@ public:
     enum class RemoteState { Idle, Requesting, Pending, Controlling, Controlled };
     Q_ENUM(RemoteState)
     RemoteState remoteState() const { return remoteState_; }
-    QString remoteDetail() const { return remoteDetail_; }
+    QString remoteDetail() const;
     bool canRequestControl() const;
     bool requestControl();
     bool grantControl();
@@ -126,6 +127,7 @@ private:
     void receiveControl(const QJsonObject &message);
     void receiveControlRequest(const QJsonObject &message);
     void sendControlGrant();
+    void startFileClipboard();
     void clearControl();
     void sendCursor();
     void receiveConference(const QJsonObject &payload);
@@ -136,10 +138,14 @@ private:
     SignalingClient signaling_;
     EventLog events_;
     ControlSession control_;
+    FileClipboard fileClipboard_;
+    FileClipboard reverseFileClipboard_;
     InputInjector input_;
     RemoteState remoteState_ = RemoteState::Idle;
     QString remoteDetail_ = QStringLiteral("远程控制未开启");
     bool controlChannelReady_ = false;
+    bool peerFileClipboard_ = false, peerFileReady_ = false;
+    bool peerReverseFileClipboard_ = false, peerReverseFileReady_ = false;
     bool peerControllable_ = false;
     bool desktopSource_ = false;
     bool controlStartedShare_ = false;
