@@ -49,7 +49,8 @@ public:
         guard_->worker = nullptr;
 #endif
     }
-    void start(bool offerer, const ConferenceDevices &devices, quint64 epoch)
+    void start(bool offerer, const ConferenceDevices &devices, quint64 epoch,
+        bool microphoneMuted, bool cameraHidden, bool speakerMuted)
     {
         shutdown();
         epoch_ = epoch;
@@ -171,6 +172,8 @@ public:
             callback(), destroySignal, GConnectFlags(0));
         g_signal_connect_data(rtc_, "on-negotiation-needed", G_CALLBACK(negotiation),
             callback(), destroySignal, GConnectFlags(0));
+        // Apply join defaults before any capture or output can begin.
+        setMuted(microphoneMuted, cameraHidden, speakerMuted, epoch);
         started_.restart();
         if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
             return fail(QStringLiteral("会议设备启动失败，请检查权限或设备占用"));
@@ -184,6 +187,7 @@ public:
 #else
         Q_UNUSED(offerer)
         Q_UNUSED(devices)
+        Q_UNUSED(microphoneMuted) Q_UNUSED(cameraHidden) Q_UNUSED(speakerMuted)
         emit statusChanged(epoch, "failed", QStringLiteral("当前构建未启用 GStreamer"));
 #endif
     }
@@ -565,11 +569,14 @@ ConferenceMedia::~ConferenceMedia()
     QMetaObject::invokeMethod(worker_, [this] { worker_->shutdown(); }, Qt::BlockingQueuedConnection);
     thread_.quit(); thread_.wait();
 }
-void ConferenceMedia::start(bool offerer, const ConferenceDevices &devices, quint64 epoch)
+void ConferenceMedia::start(bool offerer, const ConferenceDevices &devices, quint64 epoch,
+    bool microphoneMuted, bool cameraHidden, bool speakerMuted)
 {
     { QMutexLocker lock(&mailbox_.mutex); mailbox_.epoch = epoch; mailbox_.local = {}; mailbox_.remote = {};
       mailbox_.framePending = false; mailbox_.localDelivered = 0; }
-    QMetaObject::invokeMethod(worker_, [=] { worker_->start(offerer, devices, epoch); }, Qt::QueuedConnection);
+    QMetaObject::invokeMethod(worker_, [=] {
+        worker_->start(offerer, devices, epoch, microphoneMuted, cameraHidden, speakerMuted);
+    }, Qt::QueuedConnection);
 }
 void ConferenceMedia::stop(quint64 epoch)
 {

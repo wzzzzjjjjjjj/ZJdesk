@@ -14,6 +14,118 @@ class MediaTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void conferenceJoinDefaults_data()
+    {
+        QTest::addColumn<bool>("microphone");
+        QTest::addColumn<bool>("camera");
+        QTest::addColumn<bool>("speaker");
+        QTest::newRow("microphone-off") << false << true << true;
+        QTest::newRow("camera-off") << true << false << true;
+        QTest::newRow("speaker-off") << true << true << false;
+        QTest::newRow("all-off") << false << false << false;
+    }
+
+    void conferenceJoinDefaults()
+    {
+        QFETCH(bool, microphone);
+        QFETCH(bool, camera);
+        QFETCH(bool, speaker);
+        using CS = zjdesk::SessionCoordinator::ConferenceState;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator alice, bob;
+        if (!alice.mediaEnvironment().ready) QSKIP("GStreamer is not enabled in this build");
+        for (auto *session : {&alice, &bob})
+        {
+            session->setConferenceAutoConnect(true);
+            QVERIFY(session->setConferenceDevices({"test", "test", "test"}));
+        }
+        alice.setConferenceJoinDefaults(microphone, camera, speaker);
+        QSignalSpy frames(&bob, &zjdesk::SessionCoordinator::conferenceRemoteFrame);
+        QSignalSpy aa(&alice, &zjdesk::SessionCoordinator::conferenceAudioReceived);
+        QSignalSpy ba(&bob, &zjdesk::SessionCoordinator::conferenceAudioReceived);
+        QVERIFY(alice.join(url, "join-defaults", "Alice", zjdesk::SessionCoordinator::RoomType::Meeting));
+        QVERIFY(bob.join(url, "join-defaults", "Bob", zjdesk::SessionCoordinator::RoomType::Meeting));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.conferenceState(), CS::Running, 15000);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.conferenceState(), CS::Running, 15000);
+        QCOMPARE(alice.conferenceMicrophoneMuted(), !microphone);
+        QCOMPARE(alice.conferenceCameraHidden(), !camera);
+        QCOMPARE(alice.conferenceSpeakerMuted(), !speaker);
+        QTRY_COMPARE(bob.conferenceRemoteCameraHidden(), !camera);
+        QTRY_VERIFY(!frames.isEmpty() && !aa.isEmpty() && !ba.isEmpty());
+        // Verify the actual media, not just the coordinator flags.
+        QTRY_COMPARE(ba.last().at(1).toDouble() > 0.01, microphone);
+        QTRY_COMPARE(aa.last().at(1).toDouble() > 0.01, speaker);
+        QTRY_COMPARE(qvariant_cast<QImage>(frames.last().at(0)).pixelColor(320, 240).lightness() >= 8, camera);
+        if (!camera)
+            for (const auto &frame : frames)
+                QVERIFY(qvariant_cast<QImage>(frame.at(0)).pixelColor(320, 240).lightness() < 8);
+        // Updating future defaults must leave the active call unchanged.
+        alice.setConferenceJoinDefaults(!microphone, !camera, !speaker);
+        QCOMPARE(alice.conferenceMicrophoneMuted(), !microphone);
+        QCOMPARE(alice.conferenceCameraHidden(), !camera);
+        QCOMPARE(alice.conferenceSpeakerMuted(), !speaker);
+        alice.setConferenceMuted(false, false, false);
+        QTRY_VERIFY(ba.last().at(1).toDouble() > 0.01 && aa.last().at(1).toDouble() > 0.01);
+        QTRY_VERIFY(!bob.conferenceRemoteCameraHidden());
+        alice.leave(); bob.leave();
+    }
+
+    void conferenceAutoConnectsOnJoinAndRejoin()
+    {
+        using CS = zjdesk::SessionCoordinator::ConferenceState;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator alice, bob;
+        if (!alice.mediaEnvironment().ready) QSKIP("GStreamer is not enabled in this build");
+        alice.setConferenceAutoConnect(true);
+        bob.setConferenceAutoConnect(true);
+        QVERIFY(alice.setConferenceDevices({"test", "test", "test"}));
+        QVERIFY(bob.setConferenceDevices({"test", "test", "test"}));
+        QSignalSpy af(&alice, &zjdesk::SessionCoordinator::conferenceRemoteFrame);
+        QSignalSpy bf(&bob, &zjdesk::SessionCoordinator::conferenceRemoteFrame);
+        QSignalSpy audio(&bob, &zjdesk::SessionCoordinator::conferenceAudioReceived);
+        // Assistance membership must never start camera or microphone capture.
+        QVERIFY(alice.join(url, "auto-conference", "Alice"));
+        QVERIFY(bob.join(url, "auto-conference", "Bob"));
+        QTRY_COMPARE(alice.memberCount(), 2);
+        QTRY_COMPARE(bob.memberCount(), 2);
+        QCOMPARE(alice.conferenceState(), CS::Idle);
+        QCOMPARE(bob.conferenceState(), CS::Idle);
+        alice.leave(); bob.leave();
+        for (int cycle = 0; cycle < 2; ++cycle)
+        {
+            af.clear(); bf.clear(); audio.clear();
+            auto &first = cycle == 0 ? alice : bob;
+            auto &second = cycle == 0 ? bob : alice;
+            QVERIFY(first.join(url, "auto-conference", "First", zjdesk::SessionCoordinator::RoomType::Meeting));
+            QTRY_COMPARE(first.memberCount(), 1);
+            QCOMPARE(first.conferenceState(), CS::Idle);
+            QVERIFY(second.join(url, "auto-conference", "Second", zjdesk::SessionCoordinator::RoomType::Meeting));
+            QTRY_COMPARE_WITH_TIMEOUT(alice.conferenceState(), CS::Running, 15000);
+            QTRY_COMPARE_WITH_TIMEOUT(bob.conferenceState(), CS::Running, 15000);
+            QTRY_VERIFY(!af.isEmpty() && !bf.isEmpty() && !audio.isEmpty());
+            QTRY_VERIFY(audio.last().at(1).toDouble() > 0.01);
+            second.leave();
+            QTRY_COMPARE(first.memberCount(), 1);
+            QTRY_COMPARE(first.conferenceState(), CS::Idle);
+            QTRY_VERIFY(!first.conferenceDevicesBusy() && !second.conferenceDevicesBusy());
+            first.leave();
+        }
+        // A failed device must report failure once, without automatically reopening it.
+        QVERIFY(alice.setConferenceDevices({"missing-camera-for-regression", "test", "test"}));
+        QVERIFY(alice.join(url, "auto-conference", "Alice", zjdesk::SessionCoordinator::RoomType::Meeting));
+        QVERIFY(bob.join(url, "auto-conference", "Bob", zjdesk::SessionCoordinator::RoomType::Meeting));
+        QTRY_COMPARE_WITH_TIMEOUT(alice.conferenceState(), CS::Failed, 15000);
+        QTRY_COMPARE(bob.conferenceState(), CS::Idle);
+        QTest::qWait(200);
+        QCOMPARE(alice.conferenceState(), CS::Failed);
+        QCOMPARE(alice.memberCount(), 2);
+        alice.leave(); bob.leave();
+    }
+
     void conferenceCarriesBidirectionalVideoAndAudio()
     {
         using CS = zjdesk::SessionCoordinator::ConferenceState;

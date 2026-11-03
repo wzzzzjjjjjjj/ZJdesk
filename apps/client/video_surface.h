@@ -19,12 +19,16 @@ public:
     double takePresentationGapMaxMs();
     zjdesk::VideoPresentationStats presentationStatistics() const;
     void setFrameCaption(const QString &caption) { frameCaption_ = caption; update(); }
+    // Meeting-only presentation; the remote-control canvas keeps its existing rendering.
+    void setParticipantTile(bool enabled) { participantTile_ = enabled; update(); }
+    void setFrameHidden(bool hidden) { frameHidden_ = hidden; update(); }
     void setControlEnabled(bool enabled);
     void setRemoteCursor(const zjdesk::RemoteCursor &cursor);
     bool hasRemoteCursor() const { return remoteCursor_.visible && !remoteCursor_.image.isNull(); }
 
 signals:
     void remoteInput(const QJsonObject &input);
+    void frameAvailabilityChanged();
 
 protected:
     bool event(QEvent *event) override;
@@ -58,6 +62,8 @@ private:
     quint64 supersededFrames_ = 0;
     QString frameCaption_ = QStringLiteral("本地预览 · 尚未发送给对方");
     bool controlEnabled_ = false;
+    bool participantTile_ = false;
+    bool frameHidden_ = false;
     Qt::MouseButtons remoteButtons_ = Qt::NoButton;
     QTimer motionTimer_;
     QJsonObject pendingMotion_;

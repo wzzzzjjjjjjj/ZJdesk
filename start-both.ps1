@@ -4,7 +4,8 @@ param(
     [string]$LinuxRoot = '/home/orbbec/ZJdesk/zjdesk',
     [string]$WindowsAddress = '',
     [string]$Display = ':1',
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$ForceRestart
 )
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
@@ -18,10 +19,20 @@ $originalLinuxRoot = $LinuxRoot
 $remoteMarker = "$originalLinuxRoot/build/start-both-current"
 $pendingBuild = Join-Path $logDir 'build-incomplete'
 $lockStream = $null
+function Stop-WindowsZjdeskInstances {
+    foreach ($process in @(Get-Process -Name 'zjdesk', 'zjdesk-server' -ErrorAction SilentlyContinue)) {
+        try {
+            if (-not $process.HasExited) {
+                Stop-Process -InputObject $process -Force -ErrorAction Stop
+                if (-not $process.WaitForExit(8000)) { throw 'Timed out waiting for process exit.' }
+                Write-Host "Stopped Windows $($process.ProcessName) (PID $($process.Id))."
+            }
+        } catch {
+            if (-not $process.HasExited) { throw "Could not force-stop Windows ZJdesk PID $($process.Id): $($_.Exception.Message)" }
+        }
+    }
+}
 try {
-    try {
-        $lockStream = [IO.File]::Open((Join-Path $logDir 'launcher.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-    } catch { throw 'Another build or launch is already running.' }
     Write-Host 'Checking Linux SSH and display...'
     if (-not $WindowsAddress) {
         $WindowsAddress = Find-NetRoute -RemoteIPAddress $LinuxAddress -ErrorAction Stop |
@@ -30,9 +41,61 @@ try {
     }
     if (-not (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $WindowsAddress })) { throw "Windows media address $WindowsAddress is unavailable." }
     Write-Host "Media addresses: Windows $WindowsAddress; Linux $LinuxAddress"
-    & ssh -o BatchMode=yes -o ConnectTimeout=8 $LinuxSsh "test -d '$LinuxRoot' && test -r /run/user/1000/gdm/Xauthority && ip -4 -o addr show | grep -Fq ' $LinuxAddress/' && if ss -lnt | grep -q ':8765 '; then exit 20; fi"
-    if ($LASTEXITCODE -eq 20) { throw 'Linux port 8765 is already in use. Close the existing Linux client/server and retry.' }
+    & ssh -o BatchMode=yes -o ConnectTimeout=8 $LinuxSsh "test -d '$LinuxRoot' && test -r /run/user/1000/gdm/Xauthority && ip -4 -o addr show | grep -Fq ' $LinuxAddress/'"
     if ($LASTEXITCODE -ne 0) { throw 'Linux SSH, desktop, project directory or media address is unavailable.' }
+    try {
+        $lockStream = [IO.File]::Open((Join-Path $logDir 'launcher.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    } catch {
+        if (-not $ForceRestart) { throw 'Another build or launch is already running.' }
+        # run.ps1 keeps the old launcher alive until its Windows client exits.
+        Write-Host 'Stopping the previous Windows instance and waiting for the launcher lock...'
+        Stop-WindowsZjdeskInstances
+        foreach ($attempt in 1..25) {
+            Start-Sleep -Milliseconds 200
+            try {
+                $lockStream = [IO.File]::Open((Join-Path $logDir 'launcher.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                break
+            } catch { }
+        }
+        if ($null -eq $lockStream) { throw 'Another build or launch is already running.' }
+    }
+    if ($ForceRestart) {
+        Write-Host 'Force-stopping existing Windows and Linux ZJdesk clients and signaling servers...'
+        Stop-WindowsZjdeskInstances
+        $stopLinuxCommand = @'
+set -eu
+uid=$(id -u)
+if pkill -KILL -u $uid -x 'zjdesk|zjdesk-server'; then
+    printf 'Stopped Linux ZJdesk clients and signaling servers.\n'
+else
+    zjdesk_stop_result=$?
+    if [ $zjdesk_stop_result -ne 1 ]; then exit $zjdesk_stop_result; fi
+fi
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if pgrep -u $uid -x -r D,I,R,S,T,t,W,X 'zjdesk|zjdesk-server' >/dev/null; then
+        sleep 0.1
+    else
+        zjdesk_stop_result=$?
+        if [ $zjdesk_stop_result -eq 1 ]; then exit 0; fi
+        exit $zjdesk_stop_result
+    fi
+done
+printf 'Linux ZJdesk instances did not exit.\n' >&2
+exit 21
+'@
+        & ssh -o BatchMode=yes -o ConnectTimeout=8 $LinuxSsh ($stopLinuxCommand -replace "`r`n", "`n")
+        if ($LASTEXITCODE -ne 0) { throw 'Could not force-stop Linux ZJdesk instances. Check SSH permissions and running processes.' }
+    }
+    $checkLinuxPortCommand = @'
+zjdesk_listeners=$(ss -H -lnt 'sport = :8765') || exit 22
+case $zjdesk_listeners in '') ;; *) exit 20;; esac
+'@
+    & ssh -o BatchMode=yes -o ConnectTimeout=8 $LinuxSsh ($checkLinuxPortCommand -replace "`r`n", "`n")
+    if ($LASTEXITCODE -eq 20) {
+        if ($ForceRestart) { throw 'Linux port 8765 is still in use after stopping ZJdesk. Check for another program using this port.' }
+        throw 'Linux port 8765 is already in use. Close the existing Linux client/server and retry.'
+    }
+    if ($LASTEXITCODE -ne 0) { throw 'Could not check Linux signaling port 8765.' }
     if ($SkipBuild) {
         if (Test-Path -LiteralPath $pendingBuild) { throw 'The previous build did not complete on both machines. Run the build-and-start launcher again.' }
         Write-Host 'Using existing Release binaries; build both machines first after code changes.'
@@ -87,7 +150,9 @@ try {
     $env:ZJDESK_WEBRTC_LOCAL_ADDRESS = $WindowsAddress
     $env:ZJDESK_WEBRTC_GCC = '1'
     Remove-Item Env:ZJDESK_WEBRTC_MAX_BITRATE -ErrorAction SilentlyContinue
-    & (Join-Path $PSScriptRoot 'run.ps1') -Preset windows-release -ServerUrl "ws://${LinuxAddress}:8765"
+    # Keep the mutex through client creation, then release it before run.ps1 waits.
+    $onClientStarted = { $lockStream.Dispose() }.GetNewClosure()
+    & (Join-Path $PSScriptRoot 'run.ps1') -Preset windows-release -ServerUrl "ws://${LinuxAddress}:8765" -OnClientStarted $onClientStarted
 } catch {
     Write-Host $_ -ForegroundColor Red
     exit 1

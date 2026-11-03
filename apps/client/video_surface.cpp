@@ -1,5 +1,6 @@
 #include "video_surface.h"
 #include <QPainter>
+#include <QPainterPath>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QKeyEvent>
@@ -53,11 +54,19 @@ void VideoSurface::setParticipant(const QString &name, const QString &caption)
 void VideoSurface::paintGL()
 {
     const auto paintStartedNs = zjdesk::FrameTiming::nowNs();
-    const bool paintingNewFrame = pendingFrame_ && !frame_.isNull();
+    const bool showFrame = !frame_.isNull() && !(participantTile_ && frameHidden_);
+    const bool paintingNewFrame = pendingFrame_ && showFrame;
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
-    if (!frame_.isNull())
+    if (participantTile_)
+    {
+        painter.fillRect(rect(), QColor("#ffffff"));
+        QPainterPath clip;
+        clip.addRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 12, 12);
+        painter.setClipPath(clip);
+    }
+    if (showFrame)
     {
         if (pendingFrame_)
         {
@@ -84,11 +93,50 @@ void VideoSurface::paintGL()
             painter.restore();
         }
         painter.setPen(Qt::white);
-        painter.drawText(QRect(16, 12, width() - 32, 24), Qt::AlignLeft,
-                         frameCaption_);
+        if (participantTile_)
+        {
+            const QRect captionRect(12, height() - 34, width() - 24, 24);
+            QLinearGradient shade(0, height() - 52, 0, height());
+            shade.setColorAt(0, Qt::transparent);
+            shade.setColorAt(1, QColor(9, 21, 35, 210));
+            painter.fillRect(QRect(0, height() - 52, width(), 52), shade);
+            painter.drawText(captionRect, Qt::AlignLeft | Qt::AlignVCenter,
+                painter.fontMetrics().elidedText(frameCaption_, Qt::ElideRight, captionRect.width()));
+        }
+        else
+            painter.drawText(QRect(16, 12, width() - 32, 24), Qt::AlignLeft, frameCaption_);
         painter.end();
         if (paintingNewFrame)
             paintTiming_.record((zjdesk::FrameTiming::nowNs() - paintStartedNs) / 1e6);
+        return;
+    }
+    if (participantTile_)
+    {
+        painter.fillRect(rect(), QColor("#eef3f6"));
+        const qreal radius = qMin(30.0, height() / 5.0);
+        const QPointF center(width() / 2.0, height() / 2.0 - 17);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor("#d2e9e7"));
+        painter.drawEllipse(center, radius, radius);
+        auto font = painter.font();
+        font.setPixelSize(int(radius));
+        font.setBold(true);
+        painter.setFont(font);
+        painter.setPen(QColor("#197e7d"));
+        painter.drawText(QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2),
+            Qt::AlignCenter, name_.trimmed().left(1).toUpper());
+        font.setPointSize(10);
+        painter.setFont(font);
+        const QRect nameRect(12, int(center.y() + radius) + 6, width() - 24, 22);
+        painter.setPen(QColor("#24364e"));
+        painter.drawText(nameRect, Qt::AlignCenter,
+            painter.fontMetrics().elidedText(name_, Qt::ElideRight, nameRect.width()));
+        font.setPointSize(8);
+        font.setBold(false);
+        painter.setFont(font);
+        painter.setPen(QColor("#718397"));
+        painter.drawText(nameRect.translated(0, 22), Qt::AlignCenter,
+            painter.fontMetrics().elidedText(caption_, Qt::ElideRight, nameRect.width()));
         return;
     }
     QLinearGradient background(0, 0, width(), height());
@@ -171,6 +219,7 @@ void VideoSurface::setFrame(const QImage &frame)
     }
     else if (!hadFrame)
         updatePointerCursor(mapFromGlobal(QCursor::pos()));
+    if (hadFrame != !frame.isNull()) emit frameAvailabilityChanged();
     update();
 }
 

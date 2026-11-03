@@ -163,7 +163,7 @@ bash ./run.sh
 双击 `构建启动.bat` 会将 Windows 当前工作树中的源码（包括未提交的修改）复制到 Linux 独立目录，再在两端构建并部署，然后启动两端；此入口跳过测试。需要回归验证时请分别运行两端的 `build.ps1` / `build.sh`。Linux 原项目目录不会被覆盖；每次构建会保留一个独立的源码和构建目录，占用磁盘空间。构建期间请勿修改源码。
 双击 `直接启动.bat` 会跳过构建、测试和部署，直接使用两端已有的 Release 构建；代码更新后请先重新构建两端。
 这两个入口使用 `start-both.ps1` 中配置的机器地址、SSH 和 Linux 桌面环境。
-Windows 媒体地址默认按到 Linux 媒体地址的路由自动选择，适应本机 DHCP 地址变化；需要固定网卡时可向 `start-both.ps1` 传入 `-WindowsAddress '本机IPv4地址'`。Linux 已运行客户端或信令服务时，先关闭旧实例、释放 8765 端口，再使用双端启动快捷方式。
+Windows 媒体地址默认按到 Linux 媒体地址的路由自动选择，适应本机 DHCP 地址变化；需要固定网卡时可向 `start-both.ps1` 传入 `-WindowsAddress '本机IPv4地址'`。`构建启动.bat` 自动传入 `-ForceRestart`，先强制结束 Windows 上的 `zjdesk.exe` / `zjdesk-server.exe`，以及 Linux SSH 用户名下的 `zjdesk` / `zjdesk-server` 旧实例，再检查 8765 端口并继续构建启动。无法结束进程或端口仍被其他程序占用时停止并报错。`直接启动.bat` 保持原行为，需先关闭旧实例。
 
 ### Windows 控制本次 Linux 电脑
 

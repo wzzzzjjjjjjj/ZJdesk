@@ -16,6 +16,14 @@ QPushButton#navButton {
 QPushButton#navButton:hover { background: #20374a; color: #ffffff; }
 QPushButton#navButton:checked { background: #23474b; color: #e4fff5; border-color: #345c5d; font-weight: 600; }
 QPushButton#navButton:focus { border-color: #74cdbb; }
+QPushButton#settingsButton { background: transparent; color: #b9d3d5; border: 1px solid transparent; padding: 8px 10px; }
+QPushButton#settingsButton:hover { background: #20374a; border-color: #345c5d; }
+QPushButton#settingsButton:focus { border-color: #74cdbb; }
+QLabel#profileAvatar { background: #d9efeb; color: #237c77; border: 1px solid #baddd5; border-radius: 20px; font-size: 15pt; font-weight: 600; }
+QLineEdit#meetingDisplayName { background: transparent; border-color: transparent; padding: 6px 2px; font-weight: 600; }
+QLineEdit#meetingDisplayName:hover { border-color: #dce4ed; }
+QLineEdit#meetingDisplayName:focus { background: #ffffff; border-color: #247e70; }
+QLineEdit#meetingDisplayName:disabled { color: #34495d; background: transparent; border-color: transparent; }
 QLabel#eyebrow { color: #6d8992; font-size: 8pt; font-weight: 600; }
 QLabel#pageTitle { color: #1b2c40; font-size: 22pt; font-weight: 700; }
 QLabel#sectionTitle { color: #263c50; font-size: 10pt; font-weight: 600; }
@@ -75,3 +83,38 @@ QScrollBar::handle:vertical:hover { background: #9fb2c1; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
 QToolTip { color: #edf5fa; background: #233a4e; border: 1px solid #415c70; padding: 7px 10px; }
+
+/* Meeting workspace: shared content, participant rail, and a compact roster. */
+QFrame#meetingStage, QFrame#meetingParticipants, QFrame#meetingFooter {
+    background: #ffffff; border: 1px solid #d9e3eb; border-radius: 12px;
+}
+QPushButton[meetingToggle="true"] {
+    border: 1px solid #359a92; border-radius: 16px; color: #237c77;
+    background: #f4fbfa; padding: 9px 12px; font-weight: 600;
+}
+QPushButton[meetingToggle="true"]:hover { background: #e2f4f0; }
+QPushButton[meetingToggle="true"]:checked {
+    background: #f4f0ef; border-color: #c9a8a2; color: #a45c53;
+}
+QPushButton[meetingToggle="true"]:disabled { background: #f4f7f9; color: #8795a5; border-color: #dbe3ea; }
+QLabel#memberAvatar {
+    background: #d9efeb; color: #237c77; border: 1px solid #baddd5;
+    border-radius: 20px; font-size: 15pt; font-weight: 600;
+}
+QLabel#memberName { color: #34495d; font-size: 9pt; }
+QPushButton#meetingRosterStack { padding: 0; border: none; background: transparent; }
+QPushButton#meetingRosterStack:hover { background: #eff7f5; border-radius: 12px; }
+QDialog#meetingRosterPopup { background: #ffffff; border: 1px solid #dbe3ea; }
+QLabel#meetingRosterTitle { color: #263c50; font-weight: 600; }
+QWidget#meetingRosterPopupMembers { background: #ffffff; }
+QScrollArea#meetingRosterScroll, QScrollArea#meetingRosterScroll > QWidget, QWidget#meetingMemberStrip {
+    background: transparent;
+}
+QLabel#meetingMemberCount { color: #263c50; font-weight: 600; padding-right: 8px; }
+QLabel#meetingWaiting { color: #8191a1; font-size: 9pt; }
+QFrame#meetingFooter QPushButton#shareButton { padding: 11px 22px; }
+QFrame#meetingFooter QPushButton#shareButton:enabled {
+    background: #168c87; color: #ffffff; border-color: #168c87;
+}
+QFrame#meetingFooter QPushButton#shareButton:hover { background: #117873; }
+QDialog#meetingSettings { background: #f3f5f8; }

@@ -4,9 +4,12 @@
 #include "zjdesk/build_info.h"
 #include <QFileDialog>
 #include <QComboBox>
+#include <QCheckBox>
+#include <QDialog>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGraphicsOpacityEffect>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -19,6 +22,9 @@
 #include <QStyle>
 #include <QStackedWidget>
 #include <QScrollArea>
+#include <QScreen>
+#include <QSettings>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <QApplication>
 #include <QKeyEvent>
@@ -42,6 +48,60 @@ QFrame *card()
     return frame;
 }
 
+QWidget *memberBadge(const char *objectName)
+{
+    auto *badge = new QWidget;
+    badge->setObjectName(objectName);
+    badge->setFixedWidth(92);
+    auto *layout = new QVBoxLayout(badge);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(4);
+    auto *avatar = text({}, "memberAvatar");
+    avatar->setFixedSize(40, 40);
+    avatar->setAlignment(Qt::AlignCenter);
+    layout->addWidget(avatar, 0, Qt::AlignHCenter);
+    auto *name = text({}, "memberName");
+    name->setAlignment(Qt::AlignCenter);
+    layout->addWidget(name);
+    return badge;
+}
+
+void updateMemberBadge(QWidget *badge, const QString &name)
+{
+    badge->findChild<QLabel *>("memberAvatar")->setText(name.trimmed().left(1).toUpper());
+    auto *label = badge->findChild<QLabel *>("memberName");
+    label->setText(label->fontMetrics().elidedText(name, Qt::ElideRight, 90));
+    badge->setToolTip(name);
+    badge->setAccessibleName(name);
+}
+
+QIcon memberStackIcon(const QStringList &names)
+{
+    QPixmap pixmap(304, 88);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.scale(2, 2);
+    auto font = painter.font();
+    font.setPixelSize(14);
+    font.setBold(true);
+    painter.setFont(font);
+    const QColor colors[]{QColor("#d9efeb"), QColor("#e1e9f6"), QColor("#eae2f1"), QColor("#f3e4d9"), QColor("#d4e8eb")};
+    for (int i = 0; i < 5; ++i)
+    {
+        const QRectF circle(2 + i * 26, 2, 40, 40);
+        painter.setPen(QPen(Qt::white, 2));
+        painter.setBrush(colors[i]);
+        painter.drawEllipse(circle);
+        painter.setPen(QColor("#326b70"));
+        painter.drawText(circle, Qt::AlignCenter, i < 4
+            ? names.at(i).trimmed().left(1).toUpper() : QStringLiteral("+%1").arg(names.size() - 4));
+    }
+    painter.end();
+    pixmap.setDevicePixelRatio(2);
+    return QIcon(pixmap);
+}
+
 QIcon navigationIcon(int page)
 {
     QPixmap pixmap(40, 40);
@@ -63,13 +123,62 @@ QIcon navigationIcon(int page)
         lens.moveTo(13, 9); lens.lineTo(18, 6); lens.lineTo(18, 15); lens.lineTo(13, 12);
         painter.drawPath(lens);
     }
-    else
+    else if (page == 2)
     {
         QPainterPath pulse;
         pulse.moveTo(2, 11); pulse.lineTo(6, 11); pulse.lineTo(9, 4);
         pulse.lineTo(12, 16); pulse.lineTo(15, 9); pulse.lineTo(18, 9);
         painter.drawPath(pulse);
     }
+    else
+    {
+        painter.drawEllipse(QRectF(4, 4, 12, 12));
+        painter.drawEllipse(QRectF(7, 7, 6, 6));
+        for (int i = 0; i < 8; ++i)
+        {
+            painter.save();
+            painter.translate(10, 10);
+            painter.rotate(i * 45);
+            painter.drawLine(QPointF(0, -6), QPointF(0, -9));
+            painter.restore();
+        }
+    }
+    pixmap.setDevicePixelRatio(2);
+    return QIcon(pixmap);
+}
+
+QIcon meetingControlIcon(int control)
+{
+    QPixmap pixmap(48, 48);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.scale(2, 2);
+    painter.setPen(QPen(QColor("#237c77"), 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    if (control == 0)
+    {
+        painter.drawRoundedRect(QRectF(9, 3, 6, 12), 3, 3);
+        painter.drawArc(QRectF(6, 6, 12, 12), 180 * 16, 180 * 16);
+        painter.drawLine(QPointF(12, 18), QPointF(12, 22));
+        painter.drawLine(QPointF(9, 22), QPointF(15, 22));
+    }
+    else if (control == 1)
+    {
+        QPainterPath speaker;
+        speaker.moveTo(3, 9); speaker.lineTo(7, 9); speaker.lineTo(12, 5);
+        speaker.lineTo(12, 19); speaker.lineTo(7, 15); speaker.lineTo(3, 15); speaker.closeSubpath();
+        painter.drawPath(speaker);
+        painter.drawArc(QRectF(10, 6, 10, 12), -65 * 16, 130 * 16);
+        painter.drawArc(QRectF(9, 3, 15, 18), -60 * 16, 120 * 16);
+    }
+    else
+    {
+        painter.drawRoundedRect(QRectF(2, 6, 13, 12), 2, 2);
+        QPainterPath lens;
+        lens.moveTo(15, 10); lens.lineTo(22, 6); lens.lineTo(22, 18); lens.lineTo(15, 14);
+        painter.drawPath(lens);
+    }
+    painter.end();
     pixmap.setDevicePixelRatio(2);
     return QIcon(pixmap);
 }
@@ -120,6 +229,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
                        QWidget *parent) : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("ZJdesk · 跨平台协作工作台"));
+    session_.setConferenceAutoConnect(true);
     resize(1280, 820);
     setMinimumSize(1040, 720);
     auto *root = new QWidget;
@@ -167,6 +277,15 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     nav->addStretch();
     nav->addWidget(text("WINDOWS + LINUX", "navCaption"));
     nav->addWidget(text(QStringLiteral("屏幕共享  %1").arg(zjdesk::build::Version), "sidebarSubtitle"));
+    auto *settingsButton = new QPushButton(QStringLiteral("设置"));
+    settingsButton->setObjectName("settingsButton");
+    settingsButton->setIcon(navigationIcon(3));
+    settingsButton->setIconSize(QSize(20, 20));
+    settingsButton->setToolTip(QStringLiteral("选择麦克风、扬声器和摄像头"));
+    auto *settingsRow = new QHBoxLayout;
+    settingsRow->addStretch();
+    settingsRow->addWidget(settingsButton);
+    nav->addLayout(settingsRow);
     rootLayout->addWidget(sidebar);
 
     auto *content = new QWidget;
@@ -196,6 +315,30 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     statusAnimation_->setStartValue(0.55);
     statusAnimation_->setEndValue(1.0);
     header->addWidget(statusLabel_, 0, Qt::AlignVCenter);
+    auto *profile = new QWidget;
+    profile->setObjectName("userProfile");
+    auto *profileLayout = new QHBoxLayout(profile);
+    profileLayout->setContentsMargins(12, 0, 0, 0);
+    profileLayout->setSpacing(10);
+    auto *profileAvatar = text({}, "profileAvatar");
+    profileAvatar->setFixedSize(40, 40);
+    profileAvatar->setAlignment(Qt::AlignCenter);
+    meetingNameEdit_ = new QLineEdit(name);
+    meetingNameEdit_->setObjectName("meetingDisplayName");
+    meetingNameEdit_->setMaxLength(40);
+    meetingNameEdit_->setFixedWidth(120);
+    meetingNameEdit_->setPlaceholderText(QStringLiteral("你的昵称"));
+    meetingNameEdit_->setAccessibleName(QStringLiteral("你的昵称"));
+    profileLayout->addWidget(profileAvatar);
+    profileLayout->addWidget(meetingNameEdit_);
+    header->addWidget(profile, 0, Qt::AlignVCenter);
+    const auto refreshProfile = [this, profile, profileAvatar] {
+        const auto nickname = meetingNameEdit_->text().trimmed();
+        profileAvatar->setText(nickname.isEmpty() ? QStringLiteral("我") : nickname.left(1).toUpper());
+        profile->setToolTip(nickname);
+    };
+    connect(meetingNameEdit_, &QLineEdit::textChanged, this, refreshProfile);
+    refreshProfile();
     contentLayout->addWidget(headerWidget);
 
     auto *pages = new QStackedWidget;
@@ -331,6 +474,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
 
     shareButton_ = new QPushButton(QStringLiteral("共享主屏幕"));
     shareButton_->setObjectName("shareButton");
+    shareButton_->setMinimumWidth(120);
     shareButton_->setToolTip(QStringLiteral("将整个主屏幕及鼠标指针发送给房间中的另一位成员"));
     shareLabel_ = text(session_.shareDetail(), "shareStatus");
     shareLabel_->setWordWrap(true);
@@ -356,46 +500,69 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     pages->addWidget(workspace);
 
     auto *meeting = new QWidget;
+    meeting->setObjectName("meetingPage");
     auto *meetingLayout = new QVBoxLayout(meeting);
     meetingLayout->setContentsMargins(0, 0, 0, 0);
     meetingLayout->setSpacing(10);
-    auto *meetingConnection = card();
-    auto *meetingConnectionLayout = new QHBoxLayout(meetingConnection);
-    meetingConnectionLayout->setContentsMargins(20, 12, 20, 12);
+    auto *meetingToolbar = new QHBoxLayout;
+    meetingToolbar->setSpacing(8);
+    auto *muteMic = new QPushButton(QStringLiteral("麦克风 · 开"));
+    muteMic->setObjectName("conferenceMuteMicrophone");
+    auto *muteSpeaker = new QPushButton(QStringLiteral("扬声器 · 开"));
+    muteSpeaker->setObjectName("conferenceMuteSpeaker");
+    auto *hideCamera = new QPushButton(QStringLiteral("摄像头 · 开"));
+    hideCamera->setObjectName("conferenceHideCamera");
+    hideCamera->setToolTip(QStringLiteral("隐藏本地与发送画面；摄像头设备仍在采集"));
+    muteMic->setToolTip(QStringLiteral("切换麦克风静音"));
+    muteSpeaker->setToolTip(QStringLiteral("切换扬声器静音"));
+    muteMic->setIcon(meetingControlIcon(0));
+    muteSpeaker->setIcon(meetingControlIcon(1));
+    hideCamera->setIcon(meetingControlIcon(2));
+    for (auto *button : {muteMic, muteSpeaker, hideCamera})
+    {
+        button->setCheckable(true);
+        button->setProperty("meetingToggle", true);
+        button->setMinimumWidth(88);
+    }
+    auto *meetingSettings = new QDialog(this);
+    meetingSettings->setObjectName("meetingSettings");
+    meetingSettings->setWindowTitle(QStringLiteral("设置"));
+    meetingSettings->resize(660, 360);
+    auto *settingsLayout = new QVBoxLayout(meetingSettings);
+    settingsLayout->addWidget(text(QStringLiteral("音视频设备"), "sectionTitle"));
     meetingServerEdit_ = new QLineEdit(serverUrl);
     meetingRoomEdit_ = new QLineEdit;
-    meetingNameEdit_ = new QLineEdit(name);
     meetingServerEdit_->setObjectName("meetingServerAddress");
     meetingRoomEdit_->setObjectName("meetingRoomId");
-    meetingNameEdit_->setObjectName("meetingDisplayName");
     meetingRoomEdit_->setPlaceholderText(QStringLiteral("输入会议房间码"));
     meetingRoomEdit_->setMaxLength(32);
-    meetingNameEdit_->setMaxLength(40);
-    for (const auto &field : QList<QPair<QString, QLineEdit *>>{
-        {QStringLiteral("服务地址"), meetingServerEdit_}, {QStringLiteral("会议房间码"), meetingRoomEdit_},
-        {QStringLiteral("你的昵称"), meetingNameEdit_}})
-    {
-        auto *column = new QVBoxLayout;
-        auto *label = text(field.first, "fieldLabel");
-        label->setBuddy(field.second);
-        field.second->setAccessibleName(field.first);
-        column->addWidget(label);
-        column->addWidget(field.second);
-        meetingConnectionLayout->addLayout(column, field.second == meetingServerEdit_ ? 3 : 2);
-    }
-    meetingJoinButton_ = new QPushButton(QStringLiteral("加入会议房间"));
+    meetingRoomEdit_->setAccessibleName(QStringLiteral("会议房间码"));
+    meetingRoomEdit_->setMinimumWidth(100);
+    meetingRoomEdit_->setMaximumWidth(230);
+    // The meeting uses the configured service; keep its address out of this UI.
+    meetingServerEdit_->setParent(meetingSettings);
+    meetingServerEdit_->hide();
+    meetingToolbar->addWidget(meetingRoomEdit_, 1);
+    meetingJoinButton_ = new QPushButton(QStringLiteral("加入会议"));
     meetingJoinButton_->setObjectName("meetingJoinButton");
-    meetingConnectionLayout->addWidget(meetingJoinButton_, 0, Qt::AlignBottom);
-    meetingLayout->addWidget(meetingConnection);
+    meetingJoinButton_->setProperty("role", "primary");
+    meetingToolbar->addWidget(meetingJoinButton_);
+    meetingToolbar->addStretch();
+    for (auto *button : {muteMic, muteSpeaker, hideCamera}) meetingToolbar->addWidget(button);
+    meetingLayout->addLayout(meetingToolbar);
+    connect(settingsButton, &QPushButton::clicked, meetingSettings, [meetingSettings] {
+        meetingSettings->show();
+    });
+    connect(meetingRoomEdit_, &QLineEdit::returnPressed, meetingJoinButton_, &QPushButton::click);
     connect(serverEdit_, &QLineEdit::textChanged, meetingServerEdit_, &QLineEdit::setText);
     connect(meetingServerEdit_, &QLineEdit::textChanged, serverEdit_, &QLineEdit::setText);
     connect(nameEdit_, &QLineEdit::textChanged, meetingNameEdit_, &QLineEdit::setText);
     connect(meetingNameEdit_, &QLineEdit::textChanged, nameEdit_, &QLineEdit::setText);
+    connect(meetingNameEdit_, &QLineEdit::textChanged, this, &MainWindow::refreshMeetingParticipants);
     auto *meetingInfo = new QWidget;
     auto *meetingInfoLayout = new QHBoxLayout(meetingInfo);
     meetingInfoLayout->setContentsMargins(0, 0, 0, 0);
     meetingInfoLayout->setSpacing(16);
-    meetingInfoLayout->addWidget(text(QStringLiteral("通话状态"), "sectionTitle"));
     auto *meetingStatus = text(session_.conferenceDetail(), "conferenceStatus");
     meetingStatus->setWordWrap(true);
     meetingStatus->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -421,90 +588,186 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         combo->addItem(QStringLiteral("默认设备"), QString());
         deviceTitle->setBuddy(combo);
         deviceColumn->addWidget(combo);
+        auto *joinEnabled = new QCheckBox(QStringLiteral("入会后默认开启"));
+        const auto settingName = QString::fromLatin1(entry.first).mid(10) + "Enabled";
+        joinEnabled->setObjectName("join" + settingName);
+        joinEnabled->setAccessibleName(entry.second + QStringLiteral("入会后默认开启"));
+        const auto settingKey = "join/" + settingName;
+        joinEnabled->setProperty("settingsKey", settingKey);
+        QSettings preferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "meeting");
+        joinEnabled->setChecked(preferences.value(settingKey, true).toBool());
+        deviceColumn->addWidget(joinEnabled);
         deviceRow->addLayout(deviceColumn, 1);
     }
-    meetingLayout->addWidget(meetingDevices);
-    meetingLayout->addWidget(previewCard);
+    settingsLayout->addWidget(meetingDevices);
+    const auto applyJoinDefaults = [this] {
+        session_.setConferenceJoinDefaults(findChild<QCheckBox *>("joinMicrophoneEnabled")->isChecked(),
+            findChild<QCheckBox *>("joinCameraEnabled")->isChecked(),
+            findChild<QCheckBox *>("joinSpeakerEnabled")->isChecked());
+    };
+    applyJoinDefaults();
+    for (const auto *name : {"joinMicrophoneEnabled", "joinCameraEnabled", "joinSpeakerEnabled"})
+    {
+        auto *check = findChild<QCheckBox *>(name);
+        connect(check, &QCheckBox::toggled, this, [check, applyJoinDefaults](bool enabled) {
+            QSettings preferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "meeting");
+            preferences.setValue(check->property("settingsKey").toString(), enabled);
+            applyJoinDefaults();
+        });
+    }
+    settingsLayout->addWidget(previewCard);
+    auto *deviceNotice = text(QStringLiteral("默认使用默认设备，可选择其他设备并设置入会后的开启状态。默认开关自动保存，下次连接生效；不改变当前通话。通话中更换设备请先离会。建议佩戴耳机。"), "muted");
+    deviceNotice->setWordWrap(true);
+    settingsLayout->addWidget(deviceNotice);
+    auto *closeSettings = new QPushButton(QStringLiteral("完成"));
+    settingsLayout->addWidget(closeSettings, 0, Qt::AlignRight);
+    connect(closeSettings, &QPushButton::clicked, meetingSettings, &QDialog::hide);
     auto *views = new QHBoxLayout;
     views->setSpacing(14);
     auto *localConference = new VideoSurface;
     meetingLocalVideo_ = localConference;
     localConference->setObjectName("conferenceLocalVideo");
-    localConference->setMinimumSize(140, 140);
-    localConference->setFrameCaption(QStringLiteral("本机摄像头 · 接听后发送"));
-    localConference->setParticipant(QStringLiteral("你的画面"), QStringLiteral("接听后开启摄像头与麦克风"));
+    localConference->setParticipantTile(true);
     auto *remoteConference = new VideoSurface;
+    meetingRemoteVideo_ = remoteConference;
     remoteConference->setObjectName("conferenceRemoteVideo");
-    remoteConference->setMinimumSize(140, 140);
-    remoteConference->setFrameCaption(QStringLiteral("对方摄像头"));
-    remoteConference->setParticipant(QStringLiteral("等待通话连接"), QStringLiteral("加入房间，邀请另一位成员开始视频会议"));
+    remoteConference->setParticipantTile(true);
+    auto *participants = card();
+    participants->setObjectName("meetingParticipants");
+    participants->setMinimumWidth(190);
+    participants->setMaximumWidth(300);
+    meetingParticipantLayout_ = new QVBoxLayout(participants);
+    meetingParticipantLayout_->setContentsMargins(10, 12, 10, 12);
+    meetingParticipantLayout_->setSpacing(10);
+    meetingParticipantLayout_->addWidget(text(QStringLiteral("参会画面"), "sectionTitle"));
+    for (auto *surface : {localConference, remoteConference})
+    {
+        surface->setMinimumSize(160, 110);
+        surface->setMaximumHeight(230);
+        surface->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        meetingParticipantLayout_->addWidget(surface, 1);
+        connect(surface, &VideoSurface::frameAvailabilityChanged, this, &MainWindow::refreshMeetingParticipants);
+    }
+    auto *waiting = text(QStringLiteral("等待其他成员加入"), "meetingWaiting");
+    waiting->setAlignment(Qt::AlignCenter);
+    waiting->setWordWrap(true);
+    meetingParticipantLayout_->addWidget(waiting, 1);
+    meetingParticipantLayout_->addStretch(1);
     meetingShareVideo_ = new VideoSurface;
     meetingShareVideo_->setObjectName("meetingShareVideo");
-    meetingShareVideo_->setMinimumSize(140, 140);
-    meetingShareVideo_->setParticipant(QStringLiteral("屏幕共享"), QStringLiteral("共享主屏幕后在此显示"));
-    for (const auto &entry : {qMakePair(localConference, QStringLiteral("本机画面")),
-                             qMakePair(remoteConference, QStringLiteral("对方画面")),
-                             qMakePair(meetingShareVideo_, QStringLiteral("屏幕共享"))})
-    {
-        auto *tile = new QWidget;
-        auto *tileLayout = new QVBoxLayout(tile);
-        tileLayout->setContentsMargins(0, 0, 0, 0);
-        tileLayout->setSpacing(0);
-        auto *tileHeader = new QFrame;
-        tileHeader->setObjectName("stageHeader");
-        auto *tileTitle = new QHBoxLayout(tileHeader);
-        tileTitle->setContentsMargins(14, 8, 14, 8);
-        tileTitle->addWidget(text(entry.second, "stageTitle"));
-        tileLayout->addWidget(tileHeader);
-        tileLayout->addWidget(entry.first, 1);
-        views->addWidget(tile, entry.first == meetingShareVideo_ ? 2 : 1);
-    }
+    meetingShareVideo_->setMinimumSize(300, 200);
+    meetingShareVideo_->setParticipant(QStringLiteral("屏幕共享"), QStringLiteral("共享屏幕后，内容将在这里显示"));
+    auto *tile = card();
+    tile->setObjectName("meetingStage");
+    auto *tileLayout = new QVBoxLayout(tile);
+    tileLayout->setContentsMargins(0, 0, 0, 0);
+    tileLayout->setSpacing(0);
+    auto *tileHeader = new QFrame;
+    tileHeader->setObjectName("stageHeader");
+    auto *tileTitle = new QHBoxLayout(tileHeader);
+    tileTitle->setContentsMargins(14, 8, 14, 8);
+    tileTitle->addWidget(text(QStringLiteral("屏幕共享"), "stageTitle"));
+    tileTitle->addStretch();
+    tileTitle->addWidget(text(QStringLiteral("共享内容"), "stageMeta"));
+    tileLayout->addWidget(tileHeader);
+    tileLayout->addWidget(meetingShareVideo_, 1);
+    views->addWidget(tile, 4);
+    views->addWidget(participants, 1);
     meetingLayout->addLayout(views, 1);
     auto *controlsCard = card();
-    auto *meetingControls = new QHBoxLayout(controlsCard);
-    meetingControls->setContentsMargins(12, 10, 12, 10);
+    controlsCard->setObjectName("meetingFooter");
+    auto *footerColumn = new QVBoxLayout(controlsCard);
+    footerColumn->setContentsMargins(16, 10, 16, 10);
+    footerColumn->setSpacing(8);
+    auto *meetingMembers = new QHBoxLayout;
+    meetingMemberCount_ = text(QStringLiteral("尚未入会"), "meetingMemberCount");
+    meetingMembers->addWidget(meetingMemberCount_);
+    meetingLocalMember_ = memberBadge("meetingLocalMember");
+    meetingRemoteMember_ = memberBadge("meetingRemoteMember");
+    meetingMemberWidgets_ = {meetingLocalMember_, meetingRemoteMember_};
+    auto *memberStrip = new QWidget;
+    memberStrip->setObjectName("meetingMemberStrip");
+    meetingMemberBadges_ = new QHBoxLayout(memberStrip);
+    meetingMemberBadges_->setContentsMargins(0, 0, 0, 0);
+    meetingMemberBadges_->setSpacing(8);
+    for (auto *badge : meetingMemberWidgets_) meetingMemberBadges_->addWidget(badge);
+    meetingMemberBadges_->addStretch();
+    meetingRosterScroll_ = new QScrollArea;
+    meetingRosterScroll_->setObjectName("meetingRosterScroll");
+    meetingRosterScroll_->setFrameShape(QFrame::NoFrame);
+    meetingRosterScroll_->setWidgetResizable(true);
+    meetingRosterScroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    meetingRosterScroll_->setFixedHeight(78);
+    meetingRosterScroll_->setWidget(memberStrip);
+    meetingMembers->addWidget(meetingRosterScroll_, 1);
+    meetingRosterStack_ = new QPushButton;
+    meetingRosterStack_->setObjectName("meetingRosterStack");
+    meetingRosterStack_->setFixedSize(164, 56);
+    meetingRosterStack_->setIconSize(QSize(152, 44));
+    meetingRosterStack_->setCursor(Qt::PointingHandCursor);
+    meetingMembers->addWidget(meetingRosterStack_);
+    meetingMembers->addStretch();
+    meetingRosterPopup_ = new QDialog(this, Qt::Popup);
+    meetingRosterPopup_->setObjectName("meetingRosterPopup");
+    meetingRosterPopup_->setWindowTitle(QStringLiteral("会议成员"));
+    meetingRosterPopup_->resize(460, 300);
+    auto *popupLayout = new QVBoxLayout(meetingRosterPopup_);
+    popupLayout->setContentsMargins(18, 16, 18, 16);
+    auto *popupHeader = new QHBoxLayout;
+    meetingRosterTitle_ = text({}, "meetingRosterTitle");
+    popupHeader->addWidget(meetingRosterTitle_, 1);
+    auto *closeRoster = new QPushButton(QStringLiteral("关闭"));
+    closeRoster->setObjectName("meetingRosterClose");
+    popupHeader->addWidget(closeRoster);
+    popupLayout->addLayout(popupHeader);
+    auto *popupScroll = new QScrollArea;
+    popupScroll->setFrameShape(QFrame::NoFrame);
+    popupScroll->setWidgetResizable(true);
+    popupScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *popupMembers = new QWidget;
+    popupMembers->setObjectName("meetingRosterPopupMembers");
+    meetingRosterGrid_ = new QGridLayout(popupMembers);
+    meetingRosterGrid_->setContentsMargins(0, 8, 0, 8);
+    meetingRosterGrid_->setSpacing(12);
+    meetingRosterGrid_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+    popupScroll->setWidget(popupMembers);
+    popupLayout->addWidget(popupScroll);
+    connect(closeRoster, &QPushButton::clicked, meetingRosterPopup_, &QDialog::hide);
+    connect(meetingRosterStack_, &QPushButton::clicked, this, [this] {
+        const auto available = screen()->availableGeometry();
+        const auto bounds = available.contains(frameGeometry().center()) ? available : frameGeometry();
+        auto position = meetingRosterStack_->mapToGlobal(QPoint(0, -meetingRosterPopup_->height() - 8));
+        position.setX(qBound(bounds.left(), position.x(), qMax(bounds.left(), bounds.right() - meetingRosterPopup_->width() + 1)));
+        position.setY(qBound(bounds.top(), position.y(), qMax(bounds.top(), bounds.bottom() - meetingRosterPopup_->height() + 1)));
+        meetingRosterPopup_->move(position);
+        meetingRosterPopup_->show();
+    });
+    meetingMembers->addWidget(shareButton_, 0, Qt::AlignVCenter);
+    footerColumn->addLayout(meetingMembers);
+    auto *meetingControls = new QHBoxLayout;
     meetingControls->setSpacing(8);
-    auto *call = new QPushButton(QStringLiteral("发起视频会议"));
-    call->setObjectName("conferenceCall");
-    call->setProperty("role", "primary");
-    auto *accept = new QPushButton(QStringLiteral("接听"));
-    accept->setObjectName("conferenceAccept");
-    accept->setProperty("role", "primary");
-    auto *hangup = new QPushButton(QStringLiteral("挂断"));
-    hangup->setObjectName("conferenceHangup");
-    hangup->setProperty("role", "danger");
-    auto *muteMic = new QPushButton(QStringLiteral("麦克风静音"));
-    muteMic->setObjectName("conferenceMuteMicrophone");
-    auto *hideCamera = new QPushButton(QStringLiteral("隐藏画面"));
-    hideCamera->setObjectName("conferenceHideCamera");
-    hideCamera->setToolTip(QStringLiteral("用黑色画面替换本地与发送画面；摄像头设备仍在采集"));
-    auto *muteSpeaker = new QPushButton(QStringLiteral("扬声器静音"));
-    muteSpeaker->setObjectName("conferenceMuteSpeaker");
-    for (auto *button : {muteMic, hideCamera, muteSpeaker}) button->setCheckable(true);
-    for (auto *button : {call, accept, hangup}) meetingControls->addWidget(button);
-    meetingControls->addStretch();
-    for (auto *button : {muteMic, hideCamera, muteSpeaker}) meetingControls->addWidget(button);
-    meetingControls->addWidget(shareButton_);
+    shareLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    meetingControls->addWidget(shareLabel_, 1);
+    footerColumn->addLayout(meetingControls);
     meetingLayout->addWidget(controlsCard);
-    meetingLayout->addWidget(shareLabel_);
-    auto *meetingNotice = text(QStringLiteral("设备请在呼叫前选择。建议佩戴耳机，减少扬声器回声。"), "muted");
-    meetingNotice->setWordWrap(true);
-    meetingLayout->addWidget(meetingNotice);
     pages->addWidget(meeting);
     auto selectMeetingDevices = [this] {
         return session_.setConferenceDevices({findChild<QComboBox *>("conferenceCamera")->currentData().toString(),
             findChild<QComboBox *>("conferenceMicrophone")->currentData().toString(),
             findChild<QComboBox *>("conferenceSpeaker")->currentData().toString()});
     };
-    connect(call, &QPushButton::clicked, this, [this, selectMeetingDevices] {
-        if (selectMeetingDevices()) session_.startConference();
-    });
-    connect(accept, &QPushButton::clicked, this, [this, selectMeetingDevices] {
-        if (selectMeetingDevices()) session_.acceptConference();
-    });
-    connect(hangup, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::stopConference);
-    auto mute = [this, muteMic, hideCamera, muteSpeaker] {
+    for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
+        connect(findChild<QComboBox *>(name), &QComboBox::currentIndexChanged, this,
+            [selectMeetingDevices](int) { selectMeetingDevices(); });
+    auto updateMuteLabels = [this, muteMic, hideCamera, muteSpeaker] {
+        muteMic->setText(muteMic->isChecked() ? QStringLiteral("麦克风 · 关") : QStringLiteral("麦克风 · 开"));
+        muteSpeaker->setText(muteSpeaker->isChecked() ? QStringLiteral("扬声器 · 关") : QStringLiteral("扬声器 · 开"));
+        hideCamera->setText(hideCamera->isChecked() ? QStringLiteral("摄像头 · 关") : QStringLiteral("摄像头 · 开"));
+        refreshMeetingParticipants();
+    };
+    auto mute = [this, muteMic, hideCamera, muteSpeaker, updateMuteLabels] {
         session_.setConferenceMuted(muteMic->isChecked(), hideCamera->isChecked(), muteSpeaker->isChecked());
+        updateMuteLabels();
     };
     for (auto *button : {muteMic, hideCamera, muteSpeaker}) connect(button, &QPushButton::toggled, this, mute);
     connect(&session_, &zjdesk::SessionCoordinator::conferenceLocalFrame, localConference, &VideoSurface::setFrame);
@@ -513,31 +776,35 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         using CS = zjdesk::SessionCoordinator::ConferenceState;
         const auto state = session_.conferenceState();
         const bool mediaActive = state == CS::Connecting || state == CS::Running;
-        call->setEnabled(session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting
-            && !session_.conferenceActive() && session_.mediaEnvironment().ready
-            && session_.state() == zjdesk::SessionCoordinator::State::PeerAvailable);
-        accept->setVisible(state == CS::Incoming);
-        accept->setEnabled(session_.mediaEnvironment().ready);
-        hangup->setEnabled(session_.conferenceActive());
-        hangup->setText(state == CS::Incoming ? QStringLiteral("拒绝") : QStringLiteral("挂断"));
-        meetingStatus->setText((session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting
-            ? session_.detail() : QStringLiteral("尚未加入会议房间")) + QStringLiteral(" · ") + session_.conferenceDetail());
-        meetingButton->setText(state == CS::Incoming ? QStringLiteral("视频会议 · 来电") : QStringLiteral("视频会议"));
+        const auto roomDetail = session_.roomType() != zjdesk::SessionCoordinator::RoomType::Meeting
+            ? QStringLiteral("尚未加入会议房间") : session_.memberCount() > 0
+            ? QStringLiteral("%1 人已入会").arg(session_.memberCount()) : session_.detail();
+        meetingStatus->setText(roomDetail + QStringLiteral(" · ") + session_.conferenceDetail());
         for (auto *button : {muteMic, hideCamera, muteSpeaker})
         {
             button->setEnabled(mediaActive);
-            if (!mediaActive) button->setChecked(false);
         }
+        const QSignalBlocker blockMic(muteMic), blockCamera(hideCamera), blockSpeaker(muteSpeaker);
+        muteMic->setChecked(mediaActive ? session_.conferenceMicrophoneMuted()
+            : !findChild<QCheckBox *>("joinMicrophoneEnabled")->isChecked());
+        hideCamera->setChecked(mediaActive ? session_.conferenceCameraHidden()
+            : !findChild<QCheckBox *>("joinCameraEnabled")->isChecked());
+        muteSpeaker->setChecked(mediaActive ? session_.conferenceSpeakerMuted()
+            : !findChild<QCheckBox *>("joinSpeakerEnabled")->isChecked());
+        updateMuteLabels();
         for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
             findChild<QComboBox *>(name)->setEnabled(!mediaActive && state != CS::Calling);
         refreshPreview();
+        refreshMeetingParticipants();
     };
     connect(&session_, &zjdesk::SessionCoordinator::conferenceChanged, this, refreshMeeting);
+    connect(&session_, &zjdesk::SessionCoordinator::conferenceCameraChanged, this, &MainWindow::refreshMeetingParticipants);
     connect(&session_, &zjdesk::SessionCoordinator::stateChanged, this, refreshMeeting);
+    connect(&session_, &zjdesk::SessionCoordinator::membersChanged, this, refreshMeeting);
     connect(meetingButton, &QPushButton::clicked, pages, [=] {
         pages->setCurrentWidget(meeting);
         pageTitle->setText(QStringLiteral("视频会议"));
-        pageSubtitle->setText(QStringLiteral("与房间中的另一位成员进行双向视频和语音通话。"));
+        pageSubtitle->setText(QStringLiteral("与房间中的其他成员进行视频和语音通话。"));
     });
     // 进入视频会议页时自动枚举一次设备，确认摄像头是否存在；通话中用现有设备，不打断采集。
     connect(meetingButton, &QPushButton::clicked, this, [this] {
@@ -625,11 +892,14 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         else
             session_.leave();
     });
-    connect(meetingJoinButton_, &QPushButton::clicked, this, [this] {
+    connect(meetingJoinButton_, &QPushButton::clicked, this, [this, selectMeetingDevices] {
         using State = zjdesk::SessionCoordinator::State;
         if (session_.state() == State::Idle || session_.state() == State::Failed)
+        {
+            if (!selectMeetingDevices()) return;
             session_.join(QUrl(meetingServerEdit_->text().trimmed()), meetingRoomEdit_->text().trimmed(),
                 meetingNameEdit_->text().trimmed(), zjdesk::SessionCoordinator::RoomType::Meeting);
+        }
         else
             session_.leave();
     });
@@ -745,6 +1015,13 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     QTimer::singleShot(0, &session_, &zjdesk::SessionCoordinator::refreshDevices);
 }
 
+MainWindow::~MainWindow()
+{
+    // Session teardown emits frames and state changes after later-declared roster containers die.
+    // Stop those UI callbacks while all MainWindow members are still alive.
+    QObject::disconnect(&session_, nullptr, nullptr, nullptr);
+}
+
 void MainWindow::requestCameraPermission()
 {
     session_.requestCameraPermission();
@@ -830,6 +1107,86 @@ void MainWindow::refreshPreview()
     audioLabel_->setText(session_.audioDetail());
     refreshShare();
     refreshControl();
+    refreshMeetingParticipants();
+}
+
+void MainWindow::refreshMeetingParticipants()
+{
+    using State = zjdesk::SessionCoordinator::State;
+    const bool inMeeting = session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting
+        && (session_.state() == State::WaitingForPeer || session_.state() == State::PeerAvailable);
+    const int count = inMeeting ? session_.memberCount() : 0;
+    const bool hasPeer = count > 1;
+    const QString localName = meetingNameEdit_->text().trimmed().isEmpty()
+        ? QStringLiteral("我") : meetingNameEdit_->text().trimmed();
+    const QString remoteName = session_.peerName().isEmpty() ? QStringLiteral("参会成员") : session_.peerName();
+    const bool hidden = session_.conferenceCameraHidden();
+    const bool remoteHidden = session_.conferenceRemoteCameraHidden();
+    QStringList members;
+    if (count > 0) members.append(localName + QStringLiteral("（我）"));
+    if (hasPeer) members.append(remoteName);
+    setMeetingRoster(members);
+    meetingRemoteVideo_->setVisible(hasPeer);
+    findChild<QLabel *>("meetingWaiting")->setVisible(!hasPeer);
+    meetingLocalVideo_->setParticipant(localName + QStringLiteral("（我）"),
+        hidden ? QStringLiteral("画面已隐藏") : QStringLiteral("摄像头未开启"));
+    meetingLocalVideo_->setFrameCaption(localName + QStringLiteral("（我）"));
+    meetingLocalVideo_->setFrameHidden(hidden);
+    meetingRemoteVideo_->setParticipant(remoteName, remoteHidden
+        ? QStringLiteral("画面已隐藏") : QStringLiteral("等待摄像头画面"));
+    meetingRemoteVideo_->setFrameCaption(remoteName);
+    meetingRemoteVideo_->setFrameHidden(remoteHidden);
+    // Keep live video above avatar tiles without reparenting OpenGL widgets.
+    auto *first = hasPeer && !remoteHidden && meetingRemoteVideo_->hasFrame()
+        && (hidden || !meetingLocalVideo_->hasFrame()) ? meetingRemoteVideo_ : meetingLocalVideo_;
+    if (meetingParticipantLayout_->itemAt(1)->widget() != first)
+    {
+        meetingParticipantLayout_->removeWidget(first);
+        meetingParticipantLayout_->insertWidget(1, first, 1);
+    }
+}
+
+void MainWindow::setMeetingRoster(const QStringList &names)
+{
+    meetingMemberCount_->setText(names.isEmpty() ? QStringLiteral("尚未入会")
+        : QStringLiteral("%1 人参与").arg(names.size()));
+    const bool foldable = names.size() > 4;
+    meetingRosterStack_->setVisible(foldable);
+    if (foldable)
+    {
+        meetingRosterStack_->setIcon(memberStackIcon(names));
+        const auto description = QStringLiteral("查看全部成员（%1 人）").arg(names.size());
+        meetingRosterStack_->setAccessibleName(description);
+        meetingRosterStack_->setToolTip(description);
+    }
+    else meetingRosterPopup_->hide();
+    meetingRosterScroll_->setVisible(!names.isEmpty() && !foldable);
+    meetingRosterTitle_->setText(QStringLiteral("会议成员 · %1 人").arg(names.size()));
+    while (meetingMemberWidgets_.size() < names.size())
+    {
+        auto *badge = memberBadge("meetingMember");
+        meetingMemberBadges_->insertWidget(meetingMemberWidgets_.size(), badge);
+        meetingMemberWidgets_.append(badge);
+    }
+    for (int i = 0; i < meetingMemberWidgets_.size(); ++i)
+    {
+        auto *badge = meetingMemberWidgets_.at(i);
+        badge->setVisible(i < names.size());
+        if (i < names.size()) updateMemberBadge(badge, names.at(i));
+    }
+    while (meetingRosterPopupMembers_.size() < names.size())
+    {
+        const int index = meetingRosterPopupMembers_.size();
+        auto *badge = memberBadge("meetingPopupMember");
+        meetingRosterGrid_->addWidget(badge, index / 4, index % 4);
+        meetingRosterPopupMembers_.append(badge);
+    }
+    for (int i = 0; i < meetingRosterPopupMembers_.size(); ++i)
+    {
+        auto *badge = meetingRosterPopupMembers_.at(i);
+        badge->setVisible(i < names.size());
+        if (i < names.size()) updateMemberBadge(badge, names.at(i));
+    }
 }
 
 void MainWindow::refreshShare()
@@ -918,8 +1275,8 @@ void MainWindow::refreshSession()
     meetingJoinButton_->setEnabled(idle || meeting);
     joinButton_->setText(idle || meeting ? QStringLiteral("加入房间")
         : state == State::Connecting || state == State::Joining ? QStringLiteral("取消连接") : QStringLiteral("离开房间"));
-    meetingJoinButton_->setText(idle || !meeting ? QStringLiteral("加入会议房间")
-        : state == State::Connecting || state == State::Joining ? QStringLiteral("取消连接") : QStringLiteral("离开会议房间"));
+    meetingJoinButton_->setText(idle || !meeting ? QStringLiteral("加入会议")
+        : state == State::Connecting || state == State::Joining ? QStringLiteral("取消连接") : QStringLiteral("离开会议"));
     const QString labels[] = {QStringLiteral("未加入房间"), QStringLiteral("正在连接"), QStringLiteral("正在入会"),
         QStringLiteral("等待成员"), QStringLiteral("双方已入会"), QStringLiteral("连接失败")};
     const auto label = (idle ? QString() : meeting ? QStringLiteral("会议 · ") : QStringLiteral("协作 · "))
@@ -937,6 +1294,7 @@ void MainWindow::refreshSession()
     statusDetail_->setText(session_.detail());
     memberLabel_->setText(QStringLiteral("%1 / 2 人").arg(session_.memberCount()));
     peerLabel_->setText(session_.peerName().isEmpty() ? QStringLiteral("尚未加入") : session_.peerName());
+    refreshMeetingParticipants();
     refreshShare();
     if (state == State::PeerAvailable)
         video_->setParticipant(session_.peerName(), QStringLiteral("对方已就绪，可请求远程控制"));

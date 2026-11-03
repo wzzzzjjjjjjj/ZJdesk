@@ -93,6 +93,8 @@ private slots:
             {{"action", "offer"}, {"sessionId", "call1"}, {"sdp", "offer"}},
             {{"action", "answer"}, {"sessionId", "call1"}, {"sdp", "answer"}},
             {{"action", "ice"}, {"sessionId", "call1"}, {"candidate", "candidate"}, {"sdpMLineIndex", 1}},
+            {{"action", "camera"}, {"sessionId", "call1"}, {"hidden", true}},
+            {{"action", "camera"}, {"sessionId", "call1"}, {"hidden", false}},
             {{"action", "stop"}, {"sessionId", "call1"}}};
         for (const auto &message : messages)
             QVERIFY(alice.send({"conference", message}));
@@ -106,6 +108,10 @@ private slots:
         }
         QVERIFY(alice.send({"conference", {{"action", "ice"}, {"sessionId", "call1"},
             {"candidate", "candidate"}, {"sdpMLineIndex", -1}}}));
+        QTRY_COMPARE(am.count(), 1);
+        QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(am.takeFirst().at(0)).payload.value("code").toString(), "invalid_conference");
+        QCOMPARE(bm.count(), messages.size());
+        QVERIFY(alice.send({"conference", {{"action", "camera"}, {"sessionId", "call1"}, {"hidden", "true"}}}));
         QTRY_COMPARE(am.count(), 1);
         QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(am.takeFirst().at(0)).payload.value("code").toString(), "invalid_conference");
         QCOMPARE(bm.count(), messages.size());

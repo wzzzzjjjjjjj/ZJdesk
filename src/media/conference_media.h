@@ -30,7 +30,8 @@ class ConferenceMedia final : public QObject
 public:
     explicit ConferenceMedia(QObject *parent = nullptr);
     ~ConferenceMedia() override;
-    void start(bool offerer, const ConferenceDevices &devices, quint64 epoch);
+    void start(bool offerer, const ConferenceDevices &devices, quint64 epoch,
+        bool microphoneMuted = false, bool cameraHidden = false, bool speakerMuted = false);
     void stop(quint64 epoch);
     void negotiate(const QString &type, const QJsonObject &payload, quint64 epoch);
     void setMuted(bool microphone, bool camera, bool speaker, quint64 epoch);

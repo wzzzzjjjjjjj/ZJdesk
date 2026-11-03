@@ -77,7 +77,13 @@ public:
     QString conferenceDetail() const { return conferenceDetail_; }
     bool conferenceActive() const { return !conferenceId_.isEmpty(); }
     bool conferenceDevicesBusy() const { return conferenceActive() || conferenceCleanupPending_; }
+    bool conferenceCameraHidden() const { return conferenceCameraHidden_; }
+    bool conferenceMicrophoneMuted() const { return conferenceMicMuted_; }
+    bool conferenceSpeakerMuted() const { return conferenceSpeakerMuted_; }
+    bool conferenceRemoteCameraHidden() const { return conferenceRemoteCameraHidden_; }
     bool setConferenceDevices(const ConferenceDevices &devices);
+    void setConferenceAutoConnect(bool enabled);
+    void setConferenceJoinDefaults(bool microphoneEnabled, bool cameraEnabled, bool speakerEnabled);
     bool startConference();
     bool acceptConference();
     void stopConference();
@@ -102,6 +108,7 @@ signals:
     void inputProbeAcknowledged(quint64 sequence, qint64 roundTripUs, qint64 injectUs, bool accepted);
     void remoteCursorChanged(const zjdesk::RemoteCursor &cursor);
     void conferenceChanged();
+    void conferenceCameraChanged();
     void conferenceLocalFrame(const QImage &image);
     void conferenceRemoteFrame(const QImage &image);
     void conferenceAudioReceived(quint64 buffers, double peak);
@@ -159,7 +166,10 @@ private:
     bool conferenceMediaPending_ = false;
     bool conferenceCleanupPending_ = false;
     bool conferenceOfferer_ = false;
+    bool conferenceAutoConnect_ = false;
+    bool conferenceJoinMicrophoneEnabled_ = true, conferenceJoinCameraEnabled_ = true, conferenceJoinSpeakerEnabled_ = true;
     bool conferenceMicMuted_ = false, conferenceCameraHidden_ = false, conferenceSpeakerMuted_ = false;
+    bool conferenceRemoteCameraHidden_ = false;
     QList<QJsonObject> conferencePendingSignals_;
     PreviewState shareState_ = PreviewState::Stopped;
     QString shareDetail_ = QStringLiteral("屏幕共享未启动");

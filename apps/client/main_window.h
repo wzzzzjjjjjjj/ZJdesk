@@ -3,6 +3,7 @@
 #include "media/media_environment.h"
 #include "session/session_coordinator.h"
 #include <QMainWindow>
+#include <QStringList>
 
 class QLabel;
 class QComboBox;
@@ -10,6 +11,10 @@ class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
 class QVBoxLayout;
+class QHBoxLayout;
+class QScrollArea;
+class QDialog;
+class QGridLayout;
 class QPropertyAnimation;
 class VideoSurface;
 
@@ -19,6 +24,7 @@ class MainWindow final : public QMainWindow
 public:
     explicit MainWindow(const QString &serverUrl, const QString &roomId, const QString &name,
                         QWidget *parent = nullptr);
+    ~MainWindow() override;
     void requestCameraPermission();
 
 protected:
@@ -32,6 +38,8 @@ private:
     void refreshDevices();
     void refreshShare();
     void refreshControl();
+    void refreshMeetingParticipants();
+    void setMeetingRoster(const QStringList &names);
     void expandVideo(bool expanded);
     QList<QWidget *> normalWidgets_;
     Qt::WindowStates normalWindowState_;
@@ -56,7 +64,20 @@ private:
     QPlainTextEdit *logView_ = nullptr;
     VideoSurface *video_ = nullptr;
     VideoSurface *meetingLocalVideo_ = nullptr;
+    VideoSurface *meetingRemoteVideo_ = nullptr;
     VideoSurface *meetingShareVideo_ = nullptr;
+    QVBoxLayout *meetingParticipantLayout_ = nullptr;
+    QLabel *meetingMemberCount_ = nullptr;
+    QWidget *meetingLocalMember_ = nullptr;
+    QWidget *meetingRemoteMember_ = nullptr;
+    QScrollArea *meetingRosterScroll_ = nullptr;
+    QHBoxLayout *meetingMemberBadges_ = nullptr;
+    QList<QWidget *> meetingMemberWidgets_;
+    QPushButton *meetingRosterStack_ = nullptr;
+    QDialog *meetingRosterPopup_ = nullptr;
+    QLabel *meetingRosterTitle_ = nullptr;
+    QGridLayout *meetingRosterGrid_ = nullptr;
+    QList<QWidget *> meetingRosterPopupMembers_;
     QComboBox *sourceCombo_ = nullptr;
     QPushButton *previewButton_ = nullptr;
     QPushButton *audioButton_ = nullptr;

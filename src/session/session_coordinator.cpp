@@ -272,8 +272,12 @@ void SessionCoordinator::changeState(State state, const QString &detail)
     events_.append("session", detail);
     emit stateChanged(state);
     if (state == State::PeerAvailable)
+    {
         sendNegotiation("control", {{"action", "capabilities"},
             {"control", roomType_ == RoomType::Assistance && input_.available() && media_.environment().ready}});
+        if (conferenceAutoConnect_ && roomType_ == RoomType::Meeting)
+            startConference();
+    }
 }
 
 void SessionCoordinator::fail(const QString &reason)
@@ -817,12 +821,31 @@ bool SessionCoordinator::startConference()
         return false;
     conferenceId_ = QUuid::createUuid().toString(QUuid::Id128);
     conferenceState_ = ConferenceState::Calling;
-    conferenceDetail_ = QStringLiteral("正在呼叫对方，等待接听");
+    conferenceDetail_ = conferenceAutoConnect_ ? QStringLiteral("正在连接会议音视频")
+        : QStringLiteral("正在呼叫对方，等待接听");
     if (!sendNegotiation("conference", {{"action", "start"}, {"sessionId", conferenceId_}}))
     { clearConference(false); return false; }
     conferenceDeadline_.start(45000);
     emit conferenceChanged();
     return true;
+}
+
+void SessionCoordinator::setConferenceAutoConnect(bool enabled)
+{
+    conferenceAutoConnect_ = enabled;
+    if (!enabled || roomType_ != RoomType::Meeting) return;
+    if (conferenceState_ == ConferenceState::Incoming)
+        acceptConference();
+    else if (state_ == State::PeerAvailable && !conferenceActive())
+        startConference();
+}
+
+void SessionCoordinator::setConferenceJoinDefaults(bool microphoneEnabled, bool cameraEnabled, bool speakerEnabled)
+{
+    conferenceJoinMicrophoneEnabled_ = microphoneEnabled;
+    conferenceJoinCameraEnabled_ = cameraEnabled;
+    conferenceJoinSpeakerEnabled_ = speakerEnabled;
+    emit conferenceChanged();
 }
 
 void SessionCoordinator::beginConferenceMedia(bool offerer)
@@ -831,13 +854,18 @@ void SessionCoordinator::beginConferenceMedia(bool offerer)
     conferenceCleanupPending_ = false;
     conferenceOfferer_ = offerer;
     ++conferenceEpoch_;
-    conferenceMicMuted_ = conferenceCameraHidden_ = conferenceSpeakerMuted_ = false;
+    conferenceMicMuted_ = !conferenceJoinMicrophoneEnabled_;
+    conferenceCameraHidden_ = !conferenceJoinCameraEnabled_;
+    conferenceSpeakerMuted_ = !conferenceJoinSpeakerEnabled_;
+    conferenceRemoteCameraHidden_ = false;
     conferenceState_ = ConferenceState::Connecting;
     conferenceDetail_ = QStringLiteral("正在连接双向音视频");
     conferenceDeadline_.start(45000);
     stopPreview();
     stopAudioTest();
     emit conferenceChanged();
+    // Announce the initial camera state, including a default-hidden camera.
+    sendNegotiation("conference", {{"action", "camera"}, {"sessionId", conferenceId_}, {"hidden", conferenceCameraHidden_}});
     startConferenceMediaWhenReady();
 }
 
@@ -847,8 +875,8 @@ void SessionCoordinator::startConferenceMediaWhenReady()
     const auto released = [](PreviewState state) { return state == PreviewState::Stopped || state == PreviewState::Failed; };
     if (!released(previewState_) || !released(audioState_)) return;
     conferenceMediaPending_ = false;
-    conference_.start(conferenceOfferer_, conferenceDevices_, conferenceEpoch_);
-    conference_.setMuted(conferenceMicMuted_, conferenceCameraHidden_, conferenceSpeakerMuted_, conferenceEpoch_);
+    conference_.start(conferenceOfferer_, conferenceDevices_, conferenceEpoch_,
+        conferenceMicMuted_, conferenceCameraHidden_, conferenceSpeakerMuted_);
     const auto pending = conferencePendingSignals_; conferencePendingSignals_.clear();
     for (const auto &payload : pending)
         conference_.negotiate(payload.value("action").toString(), payload, conferenceEpoch_);
@@ -866,11 +894,17 @@ bool SessionCoordinator::acceptConference()
 
 void SessionCoordinator::setConferenceMuted(bool microphone, bool camera, bool speaker)
 {
+    const bool cameraChanged = conferenceCameraHidden_ != camera;
     conferenceMicMuted_ = microphone;
     conferenceCameraHidden_ = camera;
     conferenceSpeakerMuted_ = speaker;
     if (conferenceState_ == ConferenceState::Connecting || conferenceState_ == ConferenceState::Running)
+    {
         conference_.setMuted(microphone, camera, speaker, conferenceEpoch_);
+        if (cameraChanged)
+            sendNegotiation("conference", {{"action", "camera"}, {"sessionId", conferenceId_}, {"hidden", camera}});
+    }
+    if (cameraChanged) emit conferenceCameraChanged();
 }
 
 void SessionCoordinator::stopConference() { clearConference(true); }
@@ -885,6 +919,7 @@ void SessionCoordinator::clearConference(bool notifyPeer)
     conferencePendingSignals_.clear();
     conferenceCleanupPending_ = true;
     conferenceState_ = ConferenceState::Idle;
+    conferenceCameraHidden_ = conferenceRemoteCameraHidden_ = false;
     conferenceDetail_ = QStringLiteral("会议已结束");
     conference_.stop(++conferenceEpoch_);
     emit conferenceLocalFrame({}); emit conferenceRemoteFrame({});
@@ -913,13 +948,25 @@ void SessionCoordinator::receiveConference(const QJsonObject &payload)
         }
         conferenceId_ = id;
         conferenceState_ = ConferenceState::Incoming;
-        conferenceDetail_ = QStringLiteral("%1 邀请你加入视频会议").arg(peerName_);
+        conferenceDetail_ = conferenceAutoConnect_ ? QStringLiteral("正在连接会议音视频")
+            : QStringLiteral("%1 邀请你加入视频会议").arg(peerName_);
         conferenceDeadline_.start(45000);
         emit conferenceChanged();
+        if (conferenceAutoConnect_) acceptConference();
         return;
     }
     if (id.isEmpty() || id != conferenceId_) return;
     if (action == "stop") { clearConference(false); return; }
+    if (action == "camera")
+    {
+        if ((conferenceState_ == ConferenceState::Connecting || conferenceState_ == ConferenceState::Running)
+            && payload.value("hidden").isBool())
+        {
+            conferenceRemoteCameraHidden_ = payload.value("hidden").toBool();
+            emit conferenceCameraChanged();
+        }
+        return;
+    }
     if (action == "accept" && conferenceState_ == ConferenceState::Calling)
         beginConferenceMedia(true);
     else if (conferenceState_ == ConferenceState::Connecting || conferenceState_ == ConferenceState::Running)

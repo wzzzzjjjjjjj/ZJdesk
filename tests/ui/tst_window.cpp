@@ -28,8 +28,11 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
+#include <QCheckBox>
+#include <QTemporaryDir>
 #include <ctime>
 #include <algorithm>
+#include <memory>
 #include <QtTest>
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -173,7 +176,33 @@ public:
 class WindowTests : public QObject
 {
     Q_OBJECT
+    QTemporaryDir preferenceDirectory_;
 private slots:
+    void init()
+    {
+        QSettings preferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "meeting");
+        preferences.clear();
+    }
+
+    void meetingJoinDefaultsPersist()
+    {
+        MainWindow window("ws://127.0.0.1:8765", "demo", "Tester");
+        for (const auto *name : {"joinCameraEnabled", "joinMicrophoneEnabled", "joinSpeakerEnabled"})
+        {
+            auto *check = window.findChild<QCheckBox *>(name);
+            QVERIFY(check && check->isChecked());
+            check->setChecked(false);
+        }
+        MainWindow reopened("ws://127.0.0.1:8765", "demo", "Tester");
+        for (const auto *name : {"joinCameraEnabled", "joinMicrophoneEnabled", "joinSpeakerEnabled"})
+            QVERIFY(!reopened.findChild<QCheckBox *>(name)->isChecked());
+        QVERIFY(!reopened.session_.conferenceJoinCameraEnabled_);
+        QVERIFY(!reopened.session_.conferenceJoinMicrophoneEnabled_);
+        QVERIFY(!reopened.session_.conferenceJoinSpeakerEnabled_);
+        for (const auto *name : {"conferenceMuteMicrophone", "conferenceMuteSpeaker", "conferenceHideCamera"})
+            QVERIFY(reopened.findChild<QPushButton *>(name)->isChecked());
+    }
+
     void roomEntriesAreMutuallyExclusive()
     {
         zjdesk::RoomServer server;
@@ -1644,6 +1673,8 @@ private slots:
 
     void initTestCase()
     {
+        QVERIFY(preferenceDirectory_.isValid());
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, preferenceDirectory_.path());
         QApplication::setStyle("Fusion");
         QFont font;
         font.setFamilies({"Microsoft YaHei UI", "Noto Sans CJK SC", "sans-serif"});
@@ -1730,6 +1761,26 @@ private slots:
             QVERIFY(QTest::qWaitForWindowExposed(&window));
         }
         QCOMPARE(window.size(), QSize(1040, 720));
+        auto *profile = window.findChild<QWidget *>("userProfile");
+        auto *profileName = window.findChild<QLineEdit *>("meetingDisplayName");
+        auto *profileAvatar = window.findChild<QLabel *>("profileAvatar");
+        QVERIFY(profile && profile->isVisible());
+        QVERIFY(profile->mapTo(&window, QPoint()).x() > window.width() / 2);
+        QVERIFY(window.rect().contains(QRect(profile->mapTo(&window, QPoint()), profile->size())));
+        profileName->setText("Zoe");
+        QCOMPARE(window.nameEdit_->text(), QString("Zoe"));
+        QCOMPARE(profileAvatar->text(), QString("Z"));
+        window.nameEdit_->setText(longName);
+        QCOMPARE(profileName->text(), longName);
+        QCOMPARE(profileAvatar->text(), longName.left(1));
+        auto *settingsButton = window.findChild<QPushButton *>("settingsButton");
+        QVERIFY(settingsButton && settingsButton->isVisible());
+        QVERIFY(!window.findChild<QPushButton *>("meetingSettingsButton"));
+        auto *sidebar = window.findChild<QFrame *>("sidebar");
+        const QRect settingsBounds(settingsButton->mapTo(sidebar, QPoint()), settingsButton->size());
+        QVERIFY(sidebar->rect().contains(settingsBounds));
+        QVERIFY(settingsBounds.center().x() > sidebar->width() / 2);
+        QVERIFY(settingsBounds.bottom() > sidebar->height() - 60);
         auto *surface = window.findChild<VideoSurface *>();
         QVERIFY(!surface->grabFramebuffer().isNull());
         QTRY_VERIFY(surface->isValid());
@@ -1785,6 +1836,18 @@ private slots:
         QTest::mouseClick(nav.at(1), Qt::LeftButton);
         // 进入页面会自动刷新一次设备，等刷新完成后再注入长名称，避免被刷新覆盖。
         QTRY_VERIFY_WITH_TIMEOUT(!meetingDevices.isEmpty(), 15000);
+        // Assistance-room membership must not appear as meeting participants.
+        auto *count = window.findChild<QLabel *>("meetingMemberCount");
+        QCOMPARE(count->text(), QStringLiteral("尚未入会"));
+        QVERIFY(window.findChild<QWidget *>("meetingRemoteMember")->isHidden());
+        QVERIFY(window.findChild<VideoSurface *>("conferenceRemoteVideo")->isHidden());
+        window.session_.leave();
+        peer.leave();
+        QVERIFY(window.session_.join(QUrl(url), "demo", longName, zjdesk::SessionCoordinator::RoomType::Meeting));
+        QTRY_COMPARE(count->text(), QStringLiteral("1 人参与"));
+        QVERIFY(window.findChild<QWidget *>("meetingRemoteMember")->isHidden());
+        QVERIFY(peer.join(QUrl(url), "demo", longName, zjdesk::SessionCoordinator::RoomType::Meeting));
+        QTRY_COMPARE(count->text(), QStringLiteral("2 人参与"));
         window.resize(1040, 720);
         for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
         {
@@ -1794,9 +1857,9 @@ private slots:
         }
         QTest::qWait(100);
         QCOMPARE(window.size(), QSize(1040, 720));
-        for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker",
-                 "conferenceCall", "conferenceHangup", "conferenceMuteMicrophone", "conferenceHideCamera",
-                 "conferenceMuteSpeaker", "conferenceLocalVideo", "conferenceRemoteVideo", "meetingShareVideo"})
+        for (const auto *name : {"conferenceMuteMicrophone", "conferenceHideCamera",
+                 "conferenceMuteSpeaker", "conferenceLocalVideo", "conferenceRemoteVideo", "meetingShareVideo",
+                 "meetingRoomId", "meetingJoinButton", "settingsButton", "userProfile", "meetingLocalMember", "meetingRemoteMember", "shareButton"})
         {
             auto *widget = window.findChild<QWidget *>(name);
             QVERIFY(widget && widget->isVisible());
@@ -1804,10 +1867,90 @@ private slots:
         }
         QVERIFY(!window.findChild<VideoSurface *>("conferenceLocalVideo")->grabFramebuffer().isNull());
         QVERIFY(!window.findChild<VideoSurface *>("conferenceRemoteVideo")->grabFramebuffer().isNull());
+        auto *stage = window.findChild<VideoSurface *>("meetingShareVideo");
+        auto *local = window.findChild<VideoSurface *>("conferenceLocalVideo");
+        auto *remote = window.findChild<VideoSurface *>("conferenceRemoteVideo");
+        QVERIFY(stage->width() > local->width() * 2);
+        QVERIFY(local->mapTo(&window, QPoint()).x() > stage->mapTo(&window, QPoint()).x() + stage->width());
+        QVERIFY(remote->mapTo(&window, QPoint()).y() > local->mapTo(&window, QPoint()).y());
         QVERIFY(window.grab().save("output/ui-meeting-small.png"));
         window.resize(1280, 820);
         QTest::qWait(100);
         QVERIFY(window.grab().save("output/ui-meeting-large.png"));
+        auto *settings = window.findChild<QWidget *>("meetingSettings");
+        QVERIFY(settings && settings->isHidden());
+        if (backgroundSnapshots)
+        {
+            settings->setWindowFlag(Qt::Tool);
+            settings->setWindowFlag(Qt::WindowDoesNotAcceptFocus);
+            settings->setAttribute(Qt::WA_ShowWithoutActivating);
+            settings->move(window.screen()->virtualGeometry().left() - 2000, 0);
+        }
+        settingsButton->click();
+        QTRY_VERIFY(settings->isVisible());
+        QVERIFY(!settings->isAncestorOf(profileName));
+        for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
+        {
+            auto *combo = window.findChild<QComboBox *>(name);
+            combo->addItem(QStringLiteral("USB 音视频设备 · 高清摄像头与立体声麦克风阵列（长设备名称）"), "test");
+            combo->setCurrentIndex(combo->count() - 1);
+        }
+        QTest::qWait(100);
+        for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker", "previewButton",
+                 "joinCameraEnabled", "joinMicrophoneEnabled", "joinSpeakerEnabled"})
+        {
+            auto *widget = window.findChild<QWidget *>(name);
+            QVERIFY(widget && widget->isVisible());
+            QVERIFY2(settings->rect().contains(QRect(widget->mapTo(settings, QPoint()), widget->size())), name);
+        }
+        QVERIFY(settings->grab().save("output/ui-meeting-settings.png"));
+        QVERIFY(window.findChild<QLineEdit *>("meetingServerAddress")->isHidden());
+        settings->hide();
+        // UI fixtures cover the future roster boundary, without adding fake room members.
+        window.resize(1040, 720);
+        const QStringList fourNames{QStringLiteral("张三"), QStringLiteral("李四"), QStringLiteral("王五"), QStringLiteral("赵六")};
+        window.setMeetingRoster(fourNames);
+        QVERIFY(window.meetingRosterStack_->isHidden());
+        QVERIFY(window.meetingRosterScroll_->isVisible());
+        QCOMPARE(count->text(), QStringLiteral("4 人参与"));
+        window.setMeetingRoster(fourNames + QStringList{QStringLiteral("孙七")});
+        QVERIFY(window.meetingRosterStack_->isVisible());
+        QVERIFY(window.meetingRosterStack_->text().isEmpty());
+        QVERIFY(!window.meetingRosterStack_->icon().isNull());
+        QVERIFY(window.meetingRosterScroll_->isHidden());
+        QCOMPARE(count->text(), QStringLiteral("5 人参与"));
+        QTest::qWait(100);
+        QVERIFY(window.grab().save("output/ui-meeting-roster-folded.png"));
+        auto *rosterPopup = window.meetingRosterPopup_;
+        if (qEnvironmentVariableIntValue("ZJDESK_UI_BACKGROUND_SNAPSHOTS"))
+        {
+            rosterPopup->setWindowFlags(Qt::Tool | Qt::WindowDoesNotAcceptFocus);
+            rosterPopup->setAttribute(Qt::WA_ShowWithoutActivating);
+        }
+        window.meetingRosterStack_->click();
+        QTRY_VERIFY(rosterPopup->isVisible());
+        QVERIFY(window.meetingRosterScroll_->isHidden());
+        QCOMPARE(rosterPopup->findChildren<QWidget *>("meetingPopupMember").size(), 5);
+        for (int i = 0; i < 5; ++i)
+        {
+            auto *badge = window.meetingRosterPopupMembers_.at(i);
+            QVERIFY(badge->isVisible());
+            QVERIFY(!badge->findChild<QLabel *>("memberName")->text().isEmpty());
+            QVERIFY(rosterPopup->rect().contains(QRect(badge->mapTo(rosterPopup, QPoint()), badge->size())));
+        }
+        QCOMPARE(window.size(), QSize(1040, 720));
+        QTest::qWait(100);
+        QVERIFY(rosterPopup->grab().save("output/ui-meeting-roster-popup.png"));
+        rosterPopup->findChild<QPushButton *>("meetingRosterClose")->click();
+        QVERIFY(rosterPopup->isHidden());
+        window.meetingRosterStack_->click();
+        QVERIFY(rosterPopup->isVisible());
+        window.setMeetingRoster(fourNames);
+        QVERIFY(window.meetingRosterStack_->isHidden());
+        QVERIFY(window.meetingRosterScroll_->isVisible());
+        QVERIFY(rosterPopup->isHidden());
+        window.refreshMeetingParticipants();
+        QCOMPARE(count->text(), QStringLiteral("2 人参与"));
         window.session_.leave();
         peer.leave();
         window.findChild<QLineEdit *>("displayName")->setText(QStringLiteral("本机用户"));
@@ -1824,7 +1967,9 @@ private slots:
         zjdesk::RoomServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
         const auto url = QString("ws://127.0.0.1:%1").arg(server.port());
-        MainWindow alice(url, "conference-ui", "Alice"), bob(url, "conference-ui", "Bob");
+        MainWindow alice(url, "conference-ui", "Alice");
+        auto bobOwner = std::make_unique<MainWindow>(url, "conference-ui", "Bob");
+        auto &bob = *bobOwner;
         const bool backgroundSnapshots = qEnvironmentVariableIntValue("ZJDESK_UI_BACKGROUND_SNAPSHOTS") == 1;
         if (backgroundSnapshots)
         {
@@ -1850,6 +1995,20 @@ private slots:
             QVERIFY(QTest::qWaitForWindowExposed(&bob));
         }
         QTRY_VERIFY(!aliceDevices.isEmpty() && !bobDevices.isEmpty());
+        for (auto *window : {&alice, &bob})
+        {
+            for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
+                QVERIFY(window->findChild<QComboBox *>(name)->currentData().toString().isEmpty());
+            for (const auto *name : {"conferenceMuteMicrophone", "conferenceMuteSpeaker", "conferenceHideCamera"})
+            {
+                const auto *button = window->findChild<QPushButton *>(name);
+                QVERIFY(!button->isChecked());
+                QVERIFY(button->text().endsWith(QStringLiteral("开")));
+            }
+            QVERIFY(!window->session_.conferenceMicMuted_);
+            QVERIFY(!window->session_.conferenceSpeakerMuted_);
+            QVERIFY(!window->session_.conferenceCameraHidden());
+        }
         aliceDevices.clear();
         alice.findChildren<QPushButton *>("navButton").at(1)->click();
         auto *localPreview = alice.findChild<VideoSurface *>("conferenceLocalVideo");
@@ -1863,43 +2022,35 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!aliceDevices.isEmpty(), 15000);
         for (auto *window : {&alice, &bob})
         {
+            auto *settings = window->findChild<QDialog *>("meetingSettings");
+            if (backgroundSnapshots)
+            {
+                settings->setWindowFlag(Qt::Tool);
+                settings->setWindowFlag(Qt::WindowDoesNotAcceptFocus);
+                settings->setAttribute(Qt::WA_ShowWithoutActivating);
+                settings->move(window->screen()->virtualGeometry().left() - 2000, 0);
+            }
+            window->findChild<QPushButton *>("settingsButton")->click();
+            QTRY_VERIFY(settings->isVisible());
             for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
             {
                 auto *combo = window->findChild<QComboBox *>(name);
                 QVERIFY(combo);
+                QVERIFY(combo->isEnabled());
                 combo->addItem("Test device", "test");
                 combo->setCurrentIndex(combo->count() - 1);
             }
+            QCOMPARE(window->session_.conferenceDevices_.camera, QString("test"));
+            QCOMPARE(window->session_.conferenceDevices_.microphone, QString("test"));
+            QCOMPARE(window->session_.conferenceDevices_.speaker, QString("test"));
+            settings->hide();
             window->findChild<QLineEdit *>("meetingRoomId")->setText("conference-ui");
             window->findChild<QPushButton *>("meetingJoinButton")->click();
         }
         QTRY_COMPARE(alice.session_.memberCount(), 2);
-        aliceDevices.clear();
-        alice.findChildren<QPushButton *>("navButton").at(1)->click();
-        // 再次进入页面会刷新设备并清空注入项，刷新结束后重新注入测试设备。
-        QTRY_VERIFY_WITH_TIMEOUT(!aliceDevices.isEmpty(), 15000);
-        for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
-        {
-            auto *combo = alice.findChild<QComboBox *>(name);
-            QVERIFY(combo);
-            combo->addItem("Test device", "test");
-            combo->setCurrentIndex(combo->count() - 1);
-        }
-        auto *call = alice.findChild<QPushButton *>("conferenceCall");
-        auto *accept = bob.findChild<QPushButton *>("conferenceAccept");
-        QVERIFY(call->isEnabled());
-        QVERIFY(alice.session_.startPreview("test"));
-        QTRY_VERIFY_WITH_TIMEOUT(localPreview->hasFrame(), 10000);
-        call->click();
-        QTRY_COMPARE(alice.session_.conferenceState(), CS::Calling);
-        const auto duringCall = localPreview->grabFramebuffer();
-        QTest::qWait(300);
-        QVERIFY(!duringCall.isNull());
-        QVERIFY(duringCall != localPreview->grabFramebuffer());
-        QTRY_COMPARE(bob.findChild<QLabel *>("pageTitle")->text(), QStringLiteral("视频会议"));
-        QVERIFY(accept->isVisible());
-        QVERIFY(!call->isEnabled());
-        accept->click();
+        QVERIFY(!alice.findChild<QPushButton *>("conferenceCall"));
+        QVERIFY(!bob.findChild<QPushButton *>("conferenceAccept"));
+        QVERIFY(!alice.findChild<QPushButton *>("conferenceHangup"));
         QTRY_COMPARE_WITH_TIMEOUT(alice.session_.conferenceState(), CS::Running, 15000);
         QTRY_COMPARE_WITH_TIMEOUT(bob.session_.conferenceState(), CS::Running, 15000);
         for (auto *window : {&alice, &bob})
@@ -1914,6 +2065,9 @@ private slots:
             QVERIFY(!window->findChild<QComboBox *>("conferenceCamera")->isEnabled());
         }
         auto *hide = alice.findChild<QPushButton *>("conferenceHideCamera");
+        QVERIFY(QDir().mkpath("output"));
+        QTest::qWait(100);
+        QVERIFY(alice.grab().save("output/ui-meeting-two-cameras.png"));
         QVERIFY(alice.findChild<QPushButton *>("shareButton")->isEnabled());
         QVERIFY(alice.session_.startScreenShare("test", 15));
         QTRY_VERIFY_WITH_TIMEOUT(alice.findChild<VideoSurface *>("meetingShareVideo")->hasFrame(), 15000);
@@ -1925,14 +2079,97 @@ private slots:
         QVERIFY(hide->isEnabled());
         hide->click();
         QVERIFY(hide->isChecked());
-        QVERIFY(QDir().mkpath("output"));
+        auto *local = alice.findChild<VideoSurface *>("conferenceLocalVideo");
+        auto *remote = alice.findChild<VideoSurface *>("conferenceRemoteVideo");
+        QTRY_VERIFY(bob.session_.conferenceRemoteCameraHidden());
+        QTRY_COMPARE(bob.findChild<VideoSurface *>("conferenceRemoteVideo")->grabFramebuffer().pixelColor(10, 30), QColor("#eef3f6"));
+        QTRY_COMPARE(local->grabFramebuffer().pixelColor(10, 30), QColor("#eef3f6"));
+        QTRY_VERIFY(remote->mapTo(&alice, QPoint()).y() < local->mapTo(&alice, QPoint()).y());
+        QCOMPARE(alice.findChild<QLabel *>("meetingMemberCount")->text(), QStringLiteral("2 人参与"));
         QTest::qWait(100);
         QVERIFY(alice.grab().save("output/ui-meeting-running.png"));
-        bob.findChild<QPushButton *>("conferenceHangup")->click();
+        QVERIFY(alice.grab().save("output/ui-meeting-one-camera.png"));
+        auto *bobHide = bob.findChild<QPushButton *>("conferenceHideCamera");
+        bobHide->click();
+        QTRY_VERIFY(alice.session_.conferenceRemoteCameraHidden());
+        QTRY_COMPARE(remote->grabFramebuffer().pixelColor(10, 30), QColor("#eef3f6"));
+        // Late camera-state messages from a previous call cannot replace current state.
+        alice.session_.receiveConference({{"action", "camera"}, {"sessionId", "stale-call"}, {"hidden", false}});
+        QVERIFY(alice.session_.conferenceRemoteCameraHidden());
+        auto *mic = alice.findChild<QPushButton *>("conferenceMuteMicrophone");
+        auto *speaker = alice.findChild<QPushButton *>("conferenceMuteSpeaker");
+        mic->click();
+        speaker->click();
+        alice.resize(1040, 720);
+        QTest::qWait(100);
+        QCOMPARE(alice.size(), QSize(1040, 720));
+        const auto *roomEntry = alice.findChild<QLineEdit *>("meetingRoomId");
+        QVERIFY(roomEntry->mapTo(&alice, roomEntry->rect().topRight()).x() < mic->mapTo(&alice, QPoint()).x());
+        QVERIFY(alice.rect().contains(hide->mapTo(&alice, hide->rect().bottomRight())));
+        QVERIFY(alice.grab().save("output/ui-meeting-no-cameras.png"));
+        mic->click();
+        speaker->click();
+        hide->click();
+        QVERIFY(!hide->isChecked());
+        QTRY_VERIFY(local->mapTo(&alice, QPoint()).y() < remote->mapTo(&alice, QPoint()).y());
+        QTRY_VERIFY(local->grabFramebuffer().pixelColor(10, 30) != QColor("#eef3f6"));
+        bobHide->click();
+        QTRY_VERIFY(!alice.session_.conferenceRemoteCameraHidden());
+        QTRY_VERIFY(remote->grabFramebuffer().pixelColor(10, 30) != QColor("#eef3f6"));
+        // Defaults configured during a call apply to the following connection only.
+        for (const auto *name : {"joinCameraEnabled", "joinMicrophoneEnabled", "joinSpeakerEnabled"})
+            alice.findChild<QCheckBox *>(name)->setChecked(false);
+        QVERIFY(!alice.session_.conferenceCameraHidden());
+        QVERIFY(!alice.session_.conferenceMicrophoneMuted());
+        QVERIFY(!alice.session_.conferenceSpeakerMuted());
+        QVERIFY(!hide->isChecked() && !mic->isChecked() && !speaker->isChecked());
+        // A delayed device enumeration can refresh disabled selectors during a call.
+        // Those updates must not change the active capture, but must apply on next join.
+        alice.session_.devices_.clear();
+        alice.refreshDevices();
+        QVERIFY(alice.findChild<QComboBox *>("conferenceCamera")->currentData().toString().isEmpty());
+        QCOMPARE(alice.session_.conferenceDevices_.camera, QString("test"));
+        bob.findChild<QPushButton *>("meetingJoinButton")->click();
         QTRY_COMPARE(alice.session_.conferenceState(), CS::Idle);
         QTRY_VERIFY(!alice.findChild<VideoSurface *>("conferenceRemoteVideo")->hasFrame());
-        QTRY_VERIFY(call->isEnabled());
-        QVERIFY(!hide->isChecked());
+        QVERIFY(hide->isChecked());
+        QTRY_COMPARE(alice.findChild<QLabel *>("meetingMemberCount")->text(), QStringLiteral("1 人参与"));
+        QVERIFY(remote->isHidden());
+        alice.session_.leave();
+        QCOMPARE(alice.findChild<QLabel *>("meetingMemberCount")->text(), QStringLiteral("尚未入会"));
+        QVERIFY(alice.findChild<QWidget *>("meetingLocalMember")->isHidden());
+
+        alice.findChild<QPushButton *>("meetingJoinButton")->click();
+        QCOMPARE(alice.session_.conferenceDevices_.camera, QString());
+        QCOMPARE(alice.session_.conferenceDevices_.microphone, QString());
+        QCOMPARE(alice.session_.conferenceDevices_.speaker, QString());
+        alice.session_.leave();
+
+        // Destroy a window during an active call, without explicitly hanging up or leaving first.
+        // Its coordinator emits cleanup signals after MainWindow's derived members are destroyed.
+        for (auto *window : {&alice, &bob})
+        {
+            QVERIFY(window->session_.setConferenceDevices({"test", "test", "test"}));
+            QVERIFY(window->session_.join(QUrl(url), "conference-ui", window == &alice ? "Alice" : "Bob",
+                zjdesk::SessionCoordinator::RoomType::Meeting));
+        }
+        QTRY_COMPARE(alice.session_.memberCount(), 2);
+        QTRY_COMPARE_WITH_TIMEOUT(alice.session_.conferenceState(), CS::Running, 15000);
+        QTRY_COMPARE_WITH_TIMEOUT(bob.session_.conferenceState(), CS::Running, 15000);
+        QTRY_VERIFY(bob.findChild<VideoSurface *>("conferenceRemoteVideo")->hasFrame());
+        QVERIFY(alice.session_.conferenceCameraHidden());
+        QVERIFY(alice.session_.conferenceMicrophoneMuted());
+        QVERIFY(alice.session_.conferenceSpeakerMuted());
+        QTRY_VERIFY(bob.session_.conferenceRemoteCameraHidden());
+        for (const auto *name : {"conferenceMuteMicrophone", "conferenceMuteSpeaker", "conferenceHideCamera"})
+            QVERIFY(alice.findChild<QPushButton *>(name)->isChecked());
+        QPointer<MainWindow> closedWindow(&bob);
+        bobOwner.reset();
+        QVERIFY(closedWindow.isNull());
+        QTRY_COMPARE(alice.session_.conferenceState(), CS::Idle);
+        QTRY_COMPARE(alice.session_.memberCount(), 1);
+        QVERIFY(!alice.findChild<VideoSurface *>("conferenceRemoteVideo")->hasFrame());
+        alice.session_.leave();
     }
 
     void localPreviewDisplaysRealFramesAndStops()

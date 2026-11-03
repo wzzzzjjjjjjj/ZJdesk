@@ -13,7 +13,8 @@ param(
     [string]$GstRoot = '',
     [string]$ServerUrl = '',
     [string]$Room = '',
-    [string]$Name = $env:COMPUTERNAME
+    [string]$Name = $env:COMPUTERNAME,
+    [scriptblock]$OnClientStarted
 )
 $ErrorActionPreference = 'Stop'
 $binaryRoot = Join-Path $PSScriptRoot "build\$Preset\bin"
@@ -65,6 +66,7 @@ try {
     $clientArgs = @('--server', $ServerUrl, '--display-name', $Name)
     if ($Room) { $clientArgs += @('--room', $Room) }
     $demoClient = Start-DemoProcess 'zjdesk.exe' $clientArgs $false
+    if ($OnClientStarted) { & $OnClientStarted }
     Write-Output "Client PID: $($demoClient.Id); server: $ServerUrl"
     Write-Output 'Enter the same room code on both clients and click Join. Close the client, or press Ctrl+C here, to stop.'
     while (-not $demoClient.HasExited) {

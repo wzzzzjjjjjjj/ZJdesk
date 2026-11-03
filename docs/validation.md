@@ -1,5 +1,59 @@
 # 验证记录
 
+## 2026-11-03：侧栏设置、昵称头像及持久化入会默认值
+
+范围为 `C:\Users\29822\.codex\worktrees\852a\ZJdesk` / `codex/ZJdesk-2`，未提交。旧设备设置按钮移除，侧栏底部右侧进入设置，右上角昵称头像；三项入会默认开启可独立保存，重开恢复，下次连接生效。
+
+- `build.ps1 -Preset windows-release -Deploy -GstRoot F:\gstreamer\1.26.11\PFiles64\gstreamer\1.0\msvc_x86_64`：core 5.10 s、signaling 4.55 s、media 123.46 s、windows-runtime-integrity 0.76 s，共 4/4、133.89 s，日志 `build/meeting-settings-defaults-build.log`。随后仅修复 UI 构造时设备卡必须先加入对象树再读取控件的问题，使用 `-SkipTests` 完成最终增量构建部署，日志 `build/meeting-settings-defaults-final-build.log`。
+- 新增媒体用例 `conferenceJoinDefaults` 四组数据：仅麦克风关闭、仅摄像头关闭、仅扬声器关闭、全部关闭。验证真实本机 WebRTC 合成输入管线的音频电平、黑帧、初始摄像头状态同步、当前通话不受默认值修改影响及临时恢复开启；管线进入 PLAYING 前应用默认开关。
+- 最终原生 GUI：`ZJDESK_UI_BACKGROUND_SNAPSHOTS=1`，运行 `meetingJoinDefaultsPersist`、`workspaceFitsSmallWindowAndLongNames`、`conferenceControlsAndFrames`，加初始化 / 清理共 5 passed、0 failed、0 skipped，10.961 s，日志 `build/meeting-ui-native.txt`。使用 Qt 6.8.3 / MSVC2022 / Windows 11 原生 OpenGL 窗口，后台无焦点、移到屏幕外；未使用 offscreen。测试在隔离的临时 INI 目录读写偏好，不修改用户实际偏好。
+- 已检查 `output/ui-meeting-settings.png` 与 `output/ui-meeting-small.png`：设备下方三个独立默认开关、设置窗口布局、右上角昵称头像、侧栏设置入口及 1040×720 小窗口边界正常。
+- `git diff --check` 通过。物理摄像头 / 麦克风 / 扬声器、Linux 及真实双机通话未验证；关闭仍是黑帧 / 静音，离会才释放采集设备，仍需完整设备才能连接。
+
+## 2026-11-03：会议入会自动连接
+
+范围为 `C:\Users\29822\.codex\worktrees\852a\ZJdesk` / `codex/ZJdesk-2`，未提交。移除会议页发起、接听、挂断按钮；双方加入相同会议房间即自动连接，离会释放音视频，重新入会自动恢复。
+
+- `build.ps1 -Preset windows-release -Deploy -GstRoot F:\gstreamer\1.26.11\PFiles64\gstreamer\1.0\msvc_x86_64`：Release 构建部署通过；core 4.76 s、signaling 4.79 s、media 121.22 s、windows-runtime-integrity 0.71 s，共 4/4、131.49 s，日志 `build/meeting-auto-connect-build.log`。随后仅调整自动协商状态文案，以 `-SkipTests` 完成最终增量构建部署，日志 `build/meeting-auto-connect-final.log`。
+- 新增媒体用例 `conferenceAutoConnectsOnJoinAndRejoin`：5.672 s 通过。覆盖协作房间不触发采集、会议单人等待、双方自动连接、双向画面与非零音频、反向入会顺序、离会设备释放、重新入会和缺失设备失败后不循环重试。使用真实本机 WebRTC 管线与合成输入。
+- 最终原生 GUI：`ZJDESK_UI_BACKGROUND_SNAPSHOTS=1`，运行 `workspaceFitsSmallWindowAndLongNames`、`conferenceControlsAndFrames`，含 init / cleanup 共 4 passed、0 failed、0 skipped，10.472 s。覆盖按钮不存在、设备选择同步、入会后自动出画面、摄像头隐藏头像、离会清屏和通话中销毁窗口；小窗口与成员列表原有回归同时通过。日志 `build/meeting-ui-native.txt`，截图 `output/ui-meeting-two-cameras.png`。使用真实 Windows OpenGL、后台不激活窗口，非 offscreen。
+- 未执行 Linux 构建部署、真实双机或物理摄像头 / 麦克风验收。
+
+集中审查复核：阅读本轮自动连接 diff、会议入会及设备选择调用、peerId 交叉请求处理、预览停止与会议线程代次清理。发现延迟设备枚举可在通话中刷新禁用的选择框，而 `setConferenceDevices` 在 Connecting / Running 拒绝修改；离会后直接重新加入会沿用旧设备。新增原生 UI 用例先复现：`conferenceControlsAndFrames` 在重新入会时实际摄像头仍为 `test`，预期为界面当前的默认设备空串，见 `build/meeting-review-repro.txt`。
+
+最小修复为点击“加入会议”前重新同步三项设备选择，保留运行中设备锁定。最终 Release 增量构建部署通过（`build/meeting-review-fixed-build.log`）；两项原生 GUI 回归含 init / cleanup 共 4 passed、0 failed、0 skipped、10.805 s，覆盖该失败用例及重新连接、窗口析构清理，见 `build/meeting-ui-native.txt`。构建和部署的客户端 SHA256 均为 `84887C8A83F2B7717E55FDA2EB2DCD2F947C1742B9DB3FEBFF9D0BE2C5C0C7E7`。本次补修仅改 UI 入会前设备同步，未重复前述已通过的常规回归；未发现其他明确逻辑问题，实机边界保持上述记录。
+
+## 2026-11-03：构建启动强制关闭旧实例
+
+当前工作树 / `codex/ZJdesk-2` 的 `构建启动.bat` 新增 `-ForceRestart`。先检查 SSH / 桌面 / 地址，Windows 使用 `Stop-Process -Force` 并等待退出，Linux 对 SSH 用户的精确进程名 `zjdesk` / `zjdesk-server` 使用 SIGKILL，并轮询排除僵尸进程后的存活状态；不通过命令行模糊匹配或按端口杀其他程序。关闭失败、退出超时或 8765 仍占用时停止；`直接启动.bat` 不自动结束实例。
+
+Linux 默认 zsh 将 `status` 视为只读变量，已改用专用变量名并通过 Windows PowerShell 5.1 的真实 SSH 参数传递验证；旧启动器持锁等待 Windows 客户端会阻止重新构建，现先关闭旧客户端并等待最多 5 秒获取锁。补充集中审查发现提前释放锁到 Windows 进程实际创建之间存在竞态，现由 `run.ps1` 创建客户端后调用可选的 `OnClientStarted` 回调释放锁，继续等待客户端退出；另一个构建仍持锁时保持中止。另实测复现旧端口检测在 `ss` 失败时仍返回 0，现独立获取 `ss -H -lnt 'sport = :8765'` 的退出结果，失败返回 22 并中止，不再误判端口空闲。
+
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/scripts/test_start_both.ps1`：21 项回归，覆盖双端强制结束、无实例、Windows 权限 / 等待失败、Linux 关闭失败、其他程序占用端口、端口检测失败、预检失败、关闭后再构建、旧实例退出释放真实文件锁、仍在构建的锁，以及原有地址 / 构建失败流程。验证进入 Windows 启动流程前锁仍持有、客户端创建回调释放锁、创建失败时中止。构建与远端调用采用模拟，不等同双端构建。
+- `build/test-windows-restart.ps1`：启动一个真实、无窗口的 Windows Release 信令服务，用启动器中的实际进程清理代码强制结束并确认退出；另验证 PowerShell 5.1 → SSH → Linux 默认 shell 的无实例分支，端口检测空闲 / 占用 / 命令失败三项返回 0 / 20 / 22，真实 Linux ss 检测成功。
+- `build/test-run-start-callback.ps1`：执行 `run.ps1` 中实际的启动 / 等待 / finally 代码，将进程创建替换为受控的无窗口 Release 信令服务。正常回调释放锁、回调异常清理进程、创建失败不执行回调，以及未传回调的原行为，4 项通过，无进程泄漏。
+- `build/test-linux-restart.py`：在真实 Linux 的 POSIX shell 中模拟 pkill / pgrep 返回值，6 个成功 / 错误 / 延迟退出场景通过。
+- `build/test-native-restart.py`：Linux 上使用临时复制的 sleep 程序，替换为专用测试进程名后执行原清理命令，确认两个目标均因 SIGKILL 退出、无关进程仍存活、再次清理无实例成功。未结束机器上已有的其他 ZJdesk 会话。
+
+以上 `build/` 文件为本次生成的验证工具。未重新运行完整的双端源码同步、构建部署、桌面启动或跨机通话；本次只验证启动脚本和进程结束行为。
+
+## 2026-11-03：会议共享主舞台、视频优先与重叠头像成员框
+
+工作目录 `C:\Users\29822\.codex\worktrees\852a\ZJdesk`，分支 `codex/ZJdesk-2`，基础提交 `ae8888e`。按用户确认保留双人会话上限，仅为超过 4 人的成员展示提供可接入数据的界面，未合并其他工作树的多人实现。
+
+会议页使用左侧共享大舞台、右侧竖排视频 / 昵称头像和底部真实人数 / 成员头像。右侧视频优先，双方摄像头隐藏状态通过当前会议 ID 的 `camera` 信令同步，黑色内容不用于判断是否开启摄像头。左上会议号和加入 / 离开，右上麦克风 / 扬声器 / 摄像头及设备设置；服务地址隐藏。超过 4 人时显示重叠圆形头像组，最后一枚显示剩余人数；点击头像组独立弹出全部成员头像与昵称，支持关闭，人数回到 4 人时恢复平铺并关闭弹框。暂无个人头像文件，圆形头像使用昵称首字。
+
+Windows 11、Qt 6.8.3 / MSVC 2022、GStreamer 1.26.11 下执行：
+
+- `build.ps1 -Preset windows-release -Deploy -SkipTests -GstRoot F:\gstreamer\1.26.11\PFiles64\gstreamer\1.0\msvc_x86_64` 构建并部署成功，最终输出位于当前工作树的 `dist/windows-release/bin`，集中审查修复后的日志为 `build/meeting-ui-review-build.log`。
+- 正常构建入口运行 core / signaling / media / windows-runtime-integrity，4/4 通过，分别 5.53 / 4.89 / 121.10 / 0.75 秒，总计 132.28 秒，日志 `build/meeting-ui-regression.log`。新增信令回归覆盖摄像头隐藏 / 恢复的布尔消息及拒绝字符串类型。
+- 最终 UI 修改与集中审查修复后执行 `zjdesk-ui-tests workspaceFitsSmallWindowAndLongNames conferenceControlsAndFrames`，原生桌面 OpenGL，后台不抢焦点且窗口移到桌面外，未使用 offscreen。4 通过、0 失败、0 跳过（含初始化 / 清理，实际两项功能测试），10.766 秒，日志 `build/meeting-ui-native.txt`。覆盖长昵称、1040×720 小窗口与三项控制全部关闭、服务地址隐藏、真实双人入退会计数、无视频 / 单路视频 / 双路视频、双方隐藏后的头像与视频优先重排、屏幕共享和挂断，以及重新建立真实本机 WebRTC 通话后直接销毁一方窗口、对端结束通话并回到一人状态。
+- 成员显示通过独立的 4 / 5 人界面数据测试阈值、重叠头像入口、独立弹框、完整昵称头像、关闭和回退 4 人。这些是界面数据，未向真实房间添加虚假成员，也未证明真实 5 人入会。已人工查看截图 `output/ui-meeting-roster-folded.png`、`output/ui-meeting-roster-popup.png`、`output/ui-meeting-no-cameras.png` 和设置页截图。
+
+集中审查发现窗口析构的生命周期隐患：`SessionCoordinator` 的析构会发送清屏和状态信号，此时比它后声明的成员头像列表容器已销毁。`MainWindow` 现于析构函数开始时断开会话的对外信号连接，避免清理回调重新访问失效的界面成员；媒体和信令仍由会话自身析构清理。已复核相关信令状态、弹框所有权、视频控件同父重排及远控画布兼容性，未发现其他明确逻辑问题。
+
+默认回归完成后只调整了客户端布局 / 绘制、弹框和窗口析构信号连接，最终重新构建部署并复跑上述原生 UI 回归。音视频测试采用本机合成媒体与真实 WebRTC 管线，不等同物理摄像头、麦克风听感、跨网双机或 Linux 验收；本次未执行这些实机项目，也未启动前台应用供用户验收。
+
 ## 2026-11-02：视频会议去测试源、进入页面刷新摄像头与无设备灰字提示
 
 按用户要求移除视频会议页的本地预览视频测试源：“视频会议”页的摄像头选择框与地预览选择框只列出真实摄像头（`kind == "Video/Source"`），合成测试源保留在 MediaEngine，仅供媒体回归通过 `SessionCoordinator::startPreview("test")` 使用。点击左侧“视频会议”时，若通话状态为 Idle，`QTimer::singleShot(0, …)` 触发一次 `SessionCoordinator::refreshDevices()`；通话中（Incoming 及其他非 Idle 状态）不刷新以免打断采集。

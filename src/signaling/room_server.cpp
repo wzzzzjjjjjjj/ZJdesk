@@ -163,7 +163,8 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
             const auto &payload = message->payload;
             if (!protocol::isRoomIdValid(payload.value("sessionId").toString())
                 || (action != "start" && action != "stop" && action != "accept" && action != "offer"
-                    && action != "answer" && action != "ice")
+                    && action != "answer" && action != "ice" && action != "camera")
+                || (action == "camera" && !payload.value("hidden").isBool())
                 || ((action == "offer" || action == "answer") &&
                     (!payload.value("sdp").isString() || payload.value("sdp").toString().isEmpty()))
                 || (action == "ice" && (!payload.value("candidate").isString()

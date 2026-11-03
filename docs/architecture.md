@@ -6,11 +6,17 @@
 `sessionId` 区分会话，支持 `start`、`accept`、`stop`、`offer`、`answer` 和 `ice`。
 服务校验消息、绑定实际发送者并检查转发后的消息长度；使用会议需要同步更新服务端。
 `SessionCoordinator` 统一管理 Idle / Calling / Incoming / Connecting / Running / Failed，
-收到邀请不启动采集，接听后才创建双方 VP8 / Opus 双向媒体。Running 要求 WebRTC connected
+协调层默认保留显式发起 / 接听接口；会议界面启用 `setConferenceAutoConnect(true)`，
+双方加入会议房间后自动发起和接受协商，再创建双方 VP8 / Opus 双向媒体。协作房间不触发自动连接。
+自动发起仅在成员进入可连接状态时进行，失败后等待离会重入，避免循环重试。交叉请求沿用双方 peerId 排序消解。
+Running 要求 WebRTC connected
 且实际收到远端视频与音频；房间状态、屏幕共享及远控保持独立。
 会话代次屏蔽旧协商与帧，设备开启前等待预览和测试音释放；挂断、离开、断线、超时或媒体失败均清理设备。
 本地与远端帧各使用一个最新帧槽交接，避免 UI 事件队列累积画面；设备异常只结束会议并保留可用的房间连接。
 界面只操作协调层，媒体选择、静音和画面隐藏均在会议工作线程执行。使用与限制见 [视频会议](video-conference.md)。
+界面从本机 `QSettings(IniFormat, UserScope, "ZJdesk", "meeting")` 读取三个入会默认开关，初始均开启，
+通过 `setConferenceJoinDefaults` 交给协调层；每次新建媒体连接时取用，不改变当前通话。
+媒体工作线程在管线进入 PLAYING 前应用静音和画面隐藏，远端通过当前会话的 `camera` 消息同步默认隐藏状态。
 
 当前采用模块化单进程客户端与独立信令服务。将功能按依赖边界拆成 CMake 目标，
 便于分别编译、测试和替换实际的平台实现，不引入微服务或通用插件加载器。
