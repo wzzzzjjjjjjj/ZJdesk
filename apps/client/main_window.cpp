@@ -443,34 +443,15 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     stage->addWidget(sessionScroll, 1);
     workspaceLayout->addLayout(stage, 1);
 
-    auto *previewCard = card();
-    auto *previewColumn = new QVBoxLayout(previewCard);
-    previewColumn->setContentsMargins(18, 12, 18, 12);
-    previewColumn->setSpacing(8);
-    auto *previewLayout = new QHBoxLayout;
-    previewLayout->setSpacing(10);
-    previewLayout->addWidget(text(QStringLiteral("本地预览"), "sectionTitle"));
-    sourceCombo_ = new QComboBox;
-    sourceCombo_->setObjectName("previewSource");
-    sourceCombo_->setMinimumWidth(165);
-    sourceCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    sourceCombo_->setMinimumContentsLength(12);
-    sourceCombo_->setAccessibleName(QStringLiteral("预览视频源"));
-    showNoDeviceHint(sourceCombo_, QStringLiteral("正在检测摄像头设备…"));
-    previewLayout->addWidget(sourceCombo_, 1);
-    previewButton_ = new QPushButton(QStringLiteral("开始预览"));
-    previewButton_->setObjectName("previewButton");
-    previewLayout->addWidget(previewButton_);
+    auto *deviceActionsCard = card();
+    auto *deviceActionsLayout = new QHBoxLayout(deviceActionsCard);
+    deviceActionsLayout->setContentsMargins(18, 12, 18, 12);
+    deviceActionsLayout->setSpacing(10);
     audioButton_ = new QPushButton(QStringLiteral("测试声音"));
     audioButton_->setObjectName("audioTestButton");
-    previewLayout->addWidget(audioButton_);
+    deviceActionsLayout->addWidget(audioButton_);
     refreshDevicesButton_ = new QPushButton(QStringLiteral("刷新设备"));
-    previewLayout->addWidget(refreshDevicesButton_);
-    previewColumn->addLayout(previewLayout);
-    previewLabel_ = text(session_.previewDetail(), "muted");
-    previewLabel_->setObjectName("previewStatus");
-    previewLabel_->setWordWrap(true);
-    previewColumn->addWidget(previewLabel_);
+    deviceActionsLayout->addWidget(refreshDevicesButton_);
 
     shareButton_ = new QPushButton(QStringLiteral("共享主屏幕"));
     shareButton_->setObjectName("shareButton");
@@ -615,7 +596,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
             applyJoinDefaults();
         });
     }
-    settingsLayout->addWidget(previewCard);
+    settingsLayout->addWidget(deviceActionsCard);
     auto *deviceNotice = text(QStringLiteral("默认使用默认设备，可选择其他设备并设置入会后的开启状态。默认开关自动保存，下次连接生效；不改变当前通话。通话中更换设备请先离会。建议佩戴耳机。"), "muted");
     deviceNotice->setWordWrap(true);
     settingsLayout->addWidget(deviceNotice);
@@ -794,7 +775,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         updateMuteLabels();
         for (const auto *name : {"conferenceCamera", "conferenceMicrophone", "conferenceSpeaker"})
             findChild<QComboBox *>(name)->setEnabled(!mediaActive && state != CS::Calling);
-        refreshPreview();
+        refreshDeviceControls();
         refreshMeetingParticipants();
     };
     connect(&session_, &zjdesk::SessionCoordinator::conferenceChanged, this, refreshMeeting);
@@ -842,8 +823,6 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     audioLabel_ = text(session_.audioDetail());
     audioLabel_->setWordWrap(true);
     environmentLayout->addRow(QStringLiteral("音频测试"), audioLabel_);
-    previewStatsLabel_ = text(QStringLiteral("采集 0 帧 · 丢弃 0 帧 · 待显示 0 帧"));
-    environmentLayout->addRow(QStringLiteral("本地预览帧"), previewStatsLabel_);
     trafficLabel_ = text(QStringLiteral("发送 0 · 接收 0"));
     environmentLayout->addRow(QStringLiteral("信令消息"), trafficLabel_);
     environmentLayout->addRow(QStringLiteral("媒体 RTT / 码率"), text(QStringLiteral("尚未实现统计")));
@@ -871,7 +850,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     contentLayout->addWidget(footerWidget);
     rootLayout->addWidget(content, 1);
     normalWidgets_ = {sidebar, headerWidget, connectionCard, sessionScroll, stageHeader,
-        previewCard, footerWidget};
+        deviceActionsCard, footerWidget};
     connect(expandButton_, &QPushButton::toggled, this, &MainWindow::expandVideo);
     qApp->installEventFilter(this);
 
@@ -915,7 +894,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     connect(&session_, &zjdesk::SessionCoordinator::cameraPermissionRequired, this, [this] {
         if (findChild<QMessageBox *>("cameraPermissionDialog")) return;
         auto *dialog = new QMessageBox(QMessageBox::Information, QStringLiteral("摄像头授权"),
-            QStringLiteral("使用摄像头预览和视频会议需要摄像头权限。\n\n"
+            QStringLiteral("使用视频会议需要摄像头权限。\n\n"
                            "请在 Windows 设置中允许摄像头访问，并允许桌面应用使用摄像头。"
                            "\n\n"
                            "授权后返回本程序，摄像头列表会自动刷新。"), QMessageBox::NoButton, this);
@@ -954,13 +933,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
             awaitingCameraPermission_ = session_.cameraPermissionStatus() != zjdesk::CameraPermission::Allowed;
         }
     });
-    connect(&session_, &zjdesk::SessionCoordinator::previewChanged, this, &MainWindow::refreshPreview);
-    connect(&session_, &zjdesk::SessionCoordinator::audioChanged, this, &MainWindow::refreshPreview);
-    connect(&session_, &zjdesk::SessionCoordinator::previewFrame, this, [this](const QImage &image) {
-        using CS = zjdesk::SessionCoordinator::ConferenceState;
-        if (session_.conferenceState() != CS::Connecting && session_.conferenceState() != CS::Running)
-            meetingLocalVideo_->setFrame(image);
-    });
+    connect(&session_, &zjdesk::SessionCoordinator::audioChanged, this, &MainWindow::refreshDeviceControls);
     connect(&session_, &zjdesk::SessionCoordinator::shareFrame, this, [this](const QImage &image) {
         (session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting ? meetingShareVideo_ : video_)->setFrame(image);
     });
@@ -977,17 +950,6 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         else
             session_.startScreenShare();
     });
-    connect(previewButton_, &QPushButton::clicked, this, [this] {
-        using Preview = zjdesk::SessionCoordinator::PreviewState;
-        if (session_.previewState() == Preview::Stopped || session_.previewState() == Preview::Failed)
-        {
-            const auto source = sourceCombo_->currentData().toString();
-            if (source.isEmpty()) return;
-            session_.startPreview(source);
-        }
-        else
-            session_.stopPreview();
-    });
     connect(audioButton_, &QPushButton::clicked, this, [this] {
         using Preview = zjdesk::SessionCoordinator::PreviewState;
         if (session_.audioState() == Preview::Stopped || session_.audioState() == Preview::Failed)
@@ -1002,15 +964,11 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         session_.reportSharePresentation(surface->presentedFrames(),
             surface->isVisible() && !isMinimized() && isActiveWindow(), surface->takePresentationGapMaxMs(),
             surface->presentationStatistics());
-        const auto stats = session_.previewStats();
-        previewStatsLabel_->setText(QStringLiteral("采集 %1 / 交接 %2 fps（目标 %3）· 丢弃 %4 帧 · 待显示 %5 帧")
-            .arg(stats.captureFps, 0, 'f', 1).arg(stats.deliveryFps, 0, 'f', 1)
-            .arg(stats.targetFps, 0, 'f', 1).arg(stats.droppedFrames).arg(stats.pendingFrames));
     });
     statsTimer->start(1000);
     session_.events()->append("application", QStringLiteral("工作台已启动"));
     refreshSession();
-    refreshPreview();
+    refreshDeviceControls();
     refreshMeeting();
     QTimer::singleShot(0, &session_, &zjdesk::SessionCoordinator::refreshDevices);
 }
@@ -1055,51 +1013,28 @@ void MainWindow::refreshDevices()
         const auto deviceIndex = combo->findData(selectedDevice);
         combo->setCurrentIndex(deviceIndex < 0 ? 0 : deviceIndex);
     }
-    const auto selected = sourceCombo_->currentData().toString();
-    sourceCombo_->clear();
-    clearNoDeviceHint(sourceCombo_);
     QStringList descriptions;
     for (const auto &device : session_.devices())
     {
-        if (device.kind == QLatin1String("Video/Source"))
-            sourceCombo_->addItem(device.name + " · " + device.maximumMode.description(), device.id);
         const auto description = device.kind + " · " + device.name
             + (device.kind == "Video/Source" ? " · " + device.maximumMode.description() : "");
         if (!descriptions.contains(description))
             descriptions.append(description);
     }
-    if (sourceCombo_->count() == 0)
-        showNoDeviceHint(sourceCombo_, hint);
-    else
-    {
-        const auto index = sourceCombo_->findData(selected);
-        sourceCombo_->setCurrentIndex(index < 0 ? 0 : index);
-    }
     if (session_.cameraPermissionStatus() == zjdesk::CameraPermission::Denied)
         descriptions.prepend(QStringLiteral("摄像头尚未授权，点击“刷新设备”打开授权引导；授权后返回程序即可使用"));
     else if (session_.cameraPermissionStatus() == zjdesk::CameraPermission::Unknown)
-        descriptions.prepend(QStringLiteral("无法预先确认摄像头权限，请选择摄像头开始预览；若失败，请检查系统权限或设备占用"));
+        descriptions.prepend(QStringLiteral("无法预先确认摄像头权限；若视频会议采集失败，请检查系统权限或设备占用"));
     deviceLabel_->setText(!session_.mediaEnvironment().ready ? session_.mediaEnvironment().description
         : descriptions.isEmpty() ? QStringLiteral("没有可用设备；连接摄像头后点击“刷新设备”") : descriptions.join('\n'));
-    refreshPreview();
+    refreshDeviceControls();
 }
 
-void MainWindow::refreshPreview()
+void MainWindow::refreshDeviceControls()
 {
     using Preview = zjdesk::SessionCoordinator::PreviewState;
-    const auto state = session_.previewState();
-    const bool idle = state == Preview::Stopped || state == Preview::Failed;
     const bool ready = session_.mediaEnvironment().ready;
-    const bool hasSource = !sourceCombo_->currentData().toString().isEmpty();
-    previewButton_->setEnabled(ready && hasSource && state != Preview::Stopping && !session_.conferenceDevicesBusy());
-    previewButton_->setText(idle ? QStringLiteral("开始预览") : QStringLiteral("停止预览"));
-    sourceCombo_->setEnabled(ready && idle);
-    refreshDevicesButton_->setEnabled(ready && idle);
-    previewLabel_->setText(!ready ? session_.mediaEnvironment().description
-        : !hasSource && idle ? QStringLiteral("无可用设备：未检测到摄像头，连接摄像头后点击“刷新设备”。")
-        : session_.previewDetail());
-    if (idle && !session_.conferenceActive())
-        meetingLocalVideo_->setFrame({});
+    refreshDevicesButton_->setEnabled(ready);
     const auto audio = session_.audioState();
     audioButton_->setEnabled(ready && audio != Preview::Stopping && !session_.conferenceDevicesBusy());
     audioButton_->setText(audio == Preview::Stopped || audio == Preview::Failed

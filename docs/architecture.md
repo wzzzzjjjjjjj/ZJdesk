@@ -53,7 +53,7 @@ flowchart TD
 | remote-control / ControlSession | 本地授权、控制代次、序号校验 | 由协调层处理请求、授权与撤销 |
 | remote-control / InputInjector | Linux X11 / XTest 键鼠输入与释放 | 仅授权后调用；不依赖 UI Widgets |
 | media / MediaEnvironment | 可选 SDK 初始化、插件检查与部署环境选择 | 不推断通话连接成功 |
-| media / MediaEngine | 设备枚举、本地视频预览、音频测试与有界帧交接 | Gst 指针只在媒体模块，当前不发送媒体 |
+| media / MediaEngine | 设备枚举、内部采集回归、音频测试与有界帧交接 | Gst 指针只在媒体模块，当前不发送媒体 |
 | media / ScreenShare | 桌面采集、WebRTC 协商、VP9 编解码与有界帧交接 | 独立工作线程，不直接修改会话业务状态 |
 | platform / PlatformInfo | 真实平台、架构、会话信息 | 系统输入与采集适配留到对应功能实现 |
 | platform / CameraPermission | Windows 桌面摄像头开关只读预检与系统设置入口 | 协调层持有预检状态，仅明确关闭时引导授权；未知不误报拒绝，实际访问由采集后端检查 |
@@ -227,13 +227,15 @@ Esc 只在放大时作为本地退出快捷键，恢复进入前的窗口状态�
 
 ## 0.2 本地媒体与线程
 
+独立本地预览的界面、按钮、预览帧到会议画面的连接及诊断统计已移除。MediaEngine 与协调层的内部采集接口保留用于媒体回归，用户不能从界面启动；会议本机画面仍由独立 ConferenceMedia 提供。
+
 为避免采集、枚举和关闭设备阻塞日常 UI，MediaEngine 通过 queued invokeMethod 将命令交给
 MediaWorker。该线程用 Qt 定时器读取 GstBus 和 appsink，无需为当前预览建立 GLib MainLoop。
 GStreamer 内部线程负责采集，工作线程只复制映射后的 RGB 帧，不向 UI 交付 GstBuffer 指针。
 
 appsink 最多一帧并丢弃旧帧；互斥保护的交接槽最多一个深拷贝 QImage，两处合计最多两帧。
 交接槽从空变为有帧时才排队一次通知，主线程取走前只覆盖旧帧；取消原先每 33 ms 取帧的上限，避免高帧率源丢失交接机会，同时保持通知有界。
-VideoSurface 在真实 OpenGL widget 中按比例绘制，并标明本地预览。采集、交接与丢弃计数只表示本地管线，不能当作网络丢包或窗口呈现 FPS。会议本地 / 远端帧也使用一个合并的待处理通知。
+VideoSurface 在真实 OpenGL widget 中按比例绘制会议和共享画面。内部采集、交接与丢弃计数只表示本地管线，不能当作网络丢包或窗口呈现 FPS。会议本地 / 远端帧也使用一个合并的待处理通知。
 
 SessionCoordinator 是预览和音频状态的唯一写入者，状态分别为 Stopped / Starting / Running /
 Stopping / Failed，与房间状态独立。只有第一帧到达才显示预览运行；每次启动、停止携带独立
@@ -253,7 +255,7 @@ CameraMode 从设备 caps 的单个结构中固定宽高与帧率，按像素数
 摄像头输入固定为最高原生模式，在其后通过 videorate drop-only、videoscale、videoconvert 和动态 capsfilter 调整输出；分数帧率保留，不把 60000/1001 提升成 60/1。
 预览与会议复用 ShareQuality，以 1 秒观测窗口评估采集 / 本地交接或编码 / 本地交接速度；连续两个窗口低于目标 85% 才降档，连续 30 个稳定窗口后恢复。
 摄像头清晰度优先，在同一分辨率内先降低到 15 fps，之后才降尺寸；恢复时优先尺寸。屏幕共享仍使用原来的 24 fps 分辨率降档门槛。
-预览诊断显示实时采集 / 交接帧率与目标帧率；运行详情中的分辨率来自实际输出 caps，目标帧率不代表实际呈现帧率。会议 VP8 码率随输出档位变化，按 CPU 核心数使用 1–8 个编码线程；本次没有添加会议网络拥塞控制。
+内部采集统计记录实时采集 / 交接帧率与目标帧率，供媒体回归读取；独立预览诊断已从界面移除。输出分辨率来自实际 caps，目标帧率不代表实际呈现帧率。会议 VP8 码率随输出档位变化，按 CPU 核心数使用 1–8 个编码线程；本次没有添加会议网络拥塞控制。
 
 用户将屏幕共享提前，语音通话仍待实现，因此共享是独立单向视频管线，摄像头预览保持本地。
 ScreenShareWorker 在专用 Qt 线程管理管线、GstBus 和 appsink；发送侧桌面 tee 分为本地预览

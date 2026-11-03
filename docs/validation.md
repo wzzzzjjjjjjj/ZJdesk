@@ -1,5 +1,16 @@
 # 验证记录
 
+## 2026-11-03：移除独立本地预览
+
+范围为 `C:\Users\29822\.codex\worktrees\e37f\ZJdesk` / `codex/ZJdesk-1`，未提交。修改前工作树干净，与 `codex/ZJdesk-2` 最新提交同为 `bac3584127986e511e0a7062db526c516b65afa8`，双方独有提交均为 0。
+
+- 新增 `localPreviewIsNotAvailable`，修改前因 `previewButton` 仍存在而失败，证据 `build/remove-local-preview-before.txt`。修改后验证预览源、按钮、状态和诊断文案不存在，内部采集帧不进入会议画面；会议设备、音频测试和会议画面控件仍存在。
+- Windows Debug / Qt 6.8.3 / MSVC2022 / GStreamer 1.26.11：`build.ps1` 构建及 core / signaling / media / windows-runtime-integrity 共 4/4 通过，135.14 s，日志 `build/remove-local-preview-build.log`。媒体套件 34 项中 4 项显式跳过（Linux 物理桌面与三项需显式开启的物理摄像头测试）。最终 UI 测试和头文件调整后，`build.ps1 -SkipTests` 增量构建通过，日志 `build/remove-local-preview-final-build.log`。
+- 原生后台 GUI：`QT_QPA_PLATFORM=windows`、`ZJDESK_UI_BACKGROUND_SNAPSHOTS=1`，运行 `localPreviewIsNotAvailable`、`meetingEntryRefreshesCameraAndHintsMissingDevice`、`meetingJoinDefaultsPersist`、`workspaceFitsSmallWindowAndLongNames`、`conferenceControlsAndFrames`，加初始化 / 清理共 7 passed、0 failed、0 skipped，19.568 s，日志 `build/remove-local-preview-ui.txt`。原生 OpenGL 窗口无焦点并移到屏幕外，未使用 offscreen；覆盖自动通话、本机 / 远端画面、隐藏恢复及离会清屏，媒体输入为合成源。
+- 已检查新生成的 `output/ui-meeting-settings.png`，预览卡已移除，三类设备、默认开关、声音测试和刷新布局正常。偏好写入隔离临时 INI，不修改用户实际偏好。
+- 集中审查已读取本轮源码 / 测试差异及协调层、画面组件的相关调用：会议帧信号独立连接，结束时由协调层发送空帧；清理完成的 `conferenceChanged` 恢复设备控制，窗口析构前断开协调层 UI 回调。客户端无遗留预览入口或旧成员引用，未发现明确逻辑问题，无需代码补丁；复核上述构建和 GUI 验证记录，未重复运行已通过的套件。
+- 独立预览不再向用户提供，底层采集接口保留作媒体回归。未复测物理摄像头 / 麦克风 / 扬声器、Linux、跨机通话或远控；未部署启动其他工作树。`git diff --check` 通过。
+
 ## 2026-11-03：侧栏设置、昵称头像及持久化入会默认值
 
 范围为 `C:\Users\29822\.codex\worktrees\852a\ZJdesk` / `codex/ZJdesk-2`，未提交。旧设备设置按钮移除，侧栏底部右侧进入设置，右上角昵称头像；三项入会默认开启可独立保存，重开恢复，下次连接生效。

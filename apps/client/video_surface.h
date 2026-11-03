@@ -60,7 +60,7 @@ private:
     quint64 awaitingFrameId_ = 0;
     quint64 lastPresentedFrameId_ = 0;
     quint64 supersededFrames_ = 0;
-    QString frameCaption_ = QStringLiteral("本地预览 · 尚未发送给对方");
+    QString frameCaption_ = QStringLiteral("视频画面");
     bool controlEnabled_ = false;
     bool participantTile_ = false;
     bool frameHidden_ = false;

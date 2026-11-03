@@ -6,7 +6,6 @@
 #include <QStringList>
 
 class QLabel;
-class QComboBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
@@ -34,7 +33,7 @@ private:
     friend class WindowTests;
     void refreshSession();
     void exportEvents();
-    void refreshPreview();
+    void refreshDeviceControls();
     void refreshDevices();
     void refreshShare();
     void refreshControl();
@@ -78,15 +77,11 @@ private:
     QLabel *meetingRosterTitle_ = nullptr;
     QGridLayout *meetingRosterGrid_ = nullptr;
     QList<QWidget *> meetingRosterPopupMembers_;
-    QComboBox *sourceCombo_ = nullptr;
-    QPushButton *previewButton_ = nullptr;
     QPushButton *audioButton_ = nullptr;
     QPushButton *refreshDevicesButton_ = nullptr;
     bool awaitingCameraPermission_ = false;
-    QLabel *previewLabel_ = nullptr;
     QLabel *audioLabel_ = nullptr;
     QLabel *deviceLabel_ = nullptr;
-    QLabel *previewStatsLabel_ = nullptr;
     QPushButton *shareButton_ = nullptr;
     QLabel *shareLabel_ = nullptr;
     QPushButton *controlButton_ = nullptr;

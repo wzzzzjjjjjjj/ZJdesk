@@ -50,7 +50,7 @@ MediaEnvironment MediaEnvironment::inspect()
     }
     result.ready = result.missingPlugins.isEmpty();
     result.description = result.ready
-        ? QStringLiteral("媒体依赖就绪；支持视频会议、摄像头预览与双人屏幕共享")
+        ? QStringLiteral("媒体依赖就绪；支持视频会议与双人屏幕共享")
         : QStringLiteral("缺少媒体插件：") + result.missingPlugins.join(", ");
 #else
     result.description = QStringLiteral("当前构建未启用媒体依赖，音视频暂不可用");
