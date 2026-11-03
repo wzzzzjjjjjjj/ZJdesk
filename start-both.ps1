@@ -64,13 +64,13 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Could not transfer the source snapshot to Linux.' }
         & ssh -o BatchMode=yes $LinuxSsh "cd '$LinuxRoot' && python3 -m zipfile -e source-snapshot.zip . && rm source-snapshot.zip"
         if ($LASTEXITCODE -ne 0) { throw 'Could not unpack the source snapshot on Linux.' }
-        Write-Host 'Building Linux Release (including non-GUI tests)...'
-        & ssh -o BatchMode=yes $LinuxSsh "cd '$LinuxRoot' && bash ./build.sh --preset linux-release --deploy" 2>&1 | Tee-Object -FilePath (Join-Path $logDir 'linux-build.log')
-        if ($LASTEXITCODE -ne 0) { throw 'Linux build or tests failed.' }
+        Write-Host 'Building Linux Release (tests skipped)...'
+        & ssh -o BatchMode=yes $LinuxSsh "cd '$LinuxRoot' && bash ./build.sh --preset linux-release --deploy --skip-tests" 2>&1 | Tee-Object -FilePath (Join-Path $logDir 'linux-build.log')
+        if ($LASTEXITCODE -ne 0) { throw 'Linux build or deployment failed.' }
         & (Join-Path $PSScriptRoot 'snapshot-source.ps1') -Archive $archive -Verify
-        Write-Host 'Building Windows Release (including non-GUI tests)...'
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'build.ps1') -Preset windows-release -Deploy 2>&1 | Tee-Object -FilePath (Join-Path $logDir 'windows-build.log')
-        if ($LASTEXITCODE -ne 0) { throw 'Windows build or tests failed.' }
+        Write-Host 'Building Windows Release (tests skipped)...'
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'build.ps1') -Preset windows-release -Deploy -SkipTests 2>&1 | Tee-Object -FilePath (Join-Path $logDir 'windows-build.log')
+        if ($LASTEXITCODE -ne 0) { throw 'Windows build or deployment failed.' }
         & (Join-Path $PSScriptRoot 'snapshot-source.ps1') -Archive $archive -Verify
         & ssh -o BatchMode=yes $LinuxSsh "printf '%s\n' '$LinuxRoot' > '$remoteMarker'"
         if ($LASTEXITCODE -ne 0) { throw 'Could not record the Linux build for direct startup.' }

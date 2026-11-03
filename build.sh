@@ -3,12 +3,14 @@ set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 preset=linux-release
 gui=false
+tests=true
 deploy=false
 media=ON
 while (($#)); do
     case "$1" in
         --preset) preset=$2; shift 2 ;;
         --gui-tests) gui=true; shift ;;
+        --skip-tests) tests=false; shift ;;
         --deploy) deploy=true; shift ;;
         --without-media) media=OFF; shift ;;
         *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -28,5 +30,9 @@ export GST_REGISTRY_1_0="$root/build/gst-registry-linux.bin"
 cd "$root"
 cmake --preset "$preset" -DZJDESK_ENABLE_GSTREAMER="$media" -DZJDESK_GUI_TESTS="$([[ $gui == true ]] && echo ON || echo OFF)"
 cmake --build --preset "$preset" --parallel 4
-if $gui; then ctest --preset "$preset"; else ctest --preset "$preset" -E '^desktop$'; fi
+if $tests; then
+    if $gui; then ctest --preset "$preset"; else ctest --preset "$preset" -E '^desktop$'; fi
+else
+    echo 'Tests skipped.'
+fi
 if $deploy; then cmake --install "build/$preset" --prefix "$root/dist/$preset"; fi

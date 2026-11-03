@@ -16,7 +16,8 @@ param(
     [switch]$Fresh,
     [switch]$GuiTests,
     [string]$GstRoot = '',
-    [switch]$WithoutMedia
+    [switch]$WithoutMedia,
+    [switch]$SkipTests
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
@@ -74,9 +75,10 @@ cmake $(if ($Fresh) {'--fresh'}) --preset $Preset $mediaConfigure
 if errorlevel 1 exit /b 1
 cmake --build --preset $Preset --parallel 4
 if errorlevel 1 exit /b 1
-ctest --preset $Preset $testFilter
-if errorlevel 1 exit /b 1
 "@
+if (-not $SkipTests) {
+    $commands += "`r`nctest --preset $Preset $testFilter`r`nif errorlevel 1 exit /b 1`r`n"
+}
 if ($Deploy) {
     $deployRoot = Join-Path $projectRoot "dist\$Preset"
     $commands += @"
@@ -89,6 +91,7 @@ $commands += "`r`nexit /b 0`r`n"
 [System.IO.File]::WriteAllText($commandPath, $commands, [System.Text.UTF8Encoding]::new($false))
 & $env:ComSpec /d /c $commandPath
 if ($LASTEXITCODE -ne 0) { throw "Configure, build, test or deployment failed: $LASTEXITCODE" }
-Write-Output "Build and selected tests passed: $projectRoot\build\$Preset\bin"
+if ($SkipTests) { Write-Output "Build passed; tests skipped: $projectRoot\build\$Preset\bin" }
+else { Write-Output "Build and selected tests passed: $projectRoot\build\$Preset\bin" }
 Write-Output "Run: & '$projectRoot\run.ps1' -Preset $Preset -QtRoot '$QtRoot'"
 if ($Deploy) { Write-Output "Deployment: $deployRoot\bin" }
