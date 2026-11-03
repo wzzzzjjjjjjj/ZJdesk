@@ -2,6 +2,12 @@
 
 namespace zjdesk
 {
+int ShareQuality::compatibleMaximumFps(int sourceFps, int receiverFps)
+{
+    const int source = sourceFps > 0 ? qBound(5, sourceFps, 240) : 60;
+    return receiverFps >= 5 && receiverFps <= 240 ? qMin(source, receiverFps) : source;
+}
+
 ShareQuality::ShareQuality(const QSize &nativeSize, int maximumFps, int minimumFps)
 {
     const auto native = nativeSize.isEmpty() ? QSize(1920, 1080) : nativeSize;

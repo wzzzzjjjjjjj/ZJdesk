@@ -141,6 +141,7 @@ private:
     QString remoteDetail_ = QStringLiteral("远程控制未开启");
     bool controlChannelReady_ = false;
     bool peerControllable_ = false;
+    int peerMaximumFps_ = 0;
     bool desktopSource_ = false;
     bool controlStartedShare_ = false;
     QString controlRequestId_;

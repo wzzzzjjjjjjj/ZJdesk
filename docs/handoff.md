@@ -1,5 +1,19 @@
 # ZJdesk 项目交接
 
+## 2026-11-03 Linux 控制 Windows 鼠标反馈修正（codex/ZJdesk-1，未提交）
+
+后续用户确认重启后仍是指针本身延迟。后台读取真实系统资源，定位到本机 Qt 6.8.3 `QImage::fromHICON` 对箭头 / 手形返回空图像、文本光标透明遮罩丢失，导致本地光标无法启用而回退到视频内指针。Windows 改用 DrawIconEx 双背景恢复颜色与透明度，64 项单元测试通过，Release 构建部署通过；隔离跨机测试确认 Linux 收到真实 Windows 32×32 光标，两端各 3 项通过。未重启现有客户端、未执行原生输入；需用户重新运行本工作树启动器验收实际手感。
+
+用户通过本工作树 `构建启动.bat` 启动，反馈移动延迟、仅管理员程序 / UAC 窗口点击无效。后者符合普通 SendInput 的 UIPI / 安全桌面边界；可由用户手动以管理员身份启动 Windows 客户端验证普通管理员程序，UAC 安全桌面仍不支持。
+
+原控制画面隐藏本地光标，等待被控端位置回传后绘制，指针反馈需要一次网络往返。现取得远端有效形状后，在画面内改用本地系统光标，保留形状 / 热点缩放与缓存、输入顺序和实际坐标；画面内不重复绘制远端位置。离开画面、黑边、停止和无画面恢复默认指针。实际系统执行和窗口画面延迟仍需人工复测，验证见 [Windows 被控验证](validation-windows-host-20261103.md)。
+
+## 2026-11-03 Linux 控制 Windows 与共同刷新率上限（codex/ZJdesk-1，未提交）
+
+本次位于 `C:\Users\29822\.codex\worktrees\033f\ZJdesk`。实现 Windows SendInput 被控后端、物理主屏到虚拟桌面的坐标映射、扩展键扫描码与真实光标回传，复用已有本地授权、代次 / 序号校验、停止与释放流程。控制按钮 / 状态改为平台无关。自动模式通过 capabilities.maximumFps 交换显示刷新率上限，取双方较低值，退出成员时清除；保留原生分辨率优先、VP9 4:4:4 与现有自适应，不改变网络传输默认策略。
+
+Windows 与 Linux 构建 / 回归通过；真实 Windows 桌面到 Linux 后台链路完成拒绝、授权、解码、无效输入拒绝与撤销停流检查，未自动移动鼠标或输入键盘。真实键鼠、Linux GUI 呈现与持续高画质帧率仍待人工验收，详见 [Windows 被控验证](validation-windows-host-20261103.md)。Linux 使用隔离目录 `/home/orbbec/ZJdesk/codex-033f-control-20261103`，未覆盖 `/home/orbbec/ZJdesk/zjdesk` 的未提交修改。
+
 ## 2026-11-03 移除独立本地预览（codex/ZJdesk-1，未提交）
 
 修改前核对 `codex/ZJdesk-1` 与 `codex/ZJdesk-2` 均为 `bac3584127986e511e0a7062db526c516b65afa8`，提交差异为 0 / 0，当前工作树干净。仅在 `C:\Users\29822\.codex\worktrees\e37f\ZJdesk` 修改。

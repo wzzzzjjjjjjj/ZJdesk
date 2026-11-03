@@ -460,7 +460,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     shareLabel_ = text(session_.shareDetail(), "shareStatus");
     shareLabel_->setWordWrap(true);
     sessionLayout->addWidget(text(QStringLiteral("远程协助"), "sectionTitle"));
-    controlButton_ = new QPushButton(QStringLiteral("请求控制 Linux"));
+    controlButton_ = new QPushButton(QStringLiteral("请求控制对方电脑"));
     controlButton_->setObjectName("controlButton");
     allowControlButton_ = new QPushButton(QStringLiteral("允许控制"));
     allowControlButton_->setObjectName("allowControlButton");

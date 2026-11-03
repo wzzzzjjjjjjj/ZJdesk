@@ -3,6 +3,7 @@
 #include <QImage>
 #include <QJsonObject>
 #include <QTimer>
+#include <QCursor>
 #include <QElapsedTimer>
 #include "remote-control/input_injector.h"
 #include "media/frame_timing.h"
@@ -68,6 +69,10 @@ private:
     QTimer motionTimer_;
     QJsonObject pendingMotion_;
     zjdesk::RemoteCursor remoteCursor_;
+    QPointF pointerPosition_{-1, -1};
+    bool localPointerVisible_ = false;
+    QCursor localCursor_;
+    quint64 localCursorSerial_ = 0;
     void flushMotion();
     void updatePointerCursor(const QPointF &position);
     bool pointerInput(const QPointF &position, QJsonObject &input) const;

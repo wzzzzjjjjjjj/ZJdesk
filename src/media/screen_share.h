@@ -94,8 +94,9 @@ class ScreenShare final : public QObject
 public:
     explicit ScreenShare(QObject *parent = nullptr);
     ~ScreenShare() override;
+    static int displayMaximumFps();
     // Zero selects automatically; explicit 30/60 is used by performance validation.
-    void start(bool sender, const QString &source, quint64 epoch, int targetFps = 0);
+    void start(bool sender, const QString &source, quint64 epoch, int targetFps = 0, int peerMaximumFps = 0);
     void stop(quint64 epoch);
     void negotiate(const QString &type, const QJsonObject &payload, quint64 epoch);
     void reportPresentation(quint64 frames, quint64 epoch, bool active = true, double gapMaxMs = -1,

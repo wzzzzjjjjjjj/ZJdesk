@@ -14,6 +14,98 @@ class MediaTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void linuxControlsWindowsWithoutDesktopInput()
+    {
+#ifndef Q_OS_LINUX
+        QSKIP("Linux cross-machine controller only");
+#else
+        if (qEnvironmentVariable("ZJDESK_WINDOWS_CONTROL_RECEIVER") != "1")
+            QSKIP("Explicit cross-machine backend validation only");
+        using Remote = zjdesk::SessionCoordinator::RemoteState;
+        zjdesk::SessionCoordinator controller;
+        quint64 frames = 0;
+        zjdesk::RemoteCursor cursor;
+        connect(&controller, &zjdesk::SessionCoordinator::remoteCursorChanged, this,
+            [&](const zjdesk::RemoteCursor &value) { cursor = value; });
+        connect(&controller, &zjdesk::SessionCoordinator::shareFrame, this, [&](const QImage &) { ++frames; });
+        QSignalSpy probes(&controller, &zjdesk::SessionCoordinator::inputProbeAcknowledged);
+        QVERIFY(controller.join(QUrl(qEnvironmentVariable("ZJDESK_TEST_SERVER")), "windows-host-test", "Linux"));
+        QTRY_VERIFY_WITH_TIMEOUT(controller.canRequestControl(), 60000);
+        QVERIFY(controller.requestControl());
+        QTRY_COMPARE_WITH_TIMEOUT(controller.remoteState(), Remote::Idle, 15000);
+        QVERIFY(!controller.screenActive());
+        QVERIFY(controller.requestControl());
+        QTRY_COMPARE_WITH_TIMEOUT(controller.remoteState(), Remote::Controlling, 45000);
+        QTRY_VERIFY_WITH_TIMEOUT(controller.shareStats().processedFps > 0, 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(cursor.visible && !cursor.image.isNull(), 10000);
+        QVERIFY(cursor.image.rect().contains(cursor.hotspot));
+        QVERIFY(!cursor.screenSize.isEmpty());
+        qInfo() << "Windows cursor shape received on Linux:" << cursor.image.size() << cursor.hotspot;
+        controller.sendRemoteInput({{"kind", "unsupported-test-event"}, {"probe", true}});
+        QTRY_COMPARE_WITH_TIMEOUT(probes.size(), 1, 10000);
+        QCOMPARE(probes.first().at(3).toBool(), false);
+        const auto first = frames;
+        QTest::qWait(10000);
+        const auto stats = controller.shareStats();
+        QVERIFY(stats.targetFps > 0 && stats.targetFps <= 60);
+        QVERIFY(stats.processedFps > 0);
+        QVERIFY(stats.deliveredFps > 0);
+        QVERIFY(frames > first);
+        QCOMPARE(stats.decoder, QString("vp9dec"));
+        qInfo().noquote() << "Real Windows desktop -> Linux backend (no presentation/input acceptance):"
+            << QJsonDocument(QJsonObject{{"width", stats.size.width()}, {"height", stats.size.height()},
+                {"targetFps", stats.targetFps}, {"decodedFps", stats.processedFps},
+                {"deliveredFps", stats.deliveredFps}, {"transport", stats.transport},
+                {"packetsLost", stats.packetsLost}, {"codec", stats.codec},
+                {"probeRoundTripUs", probes.first().at(1).toLongLong()}}).toJson(QJsonDocument::Compact);
+        controller.stopControl();
+        QTRY_COMPARE_WITH_TIMEOUT(controller.shareState(), Preview::Stopped, 10000);
+        controller.leave();
+#endif
+    }
+
+    void screenShareNegotiatesReceiverDisplayLimit()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator sender;
+        zjdesk::SignalingClient peer;
+        QSignalSpy connected(&peer, &zjdesk::SignalingClient::connected);
+        QList<int> targets;
+        connect(&peer, &zjdesk::SignalingClient::messageReceived, this, [&](const zjdesk::protocol::Message &message) {
+            if (message.type == "share" && message.payload.value("action") == "profile")
+                targets.append(message.payload.value("fps").toInt());
+        });
+        QVERIFY(sender.join(url, "display-limit", "Host"));
+        QTRY_COMPARE(sender.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        peer.open(url);
+        QTRY_COMPARE(connected.count(), 1);
+        QVERIFY(peer.send({"join", {{"roomId", "display-limit"}, {"name", "Controller"}}}));
+        QTRY_COMPARE(sender.state(), zjdesk::SessionCoordinator::State::PeerAvailable);
+        // remoteChanged confirms the receiver capabilities have been consumed.
+        QSignalSpy remote(&sender, &zjdesk::SessionCoordinator::remoteChanged);
+        QVERIFY(peer.send({"control", {{"action", "capabilities"}, {"control", false}, {"maximumFps", 30}}}));
+        QTRY_VERIFY(!remote.isEmpty());
+        QVERIFY(sender.startScreenShare("test"));
+        QTRY_VERIFY_WITH_TIMEOUT(!targets.isEmpty(), 10000);
+        QCOMPARE(targets.last(), 30);
+        sender.stopScreenShare();
+        QTRY_COMPARE(sender.shareState(), Preview::Stopped);
+        peer.close();
+        QTRY_COMPARE(sender.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        targets.clear();
+        peer.open(url);
+        QTRY_COMPARE(connected.count(), 2);
+        QVERIFY(peer.send({"join", {{"roomId", "display-limit"}, {"name", "Legacy controller"}}}));
+        QTRY_COMPARE(sender.state(), zjdesk::SessionCoordinator::State::PeerAvailable);
+        QVERIFY(sender.startScreenShare("test"));
+        QTRY_VERIFY_WITH_TIMEOUT(!targets.isEmpty(), 10000);
+        QCOMPARE(targets.last(), 60); // A departed peer must not leave its limit behind.
+        sender.leave();
+    }
+
     void conferenceJoinDefaults_data()
     {
         QTest::addColumn<bool>("microphone");

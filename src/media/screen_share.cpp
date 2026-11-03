@@ -630,7 +630,11 @@ public:
             return;
         if (auto *capture = gst_bin_get_by_name(GST_BIN(pipeline_), "desktopcapture"))
         {
+#ifdef Q_OS_WIN
+            g_object_set(capture, "show-cursor", gboolean(embedded), nullptr);
+#else
             g_object_set(capture, "show-pointer", gboolean(embedded), nullptr);
+#endif
             gst_object_unref(capture);
         }
 #else
@@ -1576,7 +1580,15 @@ ScreenShare::~ScreenShare()
     thread_.wait();
 }
 
-void ScreenShare::start(bool sender, const QString &source, quint64 epoch, int targetFps)
+int ScreenShare::displayMaximumFps()
+{
+    if (qobject_cast<QGuiApplication *>(QCoreApplication::instance()))
+        if (auto *screen = QGuiApplication::primaryScreen())
+            return ShareQuality::compatibleMaximumFps(qRound(screen->refreshRate()));
+    return 60;
+}
+
+void ScreenShare::start(bool sender, const QString &source, quint64 epoch, int targetFps, int peerMaximumFps)
 {
     presentationClock_.invalidate();
     QSize nativeSize(640, 480);
@@ -1591,6 +1603,7 @@ void ScreenShare::start(bool sender, const QString &source, quint64 epoch, int t
                 maximumFps = qRound(screen->refreshRate());
             }
     }
+    maximumFps = ShareQuality::compatibleMaximumFps(maximumFps, peerMaximumFps);
     {
         QMutexLocker lock(&mailbox_.mutex);
         mailbox_.epoch = epoch;

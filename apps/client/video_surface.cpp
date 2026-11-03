@@ -81,7 +81,7 @@ void VideoSurface::paintGL()
         const QRect target((width() - size.width()) / 2, (height() - size.height()) / 2,
                            size.width(), size.height());
         painter.drawImage(target, frame_);
-        if (controlEnabled_ && hasRemoteCursor())
+        if (controlEnabled_ && hasRemoteCursor() && !localPointerVisible_)
         {
             const double scale = double(target.width()) / remoteCursor_.screenSize.width();
             const QPointF position(target.x() + remoteCursor_.position.x() * (target.width() - 1),
@@ -188,6 +188,7 @@ void VideoSurface::paintGL()
 void VideoSurface::setFrame(const QImage &frame)
 {
     const bool hadFrame = !frame_.isNull();
+    const bool sizeChanged = frame_.size() != frame.size();
     if (!frame.isNull())
     {
         supersededFrames_ += pendingFrame_;
@@ -210,6 +211,7 @@ void VideoSurface::setFrame(const QImage &frame)
         motionTimer_.stop();
         pendingMotion_ = {};
         remoteCursor_ = {};
+        localPointerVisible_ = false;
         if (hadFrame && controlEnabled_)
         {
             remoteButtons_ = Qt::NoButton;
@@ -219,6 +221,8 @@ void VideoSurface::setFrame(const QImage &frame)
     }
     else if (!hadFrame)
         updatePointerCursor(mapFromGlobal(QCursor::pos()));
+    else if (sizeChanged)
+        updatePointerCursor(pointerPosition_);
     if (hadFrame != !frame.isNull()) emit frameAvailabilityChanged();
     update();
 }
@@ -242,7 +246,10 @@ void VideoSurface::setControlEnabled(bool enabled)
 
 void VideoSurface::setRemoteCursor(const zjdesk::RemoteCursor &cursor)
 {
+    if (remoteCursor_.image.cacheKey() != cursor.image.cacheKey() || remoteCursor_.hotspot != cursor.hotspot)
+        localCursor_ = QCursor();
     remoteCursor_ = cursor;
+    updatePointerCursor(pointerPosition_);
     update();
 }
 
@@ -257,8 +264,37 @@ void VideoSurface::flushMotion()
 
 void VideoSurface::updatePointerCursor(const QPointF &position)
 {
+    pointerPosition_ = position;
     QJsonObject input;
-    if (pointerInput(position, input))
+    const bool inside = pointerInput(position, input);
+    const bool local = inside && hasRemoteCursor() && !remoteCursor_.screenSize.isEmpty();
+    if (localPointerVisible_ != local)
+    {
+        localPointerVisible_ = local;
+        update();
+    }
+    if (local)
+    {
+        // The OS moves this cursor immediately; host messages supply its shape,
+        // without making pointer feedback wait for a network round trip or video paint.
+        const auto target = frame_.size().scaled(size(), Qt::KeepAspectRatio);
+        // Bound native cursor allocation even when a peer reports a tiny screen.
+        const double scale = qMin(double(target.width()) / remoteCursor_.screenSize.width(),
+            128.0 / qMax(remoteCursor_.image.width(), remoteCursor_.image.height()));
+        const QSize cursorSize(qMax(1, qRound(remoteCursor_.image.width() * scale)),
+            qMax(1, qRound(remoteCursor_.image.height() * scale)));
+        const QPoint hotspot(qBound(0, qRound(remoteCursor_.hotspot.x() * scale), cursorSize.width() - 1),
+            qBound(0, qRound(remoteCursor_.hotspot.y() * scale), cursorSize.height() - 1));
+        if (localCursor_.pixmap().isNull() || localCursorSerial_ != remoteCursor_.serial
+            || localCursor_.pixmap().size() != cursorSize || localCursor_.hotSpot() != hotspot)
+        {
+            const auto image = remoteCursor_.image.scaled(cursorSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            localCursor_ = QCursor(QPixmap::fromImage(image), hotspot.x(), hotspot.y());
+            localCursorSerial_ = remoteCursor_.serial;
+        }
+        setCursor(localCursor_);
+    }
+    else if (inside)
         setCursor(Qt::BlankCursor);
     else
         unsetCursor();
@@ -333,6 +369,10 @@ void VideoSurface::wheelEvent(QWheelEvent *event)
 
 bool VideoSurface::event(QEvent *event)
 {
+    if (event->type() == QEvent::Leave)
+        updatePointerCursor(QPointF(-1, -1));
+    else if (event->type() == QEvent::Resize)
+        updatePointerCursor(pointerPosition_);
     if (controlEnabled_ && hasFocus()
         && (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease))
     {

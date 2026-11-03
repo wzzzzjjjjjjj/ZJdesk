@@ -25,6 +25,7 @@ class ShareQuality
 public:
     // 远控手感下限：达到它之后改为降低尺寸，而不是继续降到个位数帧率。
     static constexpr int MinimumFps = 24;
+    static int compatibleMaximumFps(int sourceFps, int receiverFps = 0);
     explicit ShareQuality(const QSize &nativeSize = {}, int maximumFps = 60, int minimumFps = MinimumFps);
     ShareProfile profile() const
     {

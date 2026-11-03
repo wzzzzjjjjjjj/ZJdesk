@@ -7,15 +7,234 @@
 #include "media/share_quality.h"
 #include "media/congestion_budget.h"
 #include <QFile>
+#include <QBuffer>
+#include <QScopeGuard>
 #include <QJsonDocument>
 #include <QTemporaryDir>
 #include <limits>
+#include <algorithm>
 #include <QtTest>
+#include "remote-control/input_injector_win_p.h"
 
 class CoreTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void shareQualityUsesBothDisplayLimits()
+    {
+        using Quality = zjdesk::ShareQuality;
+        QCOMPARE(Quality::compatibleMaximumFps(144, 60), 60);
+        QCOMPARE(Quality::compatibleMaximumFps(60, 144), 60);
+        QCOMPARE(Quality::compatibleMaximumFps(144, 120), 120);
+        QCOMPARE(Quality::compatibleMaximumFps(0, 30), 30);
+        QCOMPARE(Quality::compatibleMaximumFps(500, 0), 240);
+        QCOMPARE(Quality::compatibleMaximumFps(144, -1), 144);
+        QCOMPARE(Quality::compatibleMaximumFps(144, 500), 144);
+        zjdesk::ShareQuality quality(QSize(2560, 1440), Quality::compatibleMaximumFps(144, 60));
+        quality.observe(1, 1);
+        QVERIFY(quality.observe(1, 1));
+        for (int i = 0; i < 120; ++i) quality.observe(240, 240);
+        QCOMPARE(quality.profile().fps, 60);
+        QCOMPARE(quality.profile().size, QSize(2560, 1440));
+    }
+
+#ifdef Q_OS_WIN
+    void windowsSystemCursorImages_data()
+    {
+        QTest::addColumn<int>("resource");
+        QTest::newRow("arrow") << 32512;
+        QTest::newRow("text") << 32513;
+        QTest::newRow("wait") << 32514;
+        QTest::newRow("hand") << 32649;
+    }
+
+    void windowsSystemCursorImages()
+    {
+        QFETCH(int, resource);
+        const auto cursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(resource));
+        QVERIFY(cursor);
+        ICONINFO icon{};
+        QVERIFY(GetIconInfo(cursor, &icon));
+        const auto cleanup = qScopeGuard([&] {
+            if (icon.hbmColor) DeleteObject(icon.hbmColor);
+            if (icon.hbmMask) DeleteObject(icon.hbmMask);
+        });
+        const auto image = zjdesk::windowsCursorImage(cursor, icon);
+        QVERIFY(!image.isNull());
+        QVERIFY(image.width() <= 128 && image.height() <= 128);
+        QVERIFY(image.rect().contains(QPoint(int(icon.xHotspot), int(icon.yHotspot))));
+        bool visible = false, transparent = false;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x)
+            {
+                const int alpha = image.pixelColor(x, y).alpha();
+                visible |= alpha > 0;
+                transparent |= alpha == 0;
+            }
+        QVERIFY(visible && transparent);
+        QByteArray png;
+        QBuffer buffer(&png);
+        QVERIFY(buffer.open(QIODevice::WriteOnly));
+        QVERIFY(image.save(&buffer, "PNG"));
+        QVERIFY(png.size() <= 2400); // Must fit the existing cursor shape message.
+        QCOMPARE(QImage::fromData(png).size(), image.size());
+    }
+
+    void windowsMonochromeCursorPreservesMask()
+    {
+        BYTE andMask[32], xorMask[32]{};
+        std::fill_n(andMask, 32, BYTE(0xff));
+        andMask[0] = 0x3f;
+        xorMask[0] = 0x40;
+        xorMask[8] = 0x02; // Invert the background at (6, 4).
+        const auto cursor = CreateCursor(nullptr, 1, 2, 16, 16, andMask, xorMask);
+        QVERIFY(cursor);
+        const auto destroy = qScopeGuard([&] { DestroyCursor(cursor); });
+        ICONINFO icon{};
+        QVERIFY(GetIconInfo(cursor, &icon));
+        const auto cleanup = qScopeGuard([&] {
+            if (icon.hbmColor) DeleteObject(icon.hbmColor);
+            if (icon.hbmMask) DeleteObject(icon.hbmMask);
+        });
+        const auto image = zjdesk::windowsCursorImage(cursor, icon);
+        QCOMPARE(image.size(), QSize(16, 16));
+        QCOMPARE(image.pixelColor(0, 0), QColor(Qt::black));
+        QCOMPARE(image.pixelColor(1, 0), QColor(Qt::white));
+        QCOMPARE(image.pixelColor(2, 0).alpha(), 0);
+        QCOMPARE(image.pixelColor(6, 4), QColor(Qt::black));
+        QCOMPARE(image.pixelColor(5, 4), QColor(Qt::white));
+        QCOMPARE(image.pixelColor(3, 4).alpha(), 0);
+    }
+
+    void windowsColorCursorPreservesAlpha()
+    {
+        BITMAPINFO info{};
+        info.bmiHeader = {sizeof(BITMAPINFOHEADER), 2, -2, 1, 32, BI_RGB};
+        void *pixels = nullptr;
+        const auto color = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+        QVERIFY(color);
+        auto *rgba = static_cast<quint32 *>(pixels);
+        rgba[0] = 0xffff0000;
+        rgba[1] = 0x80ff0000; // Straight alpha source for CreateIconIndirect.
+        rgba[2] = rgba[3] = 0;
+        const BYTE mask[4]{};
+        const auto bitmap = CreateBitmap(2, 2, 1, 1, mask);
+        const auto cleanup = qScopeGuard([&] { DeleteObject(color); if (bitmap) DeleteObject(bitmap); });
+        QVERIFY(bitmap);
+        ICONINFO icon{};
+        icon.hbmColor = color;
+        icon.hbmMask = bitmap;
+        const auto cursor = HCURSOR(CreateIconIndirect(&icon));
+        QVERIFY(cursor);
+        const auto destroy = qScopeGuard([&] { DestroyCursor(cursor); });
+        const auto image = zjdesk::windowsCursorImage(cursor, icon);
+        QCOMPARE(image.size(), QSize(2, 2));
+        QCOMPARE(image.pixelColor(0, 0), QColor(Qt::red));
+        QCOMPARE(image.pixelColor(1, 0), QColor(255, 0, 0, 128));
+        QCOMPARE(image.pixelColor(0, 1).alpha(), 0);
+    }
+
+    void windowsInputTranslatesKeys_data()
+    {
+        QTest::addColumn<int>("key");
+        QTest::addColumn<int>("native");
+        QTest::addColumn<bool>("extended");
+        QTest::newRow("letter") << int(Qt::Key_A) << int('A') << false;
+        QTest::newRow("digit") << int(Qt::Key_7) << int('7') << false;
+        QTest::newRow("function") << int(Qt::Key_F12) << int(VK_F12) << false;
+        QTest::newRow("control") << int(Qt::Key_Control) << int(VK_LCONTROL) << false;
+        QTest::newRow("shift") << int(Qt::Key_Shift) << int(VK_LSHIFT) << false;
+        QTest::newRow("alt") << int(Qt::Key_Alt) << int(VK_LMENU) << false;
+        QTest::newRow("windows") << int(Qt::Key_Meta) << int(VK_LWIN) << true;
+        QTest::newRow("return") << int(Qt::Key_Return) << int(VK_RETURN) << false;
+        QTest::newRow("tab") << int(Qt::Key_Tab) << int(VK_TAB) << false;
+        QTest::newRow("delete") << int(Qt::Key_Delete) << int(VK_DELETE) << true;
+        QTest::newRow("left") << int(Qt::Key_Left) << int(VK_LEFT) << true;
+        QTest::newRow("home") << int(Qt::Key_Home) << int(VK_HOME) << true;
+        QTest::newRow("page-down") << int(Qt::Key_PageDown) << int(VK_NEXT) << true;
+        QTest::newRow("num-lock") << int(Qt::Key_NumLock) << int(VK_NUMLOCK) << true;
+    }
+
+    void windowsInputTranslatesKeys()
+    {
+        QFETCH(int, key);
+        QFETCH(int, native);
+        QFETCH(bool, extended);
+        for (bool pressed : {true, false})
+        {
+            const auto events = zjdesk::windowsInputEvents({{"kind", "key"}, {"key", key}, {"pressed", pressed}}, {}, {});
+            QCOMPARE(events.size(), 1);
+            const auto &event = events.first();
+            QCOMPARE(event.type, DWORD(INPUT_KEYBOARD));
+            QCOMPARE(event.ki.wVk, WORD(native));
+            QVERIFY(event.ki.wScan != 0);
+            QVERIFY(event.ki.dwFlags & KEYEVENTF_SCANCODE);
+            QCOMPARE(bool(event.ki.dwFlags & KEYEVENTF_EXTENDEDKEY), extended);
+            QCOMPARE(bool(event.ki.dwFlags & KEYEVENTF_KEYUP), !pressed);
+        }
+    }
+
+    void windowsInputUsesPhysicalPrimaryInsideVirtualDesktop()
+    {
+        const QRect screen(0, 0, 3840, 2160), desktop(-1920, -1080, 5760, 3240);
+        auto events = zjdesk::windowsInputEvents({{"kind", "move"}, {"x", 0}, {"y", 0}}, screen, desktop);
+        QCOMPARE(events.size(), 1);
+        QCOMPARE(events.first().mi.dx, qRound(1920.0 * 65535 / 5759));
+        QCOMPARE(events.first().mi.dy, qRound(1080.0 * 65535 / 3239));
+        QCOMPARE(events.first().mi.dwFlags, DWORD(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK));
+        events = zjdesk::windowsInputEvents({{"kind", "move"}, {"x", 1}, {"y", 1}}, screen, desktop);
+        QCOMPARE(events.first().mi.dx, LONG(65535));
+        QCOMPARE(events.first().mi.dy, LONG(65535));
+        for (const auto button : {Qt::LeftButton, Qt::RightButton, Qt::MiddleButton})
+        {
+            const auto down = zjdesk::windowsInputEvents({{"kind", "button"}, {"button", int(button)},
+                {"pressed", true}, {"x", 0.5}, {"y", 0.5}}, screen, desktop);
+            const auto up = zjdesk::windowsInputEvents({{"kind", "button"}, {"button", int(button)},
+                {"pressed", false}, {"x", 0.5}, {"y", 0.5}}, screen, desktop);
+            QCOMPARE(down.size(), 2);
+            QCOMPARE(up.size(), 2);
+            QCOMPARE(down.last().mi.dwFlags << 1, up.last().mi.dwFlags);
+        }
+        for (int steps : {-10, -1, 1, 10})
+        {
+            events = zjdesk::windowsInputEvents({{"kind", "wheel"}, {"steps", steps}, {"x", 0.5}, {"y", 0.5}}, screen, desktop);
+            QCOMPARE(events.size(), 2);
+            QCOMPARE(events.last().mi.dwFlags, DWORD(MOUSEEVENTF_WHEEL));
+            QCOMPARE(LONG(events.last().mi.mouseData), LONG(steps * WHEEL_DELTA));
+        }
+    }
+
+    void windowsSpecialKeysUseVirtualKeySequences()
+    {
+        for (unsigned int key : {VK_PAUSE, VK_SNAPSHOT})
+            for (bool pressed : {true, false})
+            {
+                const auto event = zjdesk::windowsKeyEvent(key, pressed);
+                QCOMPARE(event.ki.wVk, WORD(key));
+                QVERIFY(!(event.ki.dwFlags & KEYEVENTF_SCANCODE));
+                QCOMPARE(bool(event.ki.dwFlags & KEYEVENTF_KEYUP), !pressed);
+            }
+    }
+
+    void windowsInputRejectsMalformedEventsWithoutMovingPointer()
+    {
+        const QRect screen(0, 0, 1920, 1080);
+        for (const QJsonObject &input : QList<QJsonObject>{
+                {{"kind", "move"}, {"x", -0.1}, {"y", 0}},
+                {{"kind", "move"}, {"x", 1.1}, {"y", 0}},
+                {{"kind", "move"}, {"x", "0.5"}, {"y", 0}},
+                {{"kind", "button"}, {"x", 0}, {"y", 0}, {"button", int(Qt::LeftButton)}},
+                {{"kind", "button"}, {"x", 0}, {"y", 0}, {"button", 999}, {"pressed", true}},
+                {{"kind", "wheel"}, {"x", 0}, {"y", 0}, {"steps", 0}},
+                {{"kind", "wheel"}, {"x", 0}, {"y", 0}, {"steps", 11}},
+                {{"kind", "wheel"}, {"x", 0}, {"y", 0}, {"steps", std::numeric_limits<int>::min()}},
+                {{"kind", "key"}, {"key", int(Qt::Key_A)}},
+                {{"kind", "key"}, {"key", int(Qt::Key_unknown)}, {"pressed", true}},
+                {{"kind", "unknown"}}})
+            QVERIFY(zjdesk::windowsInputEvents(input, screen, screen).isEmpty());
+    }
+#endif
+
     void desktopCameraConsent_data()
     {
         QTest::addColumn<QString>("deviceConsent");

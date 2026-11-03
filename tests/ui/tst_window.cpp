@@ -1,6 +1,7 @@
 #include "main_window.h"
 #include "video_surface.h"
 #include "signaling/room_server.h"
+#include "platform/platform_info.h"
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
@@ -439,7 +440,7 @@ private slots:
         QFile::remove("output/remote-revoke");
         QFile::remove("output/remote-completed");
         const auto server = qEnvironmentVariable("ZJDESK_TEST_SERVER");
-        MainWindow window(server, "remote-test", "Linux");
+        MainWindow window(server, "remote-test", zjdesk::PlatformInfo::current().system);
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
         window.findChild<QPushButton *>("primaryButton")->click();
@@ -599,6 +600,34 @@ private slots:
         window.findChild<QPushButton *>("primaryButton")->click();
     }
 
+    void windowsControlHostWithoutDesktopInput()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("Windows native desktop host only");
+#else
+        if (qEnvironmentVariable("ZJDESK_WINDOWS_CONTROL_HOST") != "1")
+            QSKIP("Explicit cross-machine backend validation only");
+        using Remote = zjdesk::SessionCoordinator::RemoteState;
+        zjdesk::SessionCoordinator host;
+        QVERIFY(host.input_.available());
+        QVERIFY(host.join(QUrl(qEnvironmentVariable("ZJDESK_TEST_SERVER")), "windows-host-test", "Windows"));
+        QSignalSpy probes(&host, &zjdesk::SessionCoordinator::inputProbeInjected);
+        // Deliberately show no window, move no pointer and type no keys. The
+        // controller sends an unsupported event to exercise the authorized path.
+        QTRY_COMPARE_WITH_TIMEOUT(host.remoteState(), Remote::Pending, 60000);
+        host.stopControl();
+        QTRY_COMPARE_WITH_TIMEOUT(host.remoteState(), Remote::Pending, 15000);
+        QVERIFY(!host.screenActive());
+        QVERIFY(host.grantControl());
+        QTRY_COMPARE_WITH_TIMEOUT(host.shareState(), zjdesk::SessionCoordinator::PreviewState::Running, 45000);
+        QTRY_VERIFY_WITH_TIMEOUT(!probes.isEmpty(), 45000);
+        QCOMPARE(probes.first().at(2).toBool(), false);
+        QTRY_COMPARE_WITH_TIMEOUT(host.remoteState(), Remote::Idle, 45000);
+        QTRY_VERIFY_WITH_TIMEOUT(!host.screenActive(), 5000);
+        host.leave();
+#endif
+    }
+
     void remoteControlAcrossMachines()
     {
         if (qEnvironmentVariable("ZJDESK_REMOTE_CONTROLLER") != "1")
@@ -660,7 +689,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(status->text(), QStringLiteral("远程控制未开启"), 10000);
         QTRY_VERIFY(request->isEnabled());
         request->click();
-        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("正在控制 Linux")), 60000);
+        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("正在控制对方电脑")), 60000);
         QTRY_VERIFY_WITH_TIMEOUT(surface->hasFrame(), 10000);
         QTRY_VERIFY_WITH_TIMEOUT(surface->hasRemoteCursor(), 10000);
         QTRY_COMPARE_WITH_TIMEOUT(window.session_.shareStats().transport,
@@ -1062,7 +1091,7 @@ private slots:
         QTRY_VERIFY(!surface->hasFrame());
         QTRY_VERIFY(request->isEnabled());
         request->click();
-        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("正在控制 Linux")), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("正在控制对方电脑")), 10000);
         QTest::keyPress(surface, Qt::Key_Control);
         QTRY_VERIFY_WITH_TIMEOUT(observation().value("controlHeld").toBool(), 10000);
         QVERIFY(observer.write("remote-revoke\n") > 0);
@@ -1071,7 +1100,7 @@ private slots:
         QTRY_VERIFY(!surface->hasFrame());
         QTRY_VERIFY(request->isEnabled());
         request->click();
-        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("正在控制 Linux")), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("正在控制对方电脑")), 10000);
         QTest::keyPress(surface, Qt::Key_Control);
         QTRY_VERIFY_WITH_TIMEOUT(observation().value("controlHeld").toBool(), 10000);
         window.findChild<QPushButton *>("primaryButton")->click();
@@ -1238,6 +1267,167 @@ private slots:
         QCOMPARE(input.first().at(0).toJsonObject().value("kind").toString(), QStringLiteral("release"));
     }
 
+    void controlSurfaceUsesLocalCursorWithoutWaitingForHostPosition()
+    {
+        // No visible window or native input: exercise the controller event path only.
+        VideoSurface surface;
+        surface.resize(640, 480);
+        QImage frame(1920, 1080, QImage::Format_RGB32);
+        frame.fill(Qt::blue);
+        surface.setFrame(frame);
+        surface.setControlEnabled(true);
+        zjdesk::RemoteCursor cursor;
+        cursor.image = QImage(48, 48, QImage::Format_ARGB32);
+        cursor.image.fill(Qt::red);
+        cursor.screenSize = frame.size();
+        cursor.hotspot = QPoint(6, 9);
+        cursor.position = QPointF(0.1, 0.1);
+        cursor.serial = 1;
+        cursor.visible = true;
+        surface.setRemoteCursor(cursor);
+        const auto move = [&](QPoint position) {
+            QMouseEvent event(QEvent::MouseMove, position, position,
+                Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(&surface, &event);
+        };
+        move(QPoint(320, 240));
+        QVERIFY(!surface.cursor().pixmap().isNull());
+        QCOMPARE(surface.cursor().pixmap().size(), QSize(16, 16));
+        QCOMPARE(surface.cursor().hotSpot(), QPoint(2, 3));
+        const auto shape = surface.cursor().pixmap().cacheKey();
+        move(QPoint(500, 240)); // No cursor message or frame arrives from the host.
+        QCOMPARE(surface.cursor().pixmap().cacheKey(), shape);
+        cursor.position = QPointF(0.2, 0.2); // A delayed position cannot move the local pointer.
+        surface.setRemoteCursor(cursor);
+        QCOMPARE(surface.cursor().pixmap().cacheKey(), shape);
+        cursor.serial = 2;
+        cursor.image.fill(Qt::green);
+        surface.setRemoteCursor(cursor);
+        QVERIFY(surface.cursor().pixmap().cacheKey() != shape);
+        QCOMPARE(surface.cursor().pixmap().toImage().pixelColor(0, 0), QColor(Qt::green));
+        QSignalSpy input(&surface, &VideoSurface::remoteInput);
+        QTest::mouseClick(&surface, Qt::LeftButton, Qt::NoModifier, QPoint(500, 240));
+        QCOMPARE(input.last().at(0).toJsonObject().value("pressed").toBool(), false);
+        QCOMPARE(input.last().at(0).toJsonObject().value("x").toDouble(), 500.0 / 640);
+        move(QPoint(320, 20)); // Letterbox margins restore the local default cursor.
+        QCOMPARE(surface.cursor().shape(), Qt::ArrowCursor);
+        move(QPoint(320, 240));
+        QEvent leave(QEvent::Leave);
+        QApplication::sendEvent(&surface, &leave);
+        QCOMPARE(surface.cursor().shape(), Qt::ArrowCursor);
+        surface.setRemoteCursor(cursor);
+        QCOMPARE(surface.cursor().shape(), Qt::ArrowCursor);
+        move(QPoint(320, 240));
+        cursor.visible = false;
+        surface.setRemoteCursor(cursor);
+        QCOMPARE(surface.cursor().shape(), Qt::BlankCursor);
+        cursor.visible = true;
+        surface.setRemoteCursor(cursor);
+        surface.setFrame({});
+        QCOMPARE(surface.cursor().shape(), Qt::ArrowCursor);
+        surface.setControlEnabled(false);
+        QCOMPARE(surface.cursor().shape(), Qt::ArrowCursor);
+    }
+
+    void controlSurfaceRefreshesCursorAcrossSessions()
+    {
+        VideoSurface surface;
+        surface.resize(640, 480);
+        QImage frame(1920, 1080, QImage::Format_RGB32);
+        frame.fill(Qt::blue);
+        surface.setFrame(frame);
+        surface.setControlEnabled(true);
+        zjdesk::RemoteCursor cursor;
+        cursor.image = QImage(48, 48, QImage::Format_ARGB32);
+        cursor.image.fill(Qt::red);
+        cursor.screenSize = frame.size();
+        cursor.hotspot = QPoint(6, 9);
+        cursor.serial = 1;
+        cursor.visible = true;
+        const auto move = [&] {
+            QMouseEvent event(QEvent::MouseMove, QPointF(320, 240), QPointF(320, 240),
+                Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(&surface, &event);
+        };
+        surface.setRemoteCursor(cursor);
+        move();
+        QCOMPARE(surface.cursor().pixmap().toImage().pixelColor(0, 0), QColor(Qt::red));
+        surface.setControlEnabled(false);
+        surface.setControlEnabled(true);
+        cursor.image.fill(Qt::green); // A new host can reuse the same serial and dimensions.
+        surface.setRemoteCursor(cursor);
+        move();
+        QCOMPARE(surface.cursor().pixmap().toImage().pixelColor(0, 0), QColor(Qt::green));
+        surface.setFrame({});
+        surface.setFrame(frame);
+        cursor.image.fill(Qt::yellow);
+        surface.setRemoteCursor(cursor);
+        move();
+        QCOMPARE(surface.cursor().pixmap().toImage().pixelColor(0, 0), QColor(Qt::yellow));
+        cursor.hotspot = QPoint(12, 15);
+        surface.setRemoteCursor(cursor);
+        QCOMPARE(surface.cursor().hotSpot(), QPoint(4, 5));
+        cursor.hotspot = QPoint(23, 9);
+        surface.setRemoteCursor(cursor);
+        QCOMPARE(surface.cursor().hotSpot(), QPoint(8, 3));
+        cursor.screenSize.setWidth(1970); // Same rounded bitmap size, different rounded hotspot.
+        surface.setRemoteCursor(cursor);
+        QCOMPARE(surface.cursor().pixmap().size(), QSize(16, 16));
+        QCOMPARE(surface.cursor().hotSpot(), QPoint(7, 3));
+    }
+
+    void controlSurfaceBoundsLocalCursorScaling()
+    {
+        VideoSurface surface;
+        surface.resize(640, 480);
+        QImage frame(1920, 1080, QImage::Format_RGB32);
+        frame.fill(Qt::blue);
+        surface.setFrame(frame);
+        surface.setControlEnabled(true);
+        zjdesk::RemoteCursor cursor;
+        cursor.image = QImage(48, 48, QImage::Format_ARGB32);
+        cursor.image.fill(Qt::red);
+        cursor.screenSize = QSize(48, 48); // Valid protocol data with an oversized display scale.
+        cursor.hotspot = QPoint(6, 9);
+        cursor.serial = 1;
+        cursor.visible = true;
+        surface.setRemoteCursor(cursor);
+        QMouseEvent event(QEvent::MouseMove, QPointF(320, 240), QPointF(320, 240),
+            Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(&surface, &event);
+        QCOMPARE(surface.cursor().pixmap().size(), QSize(128, 128));
+        QCOMPARE(surface.cursor().hotSpot(), QPoint(16, 24));
+        cursor.screenSize = QSize(1, 1);
+        surface.setRemoteCursor(cursor);
+        QCOMPARE(surface.cursor().pixmap().size(), QSize(128, 128));
+    }
+
+    void controlSurfaceUpdatesStationaryCursorWhenFrameAspectChanges()
+    {
+        VideoSurface surface;
+        surface.resize(640, 480);
+        QImage frame(1920, 1080, QImage::Format_RGB32);
+        frame.fill(Qt::blue);
+        surface.setFrame(frame);
+        surface.setControlEnabled(true);
+        zjdesk::RemoteCursor cursor;
+        cursor.image = QImage(48, 48, QImage::Format_ARGB32);
+        cursor.image.fill(Qt::red);
+        cursor.screenSize = frame.size();
+        cursor.visible = true;
+        surface.setRemoteCursor(cursor);
+        QMouseEvent event(QEvent::MouseMove, QPointF(320, 100), QPointF(320, 100),
+            Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(&surface, &event);
+        QVERIFY(!surface.cursor().pixmap().isNull());
+        QImage wideFrame(1920, 400, QImage::Format_RGB32);
+        wideFrame.fill(Qt::blue);
+        surface.setFrame(wideFrame); // The stationary pointer is now in a letterbox margin.
+        QCOMPARE(surface.cursor().shape(), Qt::ArrowCursor);
+        surface.setFrame(frame);
+        QVERIFY(!surface.cursor().pixmap().isNull());
+    }
+
     void controlSurfaceCoalescesMotionAndRestoresCursor()
     {
         VideoSurface surface;
@@ -1369,6 +1559,8 @@ private slots:
         frame.fill(Qt::blue);
         surface.setFrame(frame);
         surface.setControlEnabled(true);
+        QEvent leave(QEvent::Leave);
+        QApplication::sendEvent(&surface, &leave); // Host-position overlay applies outside local control.
         const auto center = QPoint(320, 240) * surface.devicePixelRatioF();
         const auto movedCenter = QPoint(480, 240) * surface.devicePixelRatioF();
         QCOMPARE(surface.grabFramebuffer().pixelColor(center), QColor(Qt::blue));

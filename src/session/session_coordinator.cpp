@@ -246,6 +246,7 @@ void SessionCoordinator::clearMembership()
     failedStreamId_.clear();
     clearControl();
     peerControllable_ = false;
+    peerMaximumFps_ = 0;
     ownPeerId_.clear();
     peerId_.clear();
     peerName_.clear();
@@ -274,7 +275,8 @@ void SessionCoordinator::changeState(State state, const QString &detail)
     if (state == State::PeerAvailable)
     {
         sendNegotiation("control", {{"action", "capabilities"},
-            {"control", roomType_ == RoomType::Assistance && input_.available() && media_.environment().ready}});
+            {"control", roomType_ == RoomType::Assistance && input_.available() && media_.environment().ready},
+            {"maximumFps", ScreenShare::displayMaximumFps()}});
         if (conferenceAutoConnect_ && roomType_ == RoomType::Meeting)
             startConference();
     }
@@ -413,7 +415,7 @@ bool SessionCoordinator::startScreenShare(const QString &source, int targetFps)
     shareState_ = PreviewState::Starting;
     shareDetail_ = QStringLiteral("正在连接屏幕共享");
     shareStats_ = {};
-    screen_.start(true, source, ++shareEpoch_, targetFps);
+    screen_.start(true, source, ++shareEpoch_, targetFps, peerMaximumFps_);
     emit shareChanged();
     return true;
 }
@@ -467,7 +469,7 @@ bool SessionCoordinator::requestControl()
         return false;
     }
     remoteState_ = RemoteState::Requesting;
-    remoteDetail_ = QStringLiteral("等待 Linux 端允许控制");
+    remoteDetail_ = QStringLiteral("等待对方允许控制");
     controlDeadline_.start(60000);
     emit remoteChanged();
     return true;
@@ -639,7 +641,7 @@ void SessionCoordinator::receiveControl(const QJsonObject &message)
         pendingProbeSequence_ = 0;
         inputProbeClock_.invalidate();
         remoteState_ = RemoteState::Controlling;
-        remoteDetail_ = QStringLiteral("正在控制 Linux；点击共享画面后操作键鼠");
+        remoteDetail_ = QStringLiteral("正在控制对方电脑；点击共享画面后操作键鼠");
         if (message.value("cursorSync").toBool())
             screen_.sendControl({{"action", "cursor_ready"}, {"epoch", QString::number(epoch)}}, shareEpoch_);
         emit remoteChanged();
@@ -747,6 +749,8 @@ void SessionCoordinator::receiveControlRequest(const QJsonObject &message)
     if (action == "capabilities")
     {
         peerControllable_ = message.value("control").toBool();
+        const double fps = message.value("maximumFps").toDouble();
+        peerMaximumFps_ = std::isfinite(fps) && fps >= 5 && fps <= 240 && fps == int(fps) ? int(fps) : 0;
         emit remoteChanged();
     }
     else if (action == "request" && protocol::isRoomIdValid(requestId)
@@ -1028,6 +1032,7 @@ void SessionCoordinator::receive(const protocol::Message &message)
         clearScreenShare(false);
         clearControl();
         peerControllable_ = false;
+        peerMaximumFps_ = 0;
         peerId_.clear();
         peerName_.clear();
         control_.revoke();

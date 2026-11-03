@@ -45,7 +45,7 @@ add_library(zjdesk_client_core STATIC
     src/platform/camera_permission.cpp src/platform/camera_permission.h src/platform/camera_permission_p.h)
 target_link_libraries(zjdesk_client_core PUBLIC zjdesk_protocol Qt6::Gui Qt6::Network Qt6::WebSockets)
 if(WIN32)
-    target_link_libraries(zjdesk_client_core PRIVATE windowsapp)
+    target_link_libraries(zjdesk_client_core PRIVATE windowsapp user32 gdi32)
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(X11 REQUIRED)
