@@ -7,6 +7,7 @@
 #include <QThread>
 #include <QScopeGuard>
 #include <QtTest>
+#include <algorithm>
 
 using Preview = zjdesk::SessionCoordinator::PreviewState;
 
@@ -44,6 +45,38 @@ private slots:
         controller.sendRemoteInput({{"kind", "unsupported-test-event"}, {"probe", true}});
         QTRY_COMPARE_WITH_TIMEOUT(probes.size(), 1, 10000);
         QCOMPARE(probes.first().at(3).toBool(), false);
+        QList<qint64> probeTimes;
+        // Exercise the real input queue under desktop capture without moving
+        // the pointer or injecting a native button/key event.
+        for (int sample = 0; sample < 200; ++sample)
+        {
+            const auto count = probes.size();
+            controller.sendRemoteInput({{"kind", "unsupported-test-event"}, {"probe", true}});
+            QVERIFY(probes.size() > count || probes.wait(10000));
+            QCOMPARE(probes.size(), count + 1);
+            QCOMPARE(probes.last().at(3).toBool(), false);
+            probeTimes.append(probes.last().at(1).toLongLong());
+        }
+        std::sort(probeTimes.begin(), probeTimes.end());
+        qInfo() << "No-op input RTT us p50/p95/p99/max:"
+            << probeTimes.at(100) << probeTimes.at(190) << probeTimes.at(198) << probeTimes.last();
+        if (qEnvironmentVariable("ZJDESK_WINDOWS_CLICK_ACCEPTANCE") == "1")
+        {
+            // Explicitly enabled with the dedicated Windows test button visible.
+            for (int click = 0; click < 20; ++click)
+            {
+                for (const bool pressed : {true, false})
+                {
+                    const auto count = probes.size();
+                    controller.sendRemoteInput({{"kind", "button"}, {"button", int(Qt::LeftButton)},
+                        {"pressed", pressed}, {"x", 0.5}, {"y", 0.5}, {"probe", true}});
+                    QVERIFY(probes.size() > count || probes.wait(10000));
+                    QCOMPARE(probes.size(), count + 1);
+                    QCOMPARE(probes.last().at(3).toBool(), true);
+                }
+                QTest::qWait(100);
+            }
+        }
         const auto first = frames;
         QTest::qWait(10000);
         const auto stats = controller.shareStats();

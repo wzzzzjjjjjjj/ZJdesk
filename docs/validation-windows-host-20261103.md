@@ -86,6 +86,24 @@ Windows Release 构建部署通过；Ubuntu 隔离目录构建通过。现有隔
 
 补审仅改 Windows 图像像素处理，没有重复 Linux 构建、跨机媒体或 OpenGL 呈现；源文件 / 测试 / 文档同步至 Linux 隔离目录，原始脏检出未动。真实操作手感、缩放后的可见性和不同 DPI 仍待人工验收。日志：`build/cursor-shape-review-red.txt`、`build/cursor-shape-review-core.txt`、`build/cursor-shape-review-build.log`、`build/cursor-shape-review-probe.txt`。
 
+## 2026-11-04 普通窗口点击迟缓排查
+
+用户确认最小化 / 最大化迟缓和无响应发生在放大画面，普通窗口也受影响，Windows 本机实际动作慢；Linux 系统自身不卡。只读检测实际光标读取 1000 次：中位 / P95 / P99 / 最大 115 / 282 / 417 / 676 µs，未支持光标读取本身造成明显迟缓的猜测。
+
+用户批准后，仅在独立的 Windows 测试窗口内执行 20 次中心点击：Windows 控件实际收到 20 次，按下 / 松开回执均 accepted=true。另 200 个无效测试输入的往返中位 / P95 / P99 / 最大为 10864 / 11760 / 12136 / 13010 µs。短测实际桌面 1920×1080、目标 60 fps、采样解码 57 fps、交付 56 fps、UDP 丢包 0。该夹具不经过实际 Linux GUI 的输入事件和呈现，也未测试用户窗口的最小化 / 最大化；不能认定用户问题已解决。日志：`build/click-native-windows.txt`、`build/click-native-linux.txt`。最初夹具使用失效的 Windows 本地地址 10.11.42.57，主屏采集启动失败；更正为当前地址 10.11.42.46 后才完成以上测试。没有据此判定用户启动器地址错误。
+
+检查发现诊断盲区：多个输入探针共用一个待回执序号 / 计时器，旧回执被后续探针覆盖。新增回归先复现预期 2 个结果、实际 1 个，改为逐序号计时后通过，覆盖重叠回执、重复 / 旧代次过滤和普通点击自动回执、拒绝结果保留。普通鼠标按钮事件自动请求回执；两端 `control-input` 记录发送 / 注入 / 回执，包含序号、按下或松开、发送坐标、accepted、rttUs / injectUs。最多保存 64 个待回执项，停止或重新授权清空；没有修改输入顺序、权限边界、传输或 200 ms 视频缓冲。
+
+Windows Release 与 Ubuntu 隔离构建通过；Windows 常规 CTest 4/4、Linux 3/3 通过。最终保留诊断夹具显式 `probe=false` 的单事件测量语义，两端重新构建并补测相关隐藏窗口用例，各 3 项通过（含初始化 / 清理），未重复完整套件。新增用例直接发送 Qt / 协调层事件，未显示窗口或执行系统输入。Windows 常规入口 `build.ps1` 遇到正在运行的客户端占用输出 EXE 后，改用同一 Release 预设在 `build/windows-click-diagnostics` 独立构建 / 测试，没有结束用户进程或替换其正在运行的程序；常规部署尚未更新。日志：`build/click-diagnostics-red.txt`、`build/click-diagnostics-green.txt`、`build/click-diagnostics-check.log`、`build/click-diagnostics-final-check.log`，Linux 对应日志在隔离目录的 `build/` 下。原有 OpenGL / 实际桌面延迟夹具未运行。
+
+实际复现时重新运行本工作树 `构建启动.bat`，分别比较内嵌 / 放大画面；发生一次无响应后，在两端“运行诊断 → 导出事件报告”保存最近事件。发送与执行记录用于区分事件未发出、无回执、系统拒绝和 API 已接受；API 接受不证明目标窗口已经处理，更不证明视频已经呈现。现有客户端未被本次后台验证重启或接管，Linux 原始脏检出未覆盖。
+
+## 点击回执集中复核
+
+实际复核本轮协调层 / 头文件和两处测试 diff，以及 VideoSurface → MainWindow → SessionCoordinator → ScreenShare 调用、EventLog 导出和 ControlSession 的授权 / 单调序号校验。确认回执按输入序号独立计时，重复 / 旧代次不会消费当前待回执项；停止、通道断开及新授权清理待回执状态，64 项限制只淘汰计时记录，不丢弃输入。协调层状态和日志在其 Qt 所属线程更新，媒体消息按共享代次过滤；旧对端已有 probe_ack 支持，显式 probe=false 的单事件延迟夹具保持原测量语义。原生点击夹具由独立环境开关启用，默认路径不显示窗口、不执行系统输入。
+
+未发现新增的明确逻辑问题，没有追加产品代码修正。核对本轮 Windows 4/4、Linux 3/3 常规结果及最终两端各 3 项相关用例的真实日志，没有重复完整套件，也没有再次执行原生点击、重启现有客户端或做实际 OpenGL 呈现。放大画面中的真实迟缓 / 漏点击仍未定位，需用户对照与导出实际事件。
+
 ## 尚未完成的验收
 
 - 真实 Linux GUI 操作 Windows：点击、按住拖拽、滚轮、组合键、失焦释放和对端停止时的实际系统效果。

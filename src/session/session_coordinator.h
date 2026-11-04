@@ -9,6 +9,7 @@
 #include "remote-control/input_injector.h"
 #include "signaling/signaling_client.h"
 #include <QElapsedTimer>
+#include <QMap>
 #include <QTimer>
 #include <functional>
 
@@ -147,8 +148,7 @@ private:
     QString controlRequestId_;
     quint64 remoteControlEpoch_ = 0;
     quint64 inputSequence_ = 0;
-    quint64 pendingProbeSequence_ = 0;
-    QElapsedTimer inputProbeClock_;
+    QMap<quint64, QElapsedTimer> inputProbeClocks_;
     QTimer controlDeadline_;
     QTimer cursorTimer_;
     RemoteCursor sentCursor_, remoteCursor_;

@@ -522,8 +522,7 @@ void SessionCoordinator::clearControl()
     input_.releaseAll();
     remoteState_ = RemoteState::Idle;
     remoteControlEpoch_ = inputSequence_ = 0;
-    pendingProbeSequence_ = 0;
-    inputProbeClock_.invalidate();
+    inputProbeClocks_.clear();
     controlRequestId_.clear();
     controlStartedShare_ = false;
     remoteDetail_ = QStringLiteral("远程控制未开启");
@@ -612,10 +611,24 @@ void SessionCoordinator::sendRemoteInput(const QJsonObject &input)
     message.insert("action", "input");
     message.insert("epoch", QString::number(remoteControlEpoch_));
     message.insert("sequence", QString::number(++inputSequence_));
+    if (message.value("kind") == "button")
+    {
+        if (!message.contains("probe"))
+            message.insert("probe", true);
+        events_.append("control-input", QString("send seq=%1 button=%2 pressed=%3 x=%4 y=%5")
+            .arg(inputSequence_).arg(message.value("button").toInt()).arg(message.value("pressed").toBool())
+            .arg(message.value("x").toDouble(), 0, 'f', 4).arg(message.value("y").toDouble(), 0, 'f', 4));
+    }
     if (message.value("probe").toBool())
     {
-        pendingProbeSequence_ = inputSequence_;
-        inputProbeClock_.restart();
+        // Bound memory when a peer stops replying.
+        if (inputProbeClocks_.size() >= 64)
+        {
+            events_.append("control-input", QString("pending acknowledgement limit: dropped seq=%1")
+                .arg(inputProbeClocks_.firstKey()));
+            inputProbeClocks_.erase(inputProbeClocks_.begin());
+        }
+        inputProbeClocks_[inputSequence_].start();
     }
     screen_.sendControl(message, shareEpoch_);
 }
@@ -638,8 +651,7 @@ void SessionCoordinator::receiveControl(const QJsonObject &message)
         controlDeadline_.stop();
         remoteControlEpoch_ = epoch;
         inputSequence_ = 0;
-        pendingProbeSequence_ = 0;
-        inputProbeClock_.invalidate();
+        inputProbeClocks_.clear();
         remoteState_ = RemoteState::Controlling;
         remoteDetail_ = QStringLiteral("正在控制对方电脑；点击共享画面后操作键鼠");
         if (message.value("cursorSync").toBool())
@@ -705,14 +717,16 @@ void SessionCoordinator::receiveControl(const QJsonObject &message)
         bool epochValid = false, sequenceValid = false;
         const auto epoch = message.value("epoch").toString().toULongLong(&epochValid);
         const auto sequence = message.value("sequence").toString().toULongLong(&sequenceValid);
-        if (epochValid && sequenceValid && epoch == remoteControlEpoch_
-            && sequence == pendingProbeSequence_ && inputProbeClock_.isValid())
+        auto probe = inputProbeClocks_.find(sequence);
+        if (epochValid && sequenceValid && epoch == remoteControlEpoch_ && probe != inputProbeClocks_.end())
         {
-            const auto roundTripUs = inputProbeClock_.nsecsElapsed() / 1000;
-            pendingProbeSequence_ = 0;
-            inputProbeClock_.invalidate();
-            emit inputProbeAcknowledged(sequence, roundTripUs,
-                message.value("injectUs").toInteger(), message.value("accepted").toBool());
+            const auto roundTripUs = probe->nsecsElapsed() / 1000;
+            inputProbeClocks_.erase(probe);
+            const auto injectUs = message.value("injectUs").toInteger();
+            const bool accepted = message.value("accepted").toBool();
+            events_.append("control-input", QString("ack seq=%1 accepted=%2 rttUs=%3 injectUs=%4")
+                .arg(sequence).arg(accepted).arg(roundTripUs).arg(injectUs));
+            emit inputProbeAcknowledged(sequence, roundTripUs, injectUs, accepted);
         }
     }
     else if (action == "input" && remoteState_ == RemoteState::Controlled && !receivingScreen_)
@@ -722,16 +736,24 @@ void SessionCoordinator::receiveControl(const QJsonObject &message)
         const auto sequence = message.value("sequence").toString().toULongLong(&sequenceValid);
         if (epochValid && sequenceValid && control_.acceptInput(peerId_, epoch, sequence))
         {
-            if (message.value("probe").toBool())
+            const bool button = message.value("kind") == "button";
+            if (message.value("probe").toBool() || button)
             {
                 QElapsedTimer injectClock;
                 injectClock.start();
                 const bool accepted = input_.inject(message);
                 const auto injectUs = injectClock.nsecsElapsed() / 1000;
-                emit inputProbeInjected(sequence, injectUs, accepted);
-                screen_.sendControl({{"action", "probe_ack"}, {"epoch", QString::number(epoch)},
-                    {"sequence", QString::number(sequence)}, {"injectUs", injectUs},
-                    {"accepted", accepted}}, shareEpoch_);
+                if (button)
+                    events_.append("control-input", QString("inject seq=%1 button=%2 pressed=%3 accepted=%4 injectUs=%5")
+                        .arg(sequence).arg(message.value("button").toInt()).arg(message.value("pressed").toBool())
+                        .arg(accepted).arg(injectUs));
+                if (message.value("probe").toBool())
+                {
+                    emit inputProbeInjected(sequence, injectUs, accepted);
+                    screen_.sendControl({{"action", "probe_ack"}, {"epoch", QString::number(epoch)},
+                        {"sequence", QString::number(sequence)}, {"injectUs", injectUs},
+                        {"accepted", accepted}}, shareEpoch_);
+                }
             }
             else
                 input_.inject(message);

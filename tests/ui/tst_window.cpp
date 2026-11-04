@@ -600,6 +600,42 @@ private slots:
         window.findChild<QPushButton *>("primaryButton")->click();
     }
 
+    void inputProbesKeepOverlappingAcknowledgementsAndTraceClicks()
+    {
+        zjdesk::SessionCoordinator controller;
+        using Remote = zjdesk::SessionCoordinator::RemoteState;
+        controller.remoteState_ = Remote::Controlling;
+        controller.controlChannelReady_ = controller.receivingScreen_ = true;
+        controller.remoteControlEpoch_ = 42;
+        QSignalSpy acknowledgements(&controller, &zjdesk::SessionCoordinator::inputProbeAcknowledged);
+        controller.sendRemoteInput({{"kind", "unsupported-test-event"}, {"probe", true}});
+        controller.sendRemoteInput({{"kind", "unsupported-test-event"}, {"probe", true}});
+        const auto acknowledge = [&](int sequence, int epoch = 42, bool accepted = true) {
+            controller.receiveControl({{"action", "probe_ack"}, {"epoch", QString::number(epoch)},
+                {"sequence", QString::number(sequence)}, {"injectUs", 12}, {"accepted", accepted}});
+        };
+        acknowledge(1, 41);
+        QCOMPARE(acknowledgements.size(), 0);
+        acknowledge(1);
+        acknowledge(1); // Duplicate replies must not produce duplicate results.
+        acknowledge(2);
+        QCOMPARE(acknowledgements.size(), 2);
+        controller.sendRemoteInput({{"kind", "button"}, {"button", int(Qt::LeftButton)},
+            {"pressed", true}, {"x", 0.5}, {"y", 0.5}});
+        acknowledge(3, 42, false);
+        QCOMPARE(acknowledgements.size(), 3);
+        QCOMPARE(acknowledgements.last().at(3).toBool(), false);
+        QVERIFY(std::any_of(controller.events()->entries().cbegin(), controller.events()->entries().cend(),
+            [](const auto &event) { return event.category == "control-input" && event.message.contains("rttUs="); }));
+        controller.sendRemoteInput({{"kind", "button"}, {"button", int(Qt::LeftButton)},
+            {"pressed", false}, {"x", 0.5}, {"y", 0.5}, {"probe", false}});
+        acknowledge(4);
+        QCOMPARE(acknowledgements.size(), 3);
+        controller.clearControl();
+        acknowledge(3);
+        QCOMPARE(acknowledgements.size(), 3);
+    }
+
     void windowsControlHostWithoutDesktopInput()
     {
 #ifndef Q_OS_WIN
@@ -609,20 +645,43 @@ private slots:
             QSKIP("Explicit cross-machine backend validation only");
         using Remote = zjdesk::SessionCoordinator::RemoteState;
         zjdesk::SessionCoordinator host;
+        const bool clickAcceptance = qEnvironmentVariable("ZJDESK_WINDOWS_CLICK_ACCEPTANCE") == "1";
+        QPushButton clickTarget(QStringLiteral("ZJdesk 远程点击测试"));
+        clickTarget.setWindowFlag(Qt::WindowStaysOnTopHint);
+        clickTarget.resize(320, 160);
+        clickTarget.move(QGuiApplication::primaryScreen()->geometry().center() - clickTarget.rect().center());
+        int clicks = 0;
+        connect(&clickTarget, &QPushButton::clicked, this, [&] { ++clicks; });
+        const auto reportFailure = qScopeGuard([&] {
+            if (QTest::currentTestFailed())
+                for (const auto &event : host.events()->entries())
+                    qWarning().noquote() << event.category << event.message;
+        });
         QVERIFY(host.input_.available());
         QVERIFY(host.join(QUrl(qEnvironmentVariable("ZJDESK_TEST_SERVER")), "windows-host-test", "Windows"));
         QSignalSpy probes(&host, &zjdesk::SessionCoordinator::inputProbeInjected);
-        // Deliberately show no window, move no pointer and type no keys. The
-        // controller sends an unsupported event to exercise the authorized path.
+        // The default path shows no window and injects no native input.
+        // Native clicks require the dedicated test target and explicit gate.
         QTRY_COMPARE_WITH_TIMEOUT(host.remoteState(), Remote::Pending, 60000);
         host.stopControl();
         QTRY_COMPARE_WITH_TIMEOUT(host.remoteState(), Remote::Pending, 15000);
         QVERIFY(!host.screenActive());
+        if (clickAcceptance)
+        {
+            clickTarget.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&clickTarget));
+            clickTarget.raise();
+            clickTarget.activateWindow();
+        }
         QVERIFY(host.grantControl());
-        QTRY_COMPARE_WITH_TIMEOUT(host.shareState(), zjdesk::SessionCoordinator::PreviewState::Running, 45000);
+        QTRY_VERIFY_WITH_TIMEOUT(host.shareState() == zjdesk::SessionCoordinator::PreviewState::Running
+            || host.shareState() == zjdesk::SessionCoordinator::PreviewState::Failed, 45000);
+        QCOMPARE(host.shareState(), zjdesk::SessionCoordinator::PreviewState::Running);
         QTRY_VERIFY_WITH_TIMEOUT(!probes.isEmpty(), 45000);
         QCOMPARE(probes.first().at(2).toBool(), false);
         QTRY_COMPARE_WITH_TIMEOUT(host.remoteState(), Remote::Idle, 45000);
+        if (clickAcceptance)
+            QCOMPARE(clicks, 20);
         QTRY_VERIFY_WITH_TIMEOUT(!host.screenActive(), 5000);
         host.leave();
 #endif
@@ -775,7 +834,7 @@ private slots:
                 window.session_.sendRemoteInput({{"kind", "button"}, {"button", int(Qt::LeftButton)},
                     {"x", x}, {"y", y}, {"pressed", true}, {"probe", true}});
                 window.session_.sendRemoteInput({{"kind", "button"}, {"button", int(Qt::LeftButton)},
-                    {"x", x}, {"y", y}, {"pressed", false}});
+                    {"x", x}, {"y", y}, {"pressed", false}, {"probe", false}});
                 QTRY_VERIFY_WITH_TIMEOUT(visibleUs >= 0 && !acknowledgements.isEmpty()
                     && observation().value("probeSequence").toString()
                         == QString::number(acknowledgements.first().at(0).toULongLong()), 10000);
