@@ -1,5 +1,13 @@
 # ZJdesk 项目交接
 
+## 2026-11-04 同步 codex/ZJdesk-2 的两个分叉提交
+
+在 `C:\Users\29822\.codex\worktrees\033f\ZJdesk` 将 `codex/ZJdesk-2` 的 `84924fa`（生成物忽略与清理）、`ce837b5`（双向文件剪贴板）合并到 `codex/ZJdesk-1`，保留双方历史。解决 README、架构、交接、路线图及授权处理的五处文件冲突，保留 Windows 被控、共同刷新率、本地光标和独立点击回执；文件状态方向按控制角色显示“本机 / 对方”，适用于 Linux 控制 Windows。
+
+合并后 Windows Release 构建与常规回归 5/5 通过（135.79 秒），Linux GCC 11.4 Release 构建与常规回归 4/4 通过（123.61 秒）；文件授权 / 代次与重叠输入回执组合用例两端各 4 项通过（含初始化 / 清理）。Linux 首轮命令在桌面套件开始前中止，随后排除 desktop 重跑上述常规回归。Windows 组合用例结束恢复原剪贴板时出现 OpenClipboard 占用警告，测试断言通过，恢复效果未确认。日志为 `build/merge-zjdesk-2-windows.log`、`build/merge-zjdesk-2-linux-final.log` 和 `build/merge-zjdesk-2-ui-{windows,linux}.txt`。
+
+复核授权、代次、文件消息分发、停止清理与输入回执共存，未发现其他明确合并逻辑问题。未重跑双机文件粘贴、真实远控键鼠或 OpenGL 呈现验收，未重启现有客户端；实际放大画面点击迟缓仍待事件报告定位。
+
 ## 2026-11-04 Linux 控制 Windows 点击延迟排查（codex/ZJdesk-1，未提交）
 
 用户确认放大画面时，普通 Windows 窗口的最小化 / 最大化也慢或无响应，Linux 系统自身不卡。仅在用户批准的独立 Windows 测试窗口内进行了 20 次原生点击，实际收到 20 次；200 个拒绝的测试输入回执往返中位 10.864 ms、P95 11.760 ms、最大 13.010 ms。该夹具绕过实际 Linux GUI 输入和呈现，不能据此认定用户问题解决。
@@ -19,6 +27,12 @@
 本次位于 `C:\Users\29822\.codex\worktrees\033f\ZJdesk`。实现 Windows SendInput 被控后端、物理主屏到虚拟桌面的坐标映射、扩展键扫描码与真实光标回传，复用已有本地授权、代次 / 序号校验、停止与释放流程。控制按钮 / 状态改为平台无关。自动模式通过 capabilities.maximumFps 交换显示刷新率上限，取双方较低值，退出成员时清除；保留原生分辨率优先、VP9 4:4:4 与现有自适应，不改变网络传输默认策略。
 
 Windows 与 Linux 构建 / 回归通过；真实 Windows 桌面到 Linux 后台链路完成拒绝、授权、解码、无效输入拒绝与撤销停流检查，未自动移动鼠标或输入键盘。真实键鼠、Linux GUI 呈现与持续高画质帧率仍待人工验收，详见 [Windows 被控验证](validation-windows-host-20261103.md)。Linux 使用隔离目录 `/home/orbbec/ZJdesk/codex-033f-control-20261103`，未覆盖 `/home/orbbec/ZJdesk/zjdesk` 的未提交修改。
+
+## 2026-11-03 Windows 与 Linux 双向文件复制（codex/ZJdesk-2，未提交）
+
+仅在 `C:\Users\29822\.codex\worktrees\bfbd\ZJdesk` 实现。Linux X11 授权远控后，双向读取文件管理器的文件剪贴板，复用 `zjdesk-control` 通道分块传到对端临时目录，完成后发布原生文件剪贴板（Windows CF_HDROP、Linux GNOME 文件列表），文件管理器可 Ctrl+V。反向单独协商能力、路由和维护批次，兼容旧版单向对端；导入的剪贴板带标记，不自动传回。支持多选、中文文件名及目录（含空目录），最多 4096 项；不传符号链接，不删除源文件。停止控制 / 断线取消未完成批次，已完成文件保留到客户端退出。双方必须更新；文本、普通共享 / 会议同步未实现。
+
+真实双机连续 5/5 轮完成双向文件复制，验证 Windows CF_HDROP / Shell 拷贝及 Linux X11 GTK 剪贴板 / GIO 拷贝，覆盖中文目录、300004 字节二进制、空文件 / 目录及不自动传回。Windows 常规回归 5/5、Linux 4/4 均通过，两端 Release 已部署；另有双向授权代次、旧版回退、路径拒绝和本机复制覆盖回归。文件按请求逐块发送，不无界排队；低带宽网络下仍共享控制通道及带宽。通道关闭移到管线 NULL 之前，并最多等待一秒完成流重置，避免在已销毁的 SCTP 上发起重置。完整证据与验证限制见 [文件剪贴板验证](validation-file-clipboard.md)。
 
 ## 2026-11-03 移除独立本地预览（codex/ZJdesk-1，未提交）
 

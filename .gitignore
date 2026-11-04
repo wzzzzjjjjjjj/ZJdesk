@@ -1,9 +1,63 @@
+# Build, deployment and validation output
 /build/
 /dist/
 /output/
+/cmake-build-*/
+
+# CMake / Ninja files from accidental in-source builds
+/CMakeCache.txt
+/CMakeFiles/
+/cmake_install.cmake
+/CTestTestfile.cmake
+/Testing/
+/build.ninja
+/rules.ninja
+/.ninja_deps
+/.ninja_log
+/compile_commands.json
 /CMakeUserPresets.json
+
+# Local IDE state (keep shared editor configuration trackable)
 *.user
 *.user.*
 *.autosave
 /.vs/
 /.idea/
+
+# Compiler intermediates and debug symbols
+*.obj
+*.o
+*.pdb
+*.ilk
+*.pch
+*.idb
+
+# Runtime logs, crash dumps and temporary editor files
+*.log
+*.dmp
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+
+# Python test helper caches
+__pycache__/
+*.pyc
+*.pyo
+/.venv/
+
+# Machine-local environment files; templates remain trackable
+/.env
+/.env.*
+!/.env.example
+!/.env.*.example
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Legacy performance captures accidentally written to the repository root
+/projectsZJdeskbuildperf-analysisencoded.bin
+/projectsZJdeskbuildperf-analysistest.bin

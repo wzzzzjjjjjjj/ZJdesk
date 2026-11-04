@@ -83,6 +83,29 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
             receiveControl(message);
     });
     controlDeadline_.setSingleShot(true);
+    connect(&fileClipboard_, &FileClipboard::statusChanged, this, &SessionCoordinator::remoteChanged);
+    connect(&reverseFileClipboard_, &FileClipboard::statusChanged, this, &SessionCoordinator::remoteChanged);
+    connect(&fileClipboard_, &FileClipboard::sendMessage, this, [this](const QJsonObject &message) {
+        if (controlChannelReady_ && screenActive()
+            && (remoteState_ == RemoteState::Controlled || remoteState_ == RemoteState::Controlling))
+            screen_.sendFile(message, shareEpoch_);
+    });
+    connect(&reverseFileClipboard_, &FileClipboard::sendMessage, this, [this](QJsonObject message) {
+        if (controlChannelReady_ && screenActive()
+            && (remoteState_ == RemoteState::Controlled || remoteState_ == RemoteState::Controlling))
+        {
+            message.insert("reverse", true);
+            screen_.sendFile(message, shareEpoch_);
+        }
+    });
+    connect(&screen_, &ScreenShare::fileReceived, this, [this](quint64 epoch, const QJsonObject &message) {
+        if (epoch == shareEpoch_ && screenActive() && controlChannelReady_
+            && (remoteState_ == RemoteState::Controlled || remoteState_ == RemoteState::Controlling))
+        {
+            if (message.value("reverse").toBool()) reverseFileClipboard_.receive(message);
+            else fileClipboard_.receive(message);
+        }
+    });
     connect(&controlDeadline_, &QTimer::timeout, this, &SessionCoordinator::stopControl);
     connect(&screen_, &ScreenShare::statisticsReady, this, [this](quint64 epoch, const ShareStats &stats) {
         if (epoch != shareEpoch_ || !screenActive())
@@ -504,12 +527,47 @@ void SessionCoordinator::sendControlGrant()
     controlDeadline_.stop();
     remoteDetail_ = QStringLiteral("对方正在控制本机，点击停止控制可立即收回");
     screen_.sendControl({{"action", "grant"}, {"epoch", QString::number(control_.epoch())},
-        {"requestId", controlRequestId_}, {"cursorSync", true}}, shareEpoch_);
+        {"requestId", controlRequestId_}, {"cursorSync", true}, {"fileClipboard", true}, {"fileClipboardReverse", true}}, shareEpoch_);
     emit remoteChanged();
+}
+
+void SessionCoordinator::startFileClipboard()
+{
+    if (!controlChannelReady_) return;
+    if (remoteState_ == RemoteState::Controlling && receivingScreen_ && peerFileClipboard_)
+    {
+        if (!fileClipboard_.active())
+        {
+            fileClipboard_.start(false, remoteControlEpoch_);
+            screen_.sendControl({{"action", "file_ready"}, {"epoch", QString::number(remoteControlEpoch_)},
+                {"reverse", peerReverseFileClipboard_}}, shareEpoch_);
+        }
+        if (peerReverseFileClipboard_) reverseFileClipboard_.start(true, remoteControlEpoch_);
+    }
+    else if (remoteState_ == RemoteState::Controlled && !receivingScreen_ && peerFileReady_)
+    {
+        fileClipboard_.start(true, control_.epoch());
+        if (peerReverseFileReady_) reverseFileClipboard_.start(false, control_.epoch());
+    }
+}
+
+QString SessionCoordinator::remoteDetail() const
+{
+    auto detail = remoteDetail_;
+    const bool controlled = remoteState_ == RemoteState::Controlled;
+    if (!fileClipboard_.status().isEmpty())
+        detail += '\n' + (controlled ? QStringLiteral("本机 → 对方：") : QStringLiteral("对方 → 本机：")) + fileClipboard_.status();
+    if (!reverseFileClipboard_.status().isEmpty())
+        detail += '\n' + (controlled ? QStringLiteral("对方 → 本机：") : QStringLiteral("本机 → 对方：")) + reverseFileClipboard_.status();
+    return detail;
 }
 
 void SessionCoordinator::clearControl()
 {
+    fileClipboard_.stop();
+    reverseFileClipboard_.stop();
+    peerFileClipboard_ = peerFileReady_ = false;
+    peerReverseFileClipboard_ = peerReverseFileReady_ = false;
     controlDeadline_.stop();
     cursorTimer_.stop();
     if (cursorSyncActive_)
@@ -653,13 +711,26 @@ void SessionCoordinator::receiveControl(const QJsonObject &message)
         inputSequence_ = 0;
         inputProbeClocks_.clear();
         remoteState_ = RemoteState::Controlling;
+        peerFileClipboard_ = message.value("fileClipboard").toBool();
+        peerReverseFileClipboard_ = message.value("fileClipboardReverse").toBool();
+        startFileClipboard();
         remoteDetail_ = QStringLiteral("正在控制对方电脑；点击共享画面后操作键鼠");
+        if (peerFileClipboard_) remoteDetail_ += peerReverseFileClipboard_
+            ? QStringLiteral("；支持双向复制文件，传完后在目标电脑粘贴")
+            : QStringLiteral("；复制对方文件后待传输完成可在本机粘贴");
         if (message.value("cursorSync").toBool())
             screen_.sendControl({{"action", "cursor_ready"}, {"epoch", QString::number(epoch)}}, shareEpoch_);
         emit remoteChanged();
     }
     else if (action == "revoke")
         stopControl();
+    else if (action == "file_ready" && remoteState_ == RemoteState::Controlled && !receivingScreen_
+        && message.value("epoch").toString() == QString::number(control_.epoch()))
+    {
+        peerFileReady_ = true;
+        peerReverseFileReady_ = message.value("reverse").toBool();
+        startFileClipboard();
+    }
     else if (action == "cursor_ready" && remoteState_ == RemoteState::Controlled && !receivingScreen_)
     {
         if (message.value("epoch").toString() == QString::number(control_.epoch()))
@@ -783,7 +854,7 @@ void SessionCoordinator::receiveControlRequest(const QJsonObject &message)
     {
         controlRequestId_ = requestId;
         remoteState_ = RemoteState::Pending;
-        remoteDetail_ = peerName_ + QStringLiteral(" 请求控制本机，请选择允许或拒绝");
+        remoteDetail_ = peerName_ + QStringLiteral(" 请求控制本机（含双方文件复制），请选择允许或拒绝");
         controlDeadline_.start(30000);
         emit remoteChanged();
     }

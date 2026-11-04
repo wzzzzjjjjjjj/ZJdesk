@@ -623,6 +623,24 @@ public:
 #endif
     }
 
+    void sendFile(const QJsonObject &message, quint64 epoch)
+    {
+#ifdef ZJDESK_HAS_GSTREAMER
+        if (epoch != epoch_ || !channel_) return;
+        auto packet = message;
+        packet.insert("_zjdeskFiles", true);
+        const auto bytes = QJsonDocument(packet).toJson(QJsonDocument::Compact);
+        if (bytes.size() > 32768) return;
+        GError *error = nullptr;
+        if (!gst_webrtc_data_channel_send_string_full(channel_, bytes.constData(), &error))
+            emit controlChannelChanged(epoch_, false);
+        if (error) g_error_free(error);
+#else
+        Q_UNUSED(message)
+        Q_UNUSED(epoch)
+#endif
+    }
+
     void setCursorEmbedded(bool embedded, quint64 epoch)
     {
 #ifdef ZJDESK_HAS_GSTREAMER
@@ -658,6 +676,7 @@ signals:
     void statisticsReady(quint64 epoch, const zjdesk::ShareStats &stats);
     void controlChannelChanged(quint64 epoch, bool ready);
     void controlReceived(quint64 epoch, const QJsonObject &message);
+    void fileReceived(quint64 epoch, const QJsonObject &message);
 
 private:
 #ifdef ZJDESK_HAS_GSTREAMER
@@ -721,12 +740,20 @@ private:
         if (!text || !controlChannel(channel))
             return;
         const QByteArray bytes(text);
-        if (bytes.size() > 4096)
+        if (bytes.size() > 32768)
             return;
         const auto message = QJsonDocument::fromJson(bytes);
         if (!message.isObject())
             return;
-        queue(*static_cast<ShareCallback *>(data), [object = message.object()](auto *worker) {
+        auto object = message.object();
+        const bool files = object.take("_zjdeskFiles").toBool();
+        if (!files && bytes.size() > 4096) return;
+        queue(*static_cast<ShareCallback *>(data), [object, files](auto *worker) {
+            if (files)
+            {
+                emit worker->fileReceived(worker->epoch_, object);
+                return;
+            }
             if (object.contains("_zjdeskProbe"))
             {
                 worker->receiveProbe(object);
@@ -1219,6 +1246,21 @@ private:
             QMutexLocker lock(&guard_->mutex);
             guard_->epoch = 0;
         }
+        // Finish channel stream resets while SCTP is alive. GStreamer 1.26 can
+        // race a queued reset against SCTP teardown when both happen together.
+        if (channel_)
+        {
+            gst_webrtc_data_channel_close(channel_);
+            QElapsedTimer closing;
+            closing.start();
+            while (closing.elapsed() < 1000)
+            {
+                GstWebRTCDataChannelState state;
+                g_object_get(channel_, "ready-state", &state, nullptr);
+                if (state != GST_WEBRTC_DATA_CHANNEL_STATE_OPEN && state != GST_WEBRTC_DATA_CHANNEL_STATE_CLOSING) break;
+                QThread::msleep(2);
+            }
+        }
         if (pipeline_)
         {
             gst_element_set_state(pipeline_, GST_STATE_NULL);
@@ -1227,7 +1269,6 @@ private:
         }
         if (channel_)
         {
-            gst_webrtc_data_channel_close(channel_);
             g_object_unref(channel_);
             channel_ = nullptr;
         }
@@ -1549,6 +1590,7 @@ ScreenShare::ScreenShare(QObject *parent) : QObject(parent)
     connect(worker_, &ScreenShareWorker::statisticsReady, this, &ScreenShare::statisticsReady);
     connect(worker_, &ScreenShareWorker::controlChannelChanged, this, &ScreenShare::controlChannelChanged);
     connect(worker_, &ScreenShareWorker::controlReceived, this, &ScreenShare::controlReceived);
+    connect(worker_, &ScreenShareWorker::fileReceived, this, &ScreenShare::fileReceived);
     connect(&frames_, &QTimer::timeout, this, [this] {
         QImage image;
         quint64 epoch;
@@ -1654,6 +1696,11 @@ void ScreenShare::stop(quint64 epoch)
 void ScreenShare::negotiate(const QString &type, const QJsonObject &payload, quint64 epoch)
 {
     QMetaObject::invokeMethod(worker_, [this, type, payload, epoch] { worker_->negotiate(type, payload, epoch); });
+}
+
+void ScreenShare::sendFile(const QJsonObject &message, quint64 epoch)
+{
+    QMetaObject::invokeMethod(worker_, [this, message, epoch] { worker_->sendFile(message, epoch); });
 }
 
 void ScreenShare::sendControl(const QJsonObject &message, quint64 epoch)

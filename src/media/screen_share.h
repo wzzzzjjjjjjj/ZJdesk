@@ -102,6 +102,7 @@ public:
     void reportPresentation(quint64 frames, quint64 epoch, bool active = true, double gapMaxMs = -1,
         const VideoPresentationStats &presentation = {});
     void sendControl(const QJsonObject &message, quint64 epoch);
+    void sendFile(const QJsonObject &message, quint64 epoch);
     void setCursorEmbedded(bool embedded, quint64 epoch);
 
 signals:
@@ -111,6 +112,7 @@ signals:
     void statisticsReady(quint64 epoch, const zjdesk::ShareStats &stats);
     void controlChannelChanged(quint64 epoch, bool ready);
     void controlReceived(quint64 epoch, const QJsonObject &message);
+    void fileReceived(quint64 epoch, const QJsonObject &message);
 
 private:
     ShareMailbox mailbox_;

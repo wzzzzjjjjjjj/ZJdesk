@@ -31,12 +31,16 @@
 #include <QSettings>
 #include <QCheckBox>
 #include <QTemporaryDir>
+#include <QClipboard>
 #include <ctime>
 #include <algorithm>
+#include <atomic>
 #include <memory>
+#include <thread>
 #include <QtTest>
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <shellapi.h>
 #endif
 
 namespace
@@ -179,6 +183,301 @@ class WindowTests : public QObject
     Q_OBJECT
     QTemporaryDir preferenceDirectory_;
 private slots:
+    void fileClipboardNativePasteAndLocalCopyCancels()
+    {
+        auto *cb = QGuiApplication::clipboard();
+        auto saved = std::make_unique<QMimeData>();
+        for (const auto &format : cb->mimeData()->formats()) saved->setData(format, cb->mimeData()->data(format));
+        const auto restore = qScopeGuard([&] { cb->setMimeData(saved.release()); });
+        cb->setText("ZJdesk native clipboard fixture");
+        QTest::qWait(20);
+        zjdesk::FileClipboard outbound;
+        outbound.start(true, 1);
+        QSignalSpy echoed(&outbound, &zjdesk::FileClipboard::sendMessage);
+        zjdesk::FileClipboard receiver;
+        receiver.start(false, 1);
+        QSignalSpy ready(&receiver, &zjdesk::FileClipboard::filesReady);
+        const QJsonObject offer{{"action", "offer"}, {"epoch", "1"}, {"id", "batch"}, {"count", 1}};
+        receiver.receive(offer);
+        receiver.receive({{"action", "entry"}, {"epoch", "1"}, {"id", "batch"}, {"index", 0},
+            {"path", QStringLiteral("中文 empty.txt")}, {"size", "0"}, {"offset", "0"}, {"data", ""}, {"eof", true}});
+        QCOMPARE(ready.size(), 1);
+        const auto urls = qvariant_cast<QList<QUrl>>(ready.first().first());
+        QCOMPARE(cb->mimeData()->urls(), urls);
+        QByteArray gnome = "copy\n";
+        for (const auto &url : urls) gnome += url.toEncoded() + '\n';
+        QCOMPARE(cb->mimeData()->data("x-special/gnome-copied-files"), gnome);
+        QTest::qWait(20);
+        QCOMPARE(echoed.size(), 0);
+#ifdef Q_OS_WIN
+        QVERIFY(IsClipboardFormatAvailable(CF_HDROP));
+#endif
+        receiver.receive(offer);
+        cb->setText("local clipboard wins");
+        QTRY_VERIFY(receiver.status().contains(QStringLiteral("本机剪贴板已改变")));
+        receiver.receive({{"action", "entry"}, {"epoch", "1"}, {"id", "batch"}, {"index", 0},
+            {"path", "discarded"}, {"size", "0"}, {"offset", "0"}, {"data", ""}, {"eof", true}});
+        QCOMPARE(ready.size(), 1);
+        QCOMPARE(cb->text(), QString("local clipboard wins"));
+    }
+
+    void fileClipboardBusyDiscardsUnpublishedCache()
+    {
+#ifdef Q_OS_WIN
+        auto *cb = QGuiApplication::clipboard();
+        auto saved = std::make_unique<QMimeData>();
+        for (const auto &format : cb->mimeData()->formats()) saved->setData(format, cb->mimeData()->data(format));
+        const auto restore = qScopeGuard([&] { cb->setMimeData(saved.release()); });
+        cb->setText("ZJdesk clipboard busy fixture");
+        QTest::qWait(20); // Deliver the fixture's clipboard change before starting a transfer.
+        zjdesk::FileClipboard receiver;
+        receiver.start(false, 1);
+        QSignalSpy ready(&receiver, &zjdesk::FileClipboard::filesReady);
+        const QDir temp(QDir::tempPath());
+        const auto previous = temp.entryList({"zjdesk-files-*"}, QDir::Dirs | QDir::NoDotAndDotDot);
+        receiver.receive({{"action", "offer"}, {"epoch", "1"}, {"id", "busy"}, {"count", 1}});
+        auto created = temp.entryList({"zjdesk-files-*"}, QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const auto &path : previous) created.removeAll(path);
+        QCOMPARE(created.size(), 1);
+        const auto cache = temp.filePath(created.first());
+        std::atomic<bool> release = false;
+        std::atomic<int> opened = -1;
+        std::thread lockClipboard([&] {
+            const bool locked = OpenClipboard(nullptr);
+            opened = locked ? 1 : 0;
+            if (!locked) return;
+            while (!release.load()) Sleep(1);
+            CloseClipboard();
+        });
+        const auto unlock = qScopeGuard([&] { release = true; if (lockClipboard.joinable()) lockClipboard.join(); });
+        QTRY_COMPARE(opened.load(), 1);
+        receiver.receive({{"action", "entry"}, {"epoch", "1"}, {"id", "busy"}, {"index", 0},
+            {"path", "unpublished.txt"}, {"size", "0"}, {"offset", "0"}, {"data", ""}, {"eof", true}});
+        release = true;
+        lockClipboard.join();
+        QTest::qWait(20);
+        QCOMPARE(ready.size(), 0);
+        QVERIFY(receiver.status().contains(QStringLiteral("剪贴板被占用")));
+        QVERIFY(!QFileInfo::exists(cache));
+#else
+        QSKIP("Windows native clipboard contention only");
+#endif
+    }
+
+    void fileClipboardRequiresGrantAndCurrentEpoch()
+    {
+        auto *cb = QGuiApplication::clipboard();
+        auto saved = std::make_unique<QMimeData>();
+        for (const auto &format : cb->mimeData()->formats()) saved->setData(format, cb->mimeData()->data(format));
+        const auto restore = qScopeGuard([&] { cb->setMimeData(saved.release()); });
+        cb->setText("ZJdesk authorization fixture");
+        zjdesk::SessionCoordinator session;
+        using Remote = zjdesk::SessionCoordinator::RemoteState;
+        session.controlChannelReady_ = true;
+        session.startFileClipboard();
+        QVERIFY(!session.fileClipboard_.active()); // Ordinary sharing is not authorization.
+        session.remoteState_ = Remote::Requesting;
+        session.receivingScreen_ = true;
+        session.controlRequestId_ = "current";
+        session.receiveControl({{"action", "grant"}, {"epoch", "8"}, {"requestId", "stale"}, {"fileClipboard", true}});
+        QVERIFY(!session.fileClipboard_.active());
+        session.controlChannelReady_ = false;
+        session.receiveControl({{"action", "grant"}, {"epoch", "8"}, {"requestId", "current"}, {"fileClipboard", true}, {"fileClipboardReverse", true}});
+        QVERIFY(!session.fileClipboard_.active());
+        session.controlChannelReady_ = true;
+        session.startFileClipboard();
+        QVERIFY(session.fileClipboard_.active());
+        QVERIFY(session.reverseFileClipboard_.active());
+        session.fileClipboard_.receive({{"action", "offer"}, {"epoch", "8"}, {"id", "forward"}, {"count", 1}});
+        QVERIFY(session.remoteDetail().contains(QStringLiteral("对方 → 本机：")));
+        session.clearControl();
+        QVERIFY(!session.fileClipboard_.active());
+        QVERIFY(!session.reverseFileClipboard_.active());
+        QVERIFY(session.control_.request("peer"));
+        QVERIFY(session.control_.grant());
+        session.remoteState_ = Remote::Controlled;
+        session.receivingScreen_ = false;
+        session.startFileClipboard();
+        QVERIFY(!session.fileClipboard_.active()); // Peer must explicitly acknowledge file support.
+        session.receiveControl({{"action", "file_ready"}, {"epoch", QString::number(session.control_.epoch() + 1)}});
+        QVERIFY(!session.fileClipboard_.active());
+        session.receiveControl({{"action", "file_ready"}, {"epoch", QString::number(session.control_.epoch())}});
+        QVERIFY(session.fileClipboard_.active());
+        QVERIFY(!session.reverseFileClipboard_.active()); // Older peers retain one-way support.
+        session.receiveControl({{"action", "file_ready"}, {"epoch", QString::number(session.control_.epoch())}, {"reverse", true}});
+        QVERIFY(session.reverseFileClipboard_.active());
+        session.reverseFileClipboard_.receive({{"action", "offer"}, {"epoch", QString::number(session.control_.epoch())},
+            {"id", "reverse"}, {"count", 1}});
+        QVERIFY(session.remoteDetail().contains(QStringLiteral("对方 → 本机：")));
+        session.clearControl();
+        QVERIFY(!session.fileClipboard_.active());
+        QVERIFY(!session.reverseFileClipboard_.active());
+    }
+
+    void fileClipboardAcrossMachines()
+    {
+        const auto role = qEnvironmentVariable("ZJDESK_FILE_CLIPBOARD_FIXTURE");
+        if (role != "source" && role != "controller") QSKIP("Explicit Linux/Windows clipboard validation only");
+        auto *cb = QGuiApplication::clipboard();
+        auto saved = std::make_unique<QMimeData>();
+        for (const auto &format : cb->mimeData()->formats()) saved->setData(format, cb->mimeData()->data(format));
+        const auto restore = qScopeGuard([&] { cb->setMimeData(saved.release()); });
+        cb->setText("ZJdesk file clipboard fixture");
+        zjdesk::SessionCoordinator session;
+        zjdesk::RoomServer server;
+        connect(&session.fileClipboard_, &zjdesk::FileClipboard::statusChanged, this,
+            [&] { qInfo().noquote() << "File clipboard:" << session.fileClipboard_.status(); });
+        connect(&session.reverseFileClipboard_, &zjdesk::FileClipboard::statusChanged, this,
+            [&] { qInfo().noquote() << "Reverse file clipboard:" << session.reverseFileClipboard_.status(); });
+        if (role == "source") QVERIFY(server.listen(QHostAddress::AnyIPv4, 18767));
+        const QUrl url(role == "source" ? "ws://127.0.0.1:18767" : qEnvironmentVariable("ZJDESK_TEST_SERVER"));
+        QVERIFY(session.join(url, "file-clipboard-test", role));
+        const auto failure = qScopeGuard([&] { if (QTest::currentTestFailed()) qWarning().noquote() << session.detail() << session.remoteDetail() << session.shareDetail(); });
+        QTRY_COMPARE_WITH_TIMEOUT(session.state(), zjdesk::SessionCoordinator::State::PeerAvailable, 60000);
+        const QByteArray payload = QByteArray::fromHex("00ff12ab") + QByteArray(300000, '\x91');
+        if (role == "source")
+        {
+            // Automatic consent exists only in this explicitly selected test fixture.
+            QTRY_COMPARE_WITH_TIMEOUT(session.remoteState(), zjdesk::SessionCoordinator::RemoteState::Pending, 30000);
+            QVERIFY(session.grantControl());
+            QTRY_VERIFY_WITH_TIMEOUT(session.fileClipboard_.active(), 60000);
+            QVERIFY(session.reverseFileClipboard_.active());
+            QSignalSpy returned(&session.reverseFileClipboard_, &zjdesk::FileClipboard::filesReady);
+            QSignalSpy forwardMessages(&session.fileClipboard_, &zjdesk::FileClipboard::sendMessage);
+            QTemporaryDir source;
+            QVERIFY(QDir().mkpath(source.filePath(QStringLiteral("中文 文件夹/empty"))));
+            QFile file(source.filePath(QStringLiteral("中文 文件夹/binary.bin")));
+            QVERIFY(file.open(QIODevice::WriteOnly)); QCOMPARE(file.write(payload), payload.size()); file.close();
+            auto *mime = new QMimeData;
+            mime->setData("x-special/gnome-copied-files", "copy\n" + QUrl::fromLocalFile(source.filePath(QStringLiteral("中文 文件夹"))).toEncoded() + '\n');
+            cb->setMimeData(mime);
+            QTRY_VERIFY_WITH_TIMEOUT(returned.size() == 1 || session.remoteState() == zjdesk::SessionCoordinator::RemoteState::Idle, 60000);
+            QCOMPARE(returned.size(), 1);
+            const auto urls = qvariant_cast<QList<QUrl>>(returned.first().first());
+            QCOMPARE(urls.size(), 2);
+            QFile received(QDir(urls[0].toLocalFile()).filePath("binary.bin"));
+            QVERIFY(received.open(QIODevice::ReadOnly)); QCOMPARE(received.readAll(), payload); received.close();
+            QVERIFY(QFileInfo(QDir(urls[0].toLocalFile()).filePath("empty")).isDir());
+            QCOMPARE(QFileInfo(urls[1].toLocalFile()).size(), qint64(0));
+            QCOMPARE(cb->mimeData()->urls(), urls);
+#ifdef Q_OS_LINUX
+            // GTK reads the X11 selection in another process, then GIO copies its files.
+            QTemporaryDir pasted;
+            QProcess paste;
+            paste.start("python3", {"-c", QString::fromLatin1(R"PY(
+import gi, sys
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, Gdk, Gio
+selection = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_contents(Gdk.Atom.intern('x-special/gnome-copied-files', False))
+assert selection is not None
+data = selection.get_data()
+lines = data.splitlines()
+assert lines[0] == b'copy' and len(lines) == 3
+destination = Gio.File.new_for_path(sys.argv[1])
+for uri in lines[1:]:
+    source = Gio.File.new_for_uri(uri.decode('utf-8'))
+    target = destination.get_child(source.get_basename())
+    if source.query_file_type(Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, None) == Gio.FileType.DIRECTORY:
+        target.make_directory(None)
+        source.get_child('binary.bin').copy(target.get_child('binary.bin'), Gio.FileCopyFlags.NONE, None, None, None)
+        assert source.get_child('empty').query_file_type(Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, None) == Gio.FileType.DIRECTORY
+        target.get_child('empty').make_directory(None)
+    else:
+        source.copy(target, Gio.FileCopyFlags.NONE, None, None, None)
+sys.stdout.buffer.write(data)
+)PY"), pasted.path()});
+            QVERIFY(paste.waitForStarted());
+            QTRY_COMPARE_WITH_TIMEOUT(paste.state(), QProcess::NotRunning, 15000);
+            QVERIFY2(paste.exitCode() == 0, paste.readAllStandardError().constData());
+            QCOMPARE(paste.readAllStandardOutput(), cb->mimeData()->data("x-special/gnome-copied-files"));
+            const auto pastedRoot = QDir(pasted.path()).filePath(QFileInfo(urls[0].toLocalFile()).fileName());
+            QFile pastedFile(QDir(pastedRoot).filePath("binary.bin"));
+            QVERIFY(pastedFile.open(QIODevice::ReadOnly)); QCOMPARE(pastedFile.readAll(), payload);
+            QVERIFY(QFileInfo(QDir(pastedRoot).filePath("empty")).isDir());
+            QCOMPARE(QFileInfo(QDir(pasted.path()).filePath("zero")).size(), qint64(0));
+#endif
+            QTRY_COMPARE_WITH_TIMEOUT(session.remoteState(), zjdesk::SessionCoordinator::RemoteState::Idle, 60000);
+            QVERIFY(QFileInfo::exists(file.fileName())); // Copy never deletes the Linux source.
+            QVERIFY(QFileInfo::exists(urls[0].toLocalFile())); // Imported files survive revoke.
+            int offers = 0;
+            for (const auto &message : forwardMessages)
+                if (message.first().toJsonObject().value("action") == "offer") ++offers;
+            QCOMPARE(offers, 1); // Received Windows files do not echo back.
+            qInfo() << "Windows -> Linux X11 GTK clipboard and GIO copy: binary, Unicode folder, empty directory and empty file verified";
+        }
+        else
+        {
+            QTRY_VERIFY_WITH_TIMEOUT(session.canRequestControl(), 30000);
+            QVERIFY(session.requestControl());
+            QSignalSpy ready(&session.fileClipboard_, &zjdesk::FileClipboard::filesReady);
+            QTRY_VERIFY_WITH_TIMEOUT(ready.size() == 1 || session.remoteState() == zjdesk::SessionCoordinator::RemoteState::Idle
+                || session.shareState() == zjdesk::SessionCoordinator::PreviewState::Failed
+                || session.fileClipboard_.status().contains(QStringLiteral("取消"))
+                || session.fileClipboard_.status().contains(QStringLiteral("超时")), 60000);
+            QCOMPARE(ready.size(), 1);
+            const auto urls = qvariant_cast<QList<QUrl>>(ready.first().first());
+            QCOMPARE(urls.size(), 1);
+            QFile file(QDir(urls[0].toLocalFile()).filePath("binary.bin"));
+            QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), payload); file.close();
+            QVERIFY(QFileInfo(QDir(urls[0].toLocalFile()).filePath("empty")).isDir());
+            QCOMPARE(cb->mimeData()->urls(), urls);
+#ifdef Q_OS_WIN
+            QVERIFY(IsClipboardFormatAvailable(CF_HDROP));
+            QString nativePath;
+            {
+                bool opened = false;
+                QTRY_VERIFY(opened || (opened = OpenClipboard(nullptr)));
+                auto close = qScopeGuard([] { CloseClipboard(); });
+                const auto drop = reinterpret_cast<HDROP>(GetClipboardData(CF_HDROP));
+                QVERIFY(drop);
+                QCOMPARE(DragQueryFileW(drop, 0xffffffff, nullptr, 0), UINT(1));
+                const UINT length = DragQueryFileW(drop, 0, nullptr, 0);
+                nativePath = QString(int(length + 1), QChar(0));
+                QCOMPARE(DragQueryFileW(drop, 0, reinterpret_cast<wchar_t *>(nativePath.data()), length + 1), length);
+                nativePath.resize(int(length));
+                QCOMPARE(QDir::fromNativeSeparators(nativePath), urls[0].toLocalFile());
+                QVERIFY(CloseClipboard());
+                close.dismiss();
+            }
+            QTemporaryDir pasted;
+            const auto from = nativePath + QChar(0) + QChar(0);
+            const auto to = QDir::toNativeSeparators(pasted.path()) + QChar(0) + QChar(0);
+            SHFILEOPSTRUCTW operation{};
+            operation.wFunc = FO_COPY;
+            operation.pFrom = reinterpret_cast<const wchar_t *>(from.utf16());
+            operation.pTo = reinterpret_cast<const wchar_t *>(to.utf16());
+            operation.fFlags = FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOCONFIRMMKDIR | FOF_NOERRORUI;
+            QCOMPARE(SHFileOperationW(&operation), 0);
+            QVERIFY(!operation.fAnyOperationsAborted);
+            const auto pastedRoot = QDir(pasted.path()).filePath(QFileInfo(nativePath).fileName());
+            QFile pastedFile(QDir(pastedRoot).filePath("binary.bin"));
+            QVERIFY(pastedFile.open(QIODevice::ReadOnly));
+            QCOMPARE(pastedFile.readAll(), payload);
+            QVERIFY(QFileInfo(QDir(pastedRoot).filePath("empty")).isDir());
+#endif
+            QVERIFY(session.reverseFileClipboard_.active());
+            QTemporaryDir windowsSource;
+            const auto folder = windowsSource.filePath(QStringLiteral("Windows 中文文件夹"));
+            QVERIFY(QDir().mkpath(QDir(folder).filePath("empty")));
+            QFile original(QDir(folder).filePath("binary.bin"));
+            QVERIFY(original.open(QIODevice::WriteOnly)); QCOMPARE(original.write(payload), payload.size()); original.close();
+            QFile zero(windowsSource.filePath("zero")); QVERIFY(zero.open(QIODevice::WriteOnly)); zero.close();
+            QTest::qWait(100); // Let native clipboard notifications after the Shell copy finish.
+            auto *files = new QMimeData;
+            files->setUrls({QUrl::fromLocalFile(folder), QUrl::fromLocalFile(zero.fileName())});
+            cb->setMimeData(files);
+            QVERIFY(cb->ownsClipboard());
+            QTRY_VERIFY_WITH_TIMEOUT(session.reverseFileClipboard_.status().contains(QStringLiteral("文件已到对方"))
+                || session.remoteState() == zjdesk::SessionCoordinator::RemoteState::Idle, 60000);
+            QVERIFY(session.reverseFileClipboard_.status().contains(QStringLiteral("文件已到对方")));
+            QVERIFY(QFileInfo::exists(original.fileName()));
+            session.stopControl();
+            QVERIFY(QFileInfo::exists(file.fileName()));
+            qInfo() << "Linux X11 GNOME clipboard -> authorized WebRTC file channel -> Windows native file clipboard and Shell copy: 300004 binary bytes, Unicode folder and empty directory verified";
+        }
+        session.leave();
+    }
+
     void init()
     {
         QSettings preferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "meeting");
@@ -604,9 +903,13 @@ private slots:
     {
         zjdesk::SessionCoordinator controller;
         using Remote = zjdesk::SessionCoordinator::RemoteState;
-        controller.remoteState_ = Remote::Controlling;
+        controller.remoteState_ = Remote::Requesting;
         controller.controlChannelReady_ = controller.receivingScreen_ = true;
-        controller.remoteControlEpoch_ = 42;
+        controller.controlRequestId_ = "current";
+        controller.receiveControl({{"action", "grant"}, {"epoch", "42"}, {"requestId", "current"},
+            {"fileClipboard", true}});
+        QCOMPARE(controller.remoteState(), Remote::Controlling);
+        QVERIFY(controller.fileClipboard_.active());
         QSignalSpy acknowledgements(&controller, &zjdesk::SessionCoordinator::inputProbeAcknowledged);
         controller.sendRemoteInput({{"kind", "unsupported-test-event"}, {"probe", true}});
         controller.sendRemoteInput({{"kind", "unsupported-test-event"}, {"probe", true}});
@@ -631,8 +934,10 @@ private slots:
             {"pressed", false}, {"x", 0.5}, {"y", 0.5}, {"probe", false}});
         acknowledge(4);
         QCOMPARE(acknowledgements.size(), 3);
+        controller.sendRemoteInput({{"kind", "unsupported-test-event"}, {"probe", true}});
         controller.clearControl();
-        acknowledge(3);
+        QVERIFY(!controller.fileClipboard_.active());
+        acknowledge(5);
         QCOMPARE(acknowledgements.size(), 3);
     }
 

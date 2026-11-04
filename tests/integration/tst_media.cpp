@@ -679,6 +679,8 @@ private slots:
         QSignalSpy receiverReady(&receiver, &zjdesk::ScreenShare::controlChannelChanged);
         QSignalSpy atSender(&sender, &zjdesk::ScreenShare::controlReceived);
         QSignalSpy atReceiver(&receiver, &zjdesk::ScreenShare::controlReceived);
+        QSignalSpy filesAtSender(&sender, &zjdesk::ScreenShare::fileReceived);
+        QSignalSpy filesAtReceiver(&receiver, &zjdesk::ScreenShare::fileReceived);
         zjdesk::ShareStats sent;
         connect(&sender, &zjdesk::ScreenShare::statisticsReady, this,
             [&](quint64, const zjdesk::ShareStats &stats) { sent = stats; });
@@ -700,6 +702,15 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!senderReady.isEmpty() && !receiverReady.isEmpty(), 15000);
         QVERIFY(senderReady.last().at(1).toBool());
         QVERIFY(receiverReady.last().at(1).toBool());
+        const QJsonObject filePacket{{"action", "entry"}, {"data", QString(22000, 'a')}};
+        sender.sendFile(filePacket, 7);
+        QTRY_COMPARE(filesAtReceiver.size(), 1);
+        QCOMPARE(filesAtReceiver.first().at(1).toJsonObject(), filePacket);
+        receiver.sendFile({{"action", "read"}}, 9);
+        QTRY_COMPARE(filesAtSender.size(), 1);
+        sender.sendFile(filePacket, 6);
+        sender.sendFile({{"data", QString(33000, 'a')}}, 7);
+        sender.sendControl({{"action", "oversized-control"}, {"data", QString(5000, 'a')}}, 7);
         QTRY_VERIFY_WITH_TIMEOUT(sent.controlRttMs >= 0 && sent.transportExcessMs >= 0, 5000);
         QCOMPARE(atSender.size(), 0);
         QCOMPARE(atReceiver.size(), 0);
@@ -761,6 +772,7 @@ private slots:
         sender.sendControl({{"action", "old-stream"}}, 6);
         QTest::qWait(100);
         QCOMPARE(atReceiver.size(), receivedCount);
+        QCOMPARE(filesAtReceiver.size(), 1);
         receiver.stop(10);
         sender.stop(8);
         QTest::qWait(100);
