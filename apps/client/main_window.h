@@ -40,8 +40,24 @@ private:
     void refreshMeetingParticipants();
     void setMeetingRoster(const QStringList &names);
     void expandVideo(bool expanded);
+    void expandMeetingVideo(VideoSurface *surface);
+    void restoreMeetingVideo();
+    void refreshExpandedMeetingVideo();
+    struct VideoLayoutState
+    {
+        QWidget *widget;
+        QSize minimum;
+        QSize maximum;
+        QMargins margins;
+        int spacing;
+    };
+    VideoSurface *expandedMeetingVideo_ = nullptr;
+    QList<VideoLayoutState> videoLayoutStates_;
+    QList<QPair<QWidget *, bool>> videoSiblingVisibility_;
+    QList<int> videoParticipantStretches_;
     QList<QWidget *> normalWidgets_;
     Qt::WindowStates normalWindowState_;
+    QRect normalWindowGeometry_;
     QPushButton *expandButton_ = nullptr;
     QVBoxLayout *contentLayout_ = nullptr;
     QVBoxLayout *workspaceLayout_ = nullptr;
@@ -64,6 +80,7 @@ private:
     VideoSurface *video_ = nullptr;
     VideoSurface *meetingLocalVideo_ = nullptr;
     VideoSurface *meetingRemoteVideo_ = nullptr;
+    QList<VideoSurface *> meetingRemoteVideos_;
     VideoSurface *meetingShareVideo_ = nullptr;
     QVBoxLayout *meetingParticipantLayout_ = nullptr;
     QLabel *meetingMemberCount_ = nullptr;

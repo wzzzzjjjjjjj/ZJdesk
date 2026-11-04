@@ -10,6 +10,7 @@
 #ifdef ZJDESK_HAS_GSTREAMER
 #define GST_USE_UNSTABLE_API
 #include <gst/app/gstappsink.h>
+#include <gst/app/gstappsrc.h>
 #include <gst/video/video.h>
 #include <gst/webrtc/webrtc.h>
 #endif
@@ -50,7 +51,7 @@ public:
 #endif
     }
     void start(bool offerer, const ConferenceDevices &devices, quint64 epoch,
-        bool microphoneMuted, bool cameraHidden, bool speakerMuted)
+        bool microphoneMuted, bool cameraHidden, bool speakerMuted, bool shared = false, const CameraMode &mode = {})
     {
         shutdown();
         epoch_ = epoch;
@@ -91,15 +92,19 @@ public:
         audio_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "audioframes"));
         bus_ = gst_element_get_bus(pipeline_);
         QString deviceError;
-        auto *camera = device(devices.camera, "Video/Source", "videotestsrc", deviceError, &nativeMode_);
+        nativeMode_ = mode;
+        auto *camera = shared ? gst_element_factory_make("appsrc", "sharedvideo")
+            : device(devices.camera, "Video/Source", "videotestsrc", deviceError, &nativeMode_);
         if (camera && nativeMode_.size.isEmpty())
         {
             gst_object_unref(camera);
             camera = nullptr;
             deviceError = QStringLiteral("摄像头未公布可用的采集模式");
         }
-        auto *microphone = device(devices.microphone, "Audio/Source", "audiotestsrc", deviceError);
-        auto *speaker = device(devices.speaker, "Audio/Sink", "fakesink", deviceError);
+        auto *microphone = shared ? gst_element_factory_make("appsrc", "sharedaudio")
+            : device(devices.microphone, "Audio/Source", "audiotestsrc", deviceError);
+        auto *speaker = shared ? gst_element_factory_make("appsink", "sharedspeaker")
+            : device(devices.speaker, "Audio/Sink", "fakesink", deviceError);
         if (!camera || !microphone || !speaker)
         {
             if (camera) gst_object_unref(camera);
@@ -107,11 +112,18 @@ public:
             if (speaker) gst_object_unref(speaker);
             return fail(deviceError);
         }
+        if (shared)
+        {
+            for (auto *source : {camera, microphone})
+                g_object_set(source, "is-live", TRUE, "format", GST_FORMAT_TIME, "do-timestamp", TRUE,
+                    "max-buffers", guint64(8), "leaky-type", 2, nullptr);
+            g_object_set(speaker, "max-buffers", guint(8), "drop", TRUE, "sync", FALSE, "wait-on-eos", FALSE, nullptr);
+        }
         quality_ = std::make_unique<ShareQuality>(nativeMode_.size,
             qRound(double(nativeMode_.fpsNumerator) / nativeMode_.fpsDenominator), 15);
         applyCameraQuality();
         auto *encoder = gst_bin_get_by_name(GST_BIN(pipeline_), "cameraencoder");
-        g_object_set(encoder, "threads", qBound(1, QThread::idealThreadCount() - 1, 8), nullptr);
+        g_object_set(encoder, "threads", qBound(1, QThread::idealThreadCount() - 1, shared ? 2 : 8), nullptr);
         auto *encoded = gst_element_get_static_pad(encoder, "src");
         encodedFrames_ = 0;
         gst_pad_add_probe(encoded, GST_PAD_PROBE_TYPE_BUFFER,
@@ -130,8 +142,8 @@ public:
         auto *audioEntry = gst_bin_get_by_name(GST_BIN(pipeline_), "audioentry");
         auto *outputEntry = gst_bin_get_by_name(GST_BIN(pipeline_), "outputentry");
         // Decode the highest native camera mode before adapting the encoder output.
-        auto *decode = gst_element_factory_make("decodebin", nullptr);
-        auto *captureMode = gst_element_factory_make("capsfilter", nullptr);
+        auto *decode = shared ? nullptr : gst_element_factory_make("decodebin", nullptr);
+        auto *captureMode = shared ? nullptr : gst_element_factory_make("capsfilter", nullptr);
         bool linked = decode && captureMode;
         if (linked)
         {
@@ -152,6 +164,7 @@ public:
                 [](gpointer value, GClosure *) { gst_object_unref(value); }, GConnectFlags(0));
             linked = gst_element_link_many(camera, captureMode, decode, nullptr);
         }
+        if (shared) linked = gst_element_link(camera, videoEntry);
         linked = linked && gst_element_link(microphone, audioEntry) && gst_element_link(outputEntry, speaker);
         gst_object_unref(videoEntry);
         gst_object_unref(audioEntry);
@@ -187,7 +200,7 @@ public:
 #else
         Q_UNUSED(offerer)
         Q_UNUSED(devices)
-        Q_UNUSED(microphoneMuted) Q_UNUSED(cameraHidden) Q_UNUSED(speakerMuted)
+        Q_UNUSED(microphoneMuted) Q_UNUSED(cameraHidden) Q_UNUSED(speakerMuted) Q_UNUSED(shared) Q_UNUSED(mode)
         emit statusChanged(epoch, "failed", QStringLiteral("当前构建未启用 GStreamer"));
 #endif
     }
@@ -262,6 +275,7 @@ signals:
     void receivedAudio(quint64 epoch, quint64 buffers, double peak);
     void framesAvailable(quint64 epoch);
 private:
+    friend class MeetingWorker;
     ConferenceMailbox *mailbox_;
     quint64 epoch_ = 0;
 #ifdef ZJDESK_HAS_GSTREAMER
@@ -543,6 +557,312 @@ private:
     }
 #endif
 };
+
+// All shared capture, mixing and peer pipelines run on this one media thread.
+class MeetingWorker final : public QObject
+{
+public:
+    MeetingWorker(MeetingMedia *owner, MeetingMailbox *mailbox) : owner_(owner), mailbox_(mailbox) {}
+    ~MeetingWorker() override { shutdown(); }
+    void start(const ConferenceDevices &devices, quint64 epoch, bool micMuted, bool cameraHidden, bool speakerMuted)
+    {
+        shutdown(); epoch_ = epoch; devices_ = devices;
+#ifdef ZJDESK_HAS_GSTREAMER
+        GError *error = nullptr;
+        pipeline_ = gst_parse_launch(
+            "videoconvert name=videoentry ! videoscale ! videorate ! "
+            "capsfilter name=captureprofile ! videobalance name=cameragate ! "
+            "appsink name=capturevideo max-buffers=1 drop=true sync=false async=false wait-on-eos=false "
+            "audioconvert name=audioentry ! audioresample ! audio/x-raw,format=F32LE,rate=48000,channels=1,layout=interleaved ! "
+            "volume name=microphonegate ! appsink name=captureaudio max-buffers=8 drop=true sync=false async=false wait-on-eos=false "
+            "audiomixer name=mix force-live=true ignore-inactive-pads=true latency=40000000 ! "
+            "volume name=speakergate ! tee name=mixed "
+            "mixed. ! queue ! appsink name=mixedframes max-buffers=8 drop=true sync=false async=false wait-on-eos=false "
+            "mixed. ! queue ! audioconvert name=outputentry "
+            "appsrc name=play0 is-live=true do-timestamp=true format=time max-buffers=8 leaky-type=downstream ! queue ! mix. "
+            "appsrc name=play1 is-live=true do-timestamp=true format=time max-buffers=8 leaky-type=downstream ! queue ! mix. "
+            "appsrc name=play2 is-live=true do-timestamp=true format=time max-buffers=8 leaky-type=downstream ! queue ! mix.", &error);
+        if (error || !pipeline_)
+        {
+            const auto detail = QString::fromUtf8(error ? error->message : "无法创建多人会议管线");
+            if (error) g_error_free(error);
+            return fail(detail);
+        }
+        QString detail;
+        auto *camera = ConferenceWorker::device(devices.camera, "Video/Source", "videotestsrc", detail, &nativeMode_);
+        auto *mic = ConferenceWorker::device(devices.microphone, "Audio/Source", "audiotestsrc", detail);
+        auto *speaker = ConferenceWorker::device(devices.speaker, "Audio/Sink", "fakesink", detail);
+        if (!camera || !mic || !speaker || nativeMode_.size.isEmpty())
+        {
+            for (auto *element : {camera, mic, speaker}) if (element) gst_object_unref(element);
+            return fail(detail);
+        }
+        if (g_object_class_find_property(G_OBJECT_GET_CLASS(speaker), "async")) g_object_set(speaker, "async", FALSE, nullptr);
+        auto *decode = gst_element_factory_make("decodebin", nullptr);
+        auto *captureMode = gst_element_factory_make("capsfilter", nullptr);
+        if (!decode || !captureMode)
+        {
+            if (decode) gst_object_unref(decode);
+            if (captureMode) gst_object_unref(captureMode);
+            gst_object_unref(camera); gst_object_unref(mic); gst_object_unref(speaker);
+            return fail(QStringLiteral("缺少摄像头解码插件"));
+        }
+        auto *caps = gst_caps_from_string(nativeMode_.caps.toUtf8().constData());
+        g_object_set(captureMode, "caps", caps, nullptr); gst_caps_unref(caps);
+        auto *profile = gst_bin_get_by_name(GST_BIN(pipeline_), "captureprofile");
+        caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "RGB",
+            "width", G_TYPE_INT, nativeMode_.size.width(), "height", G_TYPE_INT, nativeMode_.size.height(),
+            "framerate", GST_TYPE_FRACTION, nativeMode_.fpsNumerator, nativeMode_.fpsDenominator, nullptr);
+        g_object_set(profile, "caps", caps, nullptr); gst_caps_unref(caps); gst_object_unref(profile);
+        gst_bin_add_many(GST_BIN(pipeline_), camera, mic, speaker, decode, captureMode, nullptr);
+        auto *videoEntry = gst_bin_get_by_name(GST_BIN(pipeline_), "videoentry");
+        auto *audioEntry = gst_bin_get_by_name(GST_BIN(pipeline_), "audioentry");
+        auto *outputEntry = gst_bin_get_by_name(GST_BIN(pipeline_), "outputentry");
+        auto *pad = gst_element_get_static_pad(videoEntry, "sink");
+        g_signal_connect_data(decode, "pad-added", G_CALLBACK(ConferenceWorker::decodedCamera), pad,
+            [](gpointer p, GClosure *) { gst_object_unref(p); }, GConnectFlags(0));
+        const bool linked = gst_element_link_many(camera, captureMode, decode, nullptr)
+            && gst_element_link(mic, audioEntry) && gst_element_link(outputEntry, speaker);
+        gst_object_unref(videoEntry); gst_object_unref(audioEntry); gst_object_unref(outputEntry);
+        if (!linked) return fail(QStringLiteral("多人会议设备格式无法连接"));
+        setMuted(micMuted, cameraHidden, speakerMuted, epoch);
+        video_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "capturevideo"));
+        audio_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "captureaudio"));
+        mixed_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "mixedframes"));
+        mixedBuffers_ = 0;
+        bus_ = gst_element_get_bus(pipeline_);
+        if (gst_element_set_state(pipeline_, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
+            return fail(QStringLiteral("多人会议设备启动失败"));
+        if (!timer_)
+        {
+            timer_ = new QTimer(this); timer_->setInterval(10);
+            connect(timer_, &QTimer::timeout, this, [this] { poll(); });
+        }
+        timer_->start();
+        emit owner_->statusChanged(epoch_, "ready", QStringLiteral("共享采集已启动，等待成员音视频"));
+#else
+        Q_UNUSED(micMuted) Q_UNUSED(cameraHidden) Q_UNUSED(speakerMuted)
+        fail(QStringLiteral("当前构建未启用 GStreamer"));
+#endif
+    }
+    void stop(quint64 epoch) { shutdown(); epoch_ = epoch; emit owner_->statusChanged(epoch, "stopped", {}); }
+    void addPeer(const QString &id, bool offerer, quint64 epoch)
+    {
+#ifdef ZJDESK_HAS_GSTREAMER
+        if (!pipeline_ || epoch != epoch_ || peers_.contains(id) || peers_.size() >= 3) return;
+        auto peer = std::make_shared<Peer>();
+        peer->worker = new ConferenceWorker(&peer->mailbox);
+        peer->mailbox.epoch = epoch;
+        for (int slot = 0; slot < 3; ++slot)
+        {
+            bool used = false;
+            for (const auto &other : peers_) if (other->slot == slot) used = true;
+            if (!used) { peer->slot = slot; break; }
+        }
+        peer->output = GST_APP_SRC(gst_bin_get_by_name(GST_BIN(pipeline_), qPrintable(QString("play%1").arg(peer->slot))));
+        peers_.insert(id, peer);
+        connect(peer->worker, &ConferenceWorker::negotiationReady, this,
+            [this, id](quint64 e, const QString &type, const QJsonObject &payload) { emit owner_->negotiationReady(e, id, type, payload); });
+        connect(peer->worker, &ConferenceWorker::statusChanged, this,
+            [this, id](quint64 e, const QString &status, const QString &) {
+                if (e == epoch_ && peers_.contains(id)) emit owner_->peerStatusChanged(e, id, status);
+            });
+        connect(peer->worker, &ConferenceWorker::receivedAudio, this,
+            [this, id](quint64 e, quint64 count, double peak) { emit owner_->receivedAudio(e, id, count, peak); });
+        peer->worker->start(offerer, devices_, epoch, false, false, false, true, nativeMode_);
+#else
+        Q_UNUSED(id) Q_UNUSED(offerer) Q_UNUSED(epoch)
+#endif
+    }
+    void removePeer(const QString &id, quint64 epoch)
+    {
+#ifdef ZJDESK_HAS_GSTREAMER
+        if (epoch != epoch_) return;
+        const auto peer = peers_.take(id);
+        if (peer) { delete peer->worker; gst_object_unref(peer->output); }
+        QMutexLocker lock(&mailbox_->mutex); mailbox_->remote.remove(id);
+#else
+        Q_UNUSED(id) Q_UNUSED(epoch)
+#endif
+    }
+    void negotiate(const QString &id, const QString &type, const QJsonObject &payload, quint64 epoch)
+    {
+#ifdef ZJDESK_HAS_GSTREAMER
+        if (epoch == epoch_ && peers_.contains(id)) peers_[id]->worker->negotiate(type, payload, epoch);
+#else
+        Q_UNUSED(id) Q_UNUSED(type) Q_UNUSED(payload) Q_UNUSED(epoch)
+#endif
+    }
+    void setMuted(bool mic, bool camera, bool speaker, quint64 epoch)
+    {
+#ifdef ZJDESK_HAS_GSTREAMER
+        if (!pipeline_ || epoch != epoch_) return;
+        auto *m = gst_bin_get_by_name(GST_BIN(pipeline_), "microphonegate");
+        auto *v = gst_bin_get_by_name(GST_BIN(pipeline_), "cameragate");
+        auto *s = gst_bin_get_by_name(GST_BIN(pipeline_), "speakergate");
+        g_object_set(m, "mute", gboolean(mic), nullptr);
+        g_object_set(v, "brightness", camera ? -1.0 : 0.0, "saturation", camera ? 0.0 : 1.0, nullptr);
+        g_object_set(s, "mute", gboolean(speaker), nullptr);
+        gst_object_unref(m); gst_object_unref(v); gst_object_unref(s);
+#else
+        Q_UNUSED(mic) Q_UNUSED(camera) Q_UNUSED(speaker) Q_UNUSED(epoch)
+#endif
+    }
+    void shutdown()
+    {
+#ifdef ZJDESK_HAS_GSTREAMER
+        if (timer_) timer_->stop();
+        for (const auto &peer : peers_) { delete peer->worker; gst_object_unref(peer->output); }
+        peers_.clear();
+        if (pipeline_) { gst_element_set_state(pipeline_, GST_STATE_NULL); gst_object_unref(pipeline_); }
+        for (auto *object : {GST_OBJECT(video_), GST_OBJECT(audio_), GST_OBJECT(mixed_), GST_OBJECT(bus_)}) if (object) gst_object_unref(object);
+        pipeline_ = nullptr; video_ = audio_ = mixed_ = nullptr; bus_ = nullptr;
+#endif
+    }
+private:
+    MeetingMedia *owner_;
+    MeetingMailbox *mailbox_;
+    ConferenceDevices devices_;
+    quint64 epoch_ = 0;
+    void fail(const QString &detail) { shutdown(); emit owner_->statusChanged(epoch_, "failed", detail); }
+#ifdef ZJDESK_HAS_GSTREAMER
+    struct Peer { ConferenceMailbox mailbox; ConferenceWorker *worker = nullptr; GstAppSrc *output = nullptr; int slot = 0; };
+    QHash<QString, std::shared_ptr<Peer>> peers_;
+    CameraMode nativeMode_;
+    GstElement *pipeline_ = nullptr;
+    GstAppSink *video_ = nullptr, *audio_ = nullptr, *mixed_ = nullptr;
+    quint64 mixedBuffers_ = 0;
+    GstBus *bus_ = nullptr;
+    QTimer *timer_ = nullptr;
+    static void push(GstAppSrc *source, GstSample *sample)
+    {
+        gst_app_src_set_caps(source, gst_sample_get_caps(sample));
+        auto *buffer = gst_buffer_copy(gst_sample_get_buffer(sample));
+        // Each pipeline has its own clock base. Timestamp on entry to that pipeline.
+        GST_BUFFER_PTS(buffer) = GST_CLOCK_TIME_NONE; GST_BUFFER_DTS(buffer) = GST_CLOCK_TIME_NONE;
+        gst_app_src_push_buffer(source, buffer);
+    }
+    void distribute(GstAppSink *sink, const char *name, bool video)
+    {
+        while (auto *sample = gst_app_sink_try_pull_sample(sink, 0))
+        {
+            for (const auto &peer : peers_)
+            {
+                if (!peer->worker->pipeline_) continue;
+                auto *source = gst_bin_get_by_name(GST_BIN(peer->worker->pipeline_), name);
+                push(GST_APP_SRC(source), sample); gst_object_unref(source);
+            }
+            if (video)
+            {
+                GstVideoInfo info; GstVideoFrame frame;
+                if (gst_video_info_from_caps(&info, gst_sample_get_caps(sample))
+                    && gst_video_frame_map(&frame, &info, gst_sample_get_buffer(sample), GST_MAP_READ))
+                {
+                    auto image = QImage(static_cast<const uchar *>(GST_VIDEO_FRAME_PLANE_DATA(&frame, 0)), info.width,
+                        info.height, GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0), QImage::Format_RGB888).copy();
+                    gst_video_frame_unmap(&frame);
+                    QMutexLocker lock(&mailbox_->mutex);
+                    if (mailbox_->epoch == epoch_) mailbox_->local = std::move(image);
+                }
+            }
+            gst_sample_unref(sample);
+        }
+    }
+    void poll()
+    {
+        if (!pipeline_) return;
+        while (auto *message = gst_bus_pop(bus_))
+        {
+            QString detail;
+            if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR)
+            {
+                GError *error = nullptr; gst_message_parse_error(message, &error, nullptr);
+                detail = QString::fromUtf8(error->message); g_error_free(error);
+            }
+            if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_EOS) detail = QStringLiteral("会议设备已停止");
+            if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_LATENCY) gst_bin_recalculate_latency(GST_BIN(pipeline_));
+            gst_message_unref(message);
+            if (!detail.isEmpty()) return fail(detail);
+        }
+        distribute(video_, "sharedvideo", true); distribute(audio_, "sharedaudio", false);
+        double peak = 0;
+        bool received = false;
+        while (auto *sample = gst_app_sink_try_pull_sample(mixed_, 0))
+        {
+            received = true; ++mixedBuffers_;
+            GstMapInfo info;
+            if (gst_buffer_map(gst_sample_get_buffer(sample), &info, GST_MAP_READ))
+            {
+                const auto *values = reinterpret_cast<const float *>(info.data);
+                for (gsize i = 0; i < info.size / sizeof(float); ++i) peak = qMax(peak, double(std::abs(values[i])));
+                gst_buffer_unmap(gst_sample_get_buffer(sample), &info);
+            }
+            gst_sample_unref(sample);
+        }
+        if (received) emit owner_->mixedAudio(epoch_, mixedBuffers_, peak);
+        quint64 delivered;
+        { QMutexLocker lock(&mailbox_->mutex); delivered = mailbox_->localDelivered; }
+        for (auto it = peers_.cbegin(); it != peers_.cend(); ++it)
+        {
+            const auto &peer = it.value();
+            if (peer->worker->pipeline_)
+            {
+                auto *sink = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(peer->worker->pipeline_), "sharedspeaker"));
+                while (auto *sample = gst_app_sink_try_pull_sample(sink, 0)) { push(peer->output, sample); gst_sample_unref(sample); }
+                gst_object_unref(sink);
+            }
+            QMutexLocker peerLock(&peer->mailbox.mutex);
+            if (!peer->mailbox.remote.isNull())
+            {
+                QMutexLocker lock(&mailbox_->mutex);
+                if (mailbox_->epoch == epoch_) mailbox_->remote.insert(it.key(), std::move(peer->mailbox.remote));
+                peer->mailbox.remote = {};
+            }
+            peer->mailbox.local = {};
+            peer->mailbox.localDelivered = delivered;
+            peer->mailbox.framePending = false;
+        }
+    }
+#endif
+};
+
+MeetingMedia::MeetingMedia(QObject *parent) : QObject(parent), worker_(new MeetingWorker(this, &mailbox_))
+{
+    worker_->moveToThread(&thread_);
+    connect(&thread_, &QThread::finished, worker_, &QObject::deleteLater);
+    thread_.start(); frames_.setInterval(10);
+    connect(&frames_, &QTimer::timeout, this, [this] {
+        QImage local; QHash<QString, QImage> remote; quint64 epoch;
+        { QMutexLocker lock(&mailbox_.mutex); epoch = mailbox_.epoch; local.swap(mailbox_.local); remote.swap(mailbox_.remote);
+          if (!local.isNull()) ++mailbox_.localDelivered; }
+        if (!local.isNull()) emit localFrame(epoch, local);
+        for (auto it = remote.cbegin(); it != remote.cend(); ++it) emit remoteFrame(epoch, it.key(), it.value());
+    });
+}
+MeetingMedia::~MeetingMedia()
+{
+    frames_.stop(); QMetaObject::invokeMethod(worker_, [this] { worker_->shutdown(); }, Qt::BlockingQueuedConnection);
+    thread_.quit(); thread_.wait();
+}
+void MeetingMedia::start(const ConferenceDevices &devices, quint64 epoch, bool micMuted, bool cameraHidden, bool speakerMuted)
+{
+    { QMutexLocker lock(&mailbox_.mutex); mailbox_.epoch = epoch; mailbox_.local = {}; mailbox_.remote.clear(); mailbox_.localDelivered = 0; }
+    frames_.start(); QMetaObject::invokeMethod(worker_, [=] { worker_->start(devices, epoch, micMuted, cameraHidden, speakerMuted); }, Qt::QueuedConnection);
+}
+void MeetingMedia::stop(quint64 epoch)
+{
+    frames_.stop();
+    { QMutexLocker lock(&mailbox_.mutex); mailbox_.epoch = epoch; mailbox_.local = {}; mailbox_.remote.clear(); }
+    QMetaObject::invokeMethod(worker_, [=] { worker_->stop(epoch); }, Qt::QueuedConnection);
+}
+void MeetingMedia::addPeer(const QString &id, bool offerer, quint64 epoch)
+{ QMetaObject::invokeMethod(worker_, [=] { worker_->addPeer(id, offerer, epoch); }, Qt::QueuedConnection); }
+void MeetingMedia::removePeer(const QString &id, quint64 epoch)
+{ QMetaObject::invokeMethod(worker_, [=] { worker_->removePeer(id, epoch); }, Qt::QueuedConnection); }
+void MeetingMedia::negotiate(const QString &id, const QString &type, const QJsonObject &payload, quint64 epoch)
+{ QMetaObject::invokeMethod(worker_, [=] { worker_->negotiate(id, type, payload, epoch); }, Qt::QueuedConnection); }
+void MeetingMedia::setMuted(bool mic, bool camera, bool speaker, quint64 epoch)
+{ QMetaObject::invokeMethod(worker_, [=] { worker_->setMuted(mic, camera, speaker, epoch); }, Qt::QueuedConnection); }
 
 ConferenceMedia::ConferenceMedia(QObject *parent) : QObject(parent), worker_(new ConferenceWorker(&mailbox_))
 {

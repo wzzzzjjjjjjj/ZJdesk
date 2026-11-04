@@ -6,6 +6,7 @@
 #include <QKeyEvent>
 #include <QFocusEvent>
 #include <QCursor>
+#include <QPushButton>
 
 VideoSurface::VideoSurface(QWidget *parent) : QOpenGLWidget(parent)
 {
@@ -29,6 +30,42 @@ VideoSurface::VideoSurface(QWidget *parent) : QOpenGLWidget(parent)
         }
         presentationClock_.restart();
     });
+}
+
+void VideoSurface::setExpandable(bool enabled)
+{
+    if (enabled && !expandButton_)
+    {
+        expandButton_ = new QPushButton(this);
+        expandButton_->setObjectName("expandFrameButton");
+        expandButton_->setFixedSize(64, 28);
+        expandButton_->setStyleSheet("QPushButton { color: white; background: #23394d; "
+            "border: 1px solid #627689; border-radius: 6px; padding: 0; }");
+        connect(expandButton_, &QPushButton::clicked, this, &VideoSurface::expandRequested);
+    }
+    if (expandButton_)
+    {
+        expandButton_->setVisible(enabled);
+        expandButton_->move(width() - expandButton_->width() - 8, 8);
+        setExpanded(expanded_);
+    }
+}
+
+void VideoSurface::setExpanded(bool expanded)
+{
+    expanded_ = expanded;
+    if (expandButton_)
+    {
+        expandButton_->setText(expanded ? QStringLiteral("缩小") : QStringLiteral("放大"));
+        expandButton_->setToolTip(expanded ? QStringLiteral("恢复原布局（Esc）") : QStringLiteral("放大此画面"));
+    }
+}
+
+void VideoSurface::resizeEvent(QResizeEvent *event)
+{
+    QOpenGLWidget::resizeEvent(event);
+    if (expandButton_)
+        expandButton_->move(width() - expandButton_->width() - 8, 8);
 }
 
 zjdesk::VideoPresentationStats VideoSurface::presentationStatistics() const

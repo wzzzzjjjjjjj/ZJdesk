@@ -15,6 +15,130 @@ class MediaTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void meetingAdaptsToSlowFrameConsumer()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        int running = 0;
+        QImage local;
+        zjdesk::MeetingMedia a, b;
+        QSignalSpy readyA(&a, &zjdesk::MeetingMedia::statusChanged);
+        QSignalSpy readyB(&b, &zjdesk::MeetingMedia::statusChanged);
+        connect(&a, &zjdesk::MeetingMedia::peerStatusChanged, &a,
+            [&](quint64, const QString &, const QString &status) { if (status == "running") ++running; });
+        connect(&a, &zjdesk::MeetingMedia::localFrame, &a,
+            [&](quint64, const QImage &image) { local = image; });
+        connect(&a, &zjdesk::MeetingMedia::negotiationReady, &b,
+            [&](quint64 epoch, const QString &, const QString &type, const QJsonObject &payload) {
+                b.negotiate("a", type, payload, epoch);
+            });
+        connect(&b, &zjdesk::MeetingMedia::negotiationReady, &a,
+            [&](quint64 epoch, const QString &, const QString &type, const QJsonObject &payload) {
+                a.negotiate("b", type, payload, epoch);
+            });
+        a.start({"test", "test", "test"}, 1);
+        b.start({"test", "test", "test"}, 1);
+        QTRY_VERIFY(!readyA.isEmpty() && !readyB.isEmpty());
+        QCOMPARE(readyA.first().at(1).toString(), QString("ready"));
+        QCOMPARE(readyB.first().at(1).toString(), QString("ready"));
+        b.addPeer("a", false, 1);
+        a.addPeer("b", true, 1);
+        QTRY_VERIFY_WITH_TIMEOUT(running > 0 && !local.isNull(), 15000);
+        QTest::qWait(1500);
+        const auto before = running;
+        // Keep encoding alive while the UI cannot consume shared capture frames.
+        QThread::msleep(3500);
+        QTRY_VERIFY_WITH_TIMEOUT(running > before, 5000);
+        QCOMPARE(local.size(), QSize(640, 480));
+        a.stop(2); b.stop(2);
+    }
+
+    void conferenceFourMembersLeaveAndRejoin()
+    {
+        using Session = zjdesk::SessionCoordinator;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        QMap<QString, quint64> frames[4], audio[4];
+        QMap<QString, double> peaks[4];
+        double mixed[4] = {};
+        Session a, b, c, d;
+        Session *sessions[] = {&a, &b, &c, &d};
+        for (int i = 0; i < 4; ++i)
+        {
+            auto *session = sessions[i];
+            session->setConferenceAutoConnect(true);
+            QVERIFY(session->setConferenceDevices({"test", "test", "test"}));
+            connect(session, &Session::conferencePeerFrame, this, [&, i](const QString &id, const QImage &image) {
+                if (!image.isNull()) ++frames[i][id];
+            });
+            connect(session, &Session::conferencePeerAudioReceived, this,
+                [&, i](const QString &id, quint64 count, double peak) { audio[i][id] = count; peaks[i][id] = peak; });
+            connect(session, &Session::conferenceAudioReceived, this, [&, i](quint64, double peak) { mixed[i] = peak; });
+            QVERIFY(session->join(url, "four-media", QString::number(i), Session::RoomType::Meeting));
+            if (i == 0) continue;
+            for (int j = 0; j <= i; ++j)
+            {
+                QTRY_COMPARE_WITH_TIMEOUT(sessions[j]->conferencePeerStatus().values().count("running"), i, 15000);
+                QTRY_VERIFY_WITH_TIMEOUT(frames[j].size() == i && audio[j].size() == i, 10000);
+                QTRY_VERIFY(mixed[j] > 0.01);
+            }
+        }
+        for (int i = 0; i < 4; ++i)
+            for (const auto &id : sessions[i]->conferencePeers().keys())
+            {
+                QVERIFY(frames[i].value(id) > 0);
+                QVERIFY(audio[i].value(id) > 0);
+                QTRY_VERIFY(peaks[i].value(id) > 0.01);
+            }
+        // Muting one source must leave the other two sources audible.
+        a.setConferenceMuted(true, true, false);
+        for (int i = 1; i < 4; ++i)
+        {
+            const auto id = sessions[i]->conferencePeers().key("0");
+            QTRY_VERIFY(sessions[i]->conferencePeerCameraHidden(id));
+            QTRY_VERIFY(peaks[i].value(id) < 0.0001);
+            QTRY_VERIFY(mixed[i] > 0.01);
+        }
+        b.setConferenceMuted(false, false, true);
+        QTRY_VERIFY(mixed[1] < 0.0001);
+        b.setConferenceMuted(false, false, false);
+        a.setConferenceMuted(false, false, false);
+        QTRY_VERIFY(mixed[1] > 0.01);
+        // Each of the receiver's three mixer inputs must reach its output.
+        for (int i = 0; i < 3; ++i) sessions[i]->setConferenceMuted(true, false, false);
+        QTRY_VERIFY(mixed[3] < 0.0001);
+        for (int i = 0; i < 3; ++i)
+        {
+            sessions[i]->setConferenceMuted(false, false, false);
+            QTRY_VERIFY(mixed[3] > 0.01);
+            sessions[i]->setConferenceMuted(true, false, false);
+            QTRY_VERIFY(mixed[3] < 0.0001);
+        }
+        for (int i = 0; i < 3; ++i) sessions[i]->setConferenceMuted(false, false, false);
+        QTRY_VERIFY(mixed[3] > 0.01);
+        c.leave();
+        for (const int i : {0, 1, 3})
+        {
+            QTRY_COMPARE(sessions[i]->memberCount(), 3);
+            QTRY_COMPARE(sessions[i]->conferencePeerStatus().values().count("running"), 2);
+            const auto before = frames[i];
+            for (const auto &id : sessions[i]->conferencePeers().keys())
+                QTRY_VERIFY(frames[i].value(id) > before.value(id) + 3);
+            QTRY_VERIFY(mixed[i] > 0.01);
+        }
+        QTRY_VERIFY(!c.conferenceDevicesBusy());
+        QVERIFY(c.join(url, "four-media", "2", Session::RoomType::Meeting));
+        for (int i = 0; i < 4; ++i)
+        {
+            QTRY_COMPARE(sessions[i]->conferencePeerStatus().values().count("running"), 3);
+            const auto before = frames[i];
+            for (const auto &id : sessions[i]->conferencePeers().keys())
+                QTRY_VERIFY(frames[i].value(id) > before.value(id) + 3);
+        }
+        for (auto *session : sessions) session->leave();
+        for (auto *session : sessions) QTRY_VERIFY(!session->conferenceDevicesBusy());
+    }
+
     void linuxControlsWindowsWithoutDesktopInput()
     {
 #ifndef Q_OS_LINUX

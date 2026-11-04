@@ -10,6 +10,7 @@
 #include "remote-control/input_injector.h"
 #include "signaling/signaling_client.h"
 #include <QElapsedTimer>
+#include <QDeadlineTimer>
 #include <QMap>
 #include <QTimer>
 #include <functional>
@@ -83,6 +84,10 @@ public:
     bool conferenceMicrophoneMuted() const { return conferenceMicMuted_; }
     bool conferenceSpeakerMuted() const { return conferenceSpeakerMuted_; }
     bool conferenceRemoteCameraHidden() const { return conferenceRemoteCameraHidden_; }
+    QMap<QString, QString> conferencePeers() const { return conferencePeers_; }
+    QString peerId() const { return peerId_; }
+    QMap<QString, QString> conferencePeerStatus() const { return meshStatus_; }
+    bool conferencePeerCameraHidden(const QString &id) const { return meshHidden_.value(id); }
     bool setConferenceDevices(const ConferenceDevices &devices);
     void setConferenceAutoConnect(bool enabled);
     void setConferenceJoinDefaults(bool microphoneEnabled, bool cameraEnabled, bool speakerEnabled);
@@ -114,6 +119,8 @@ signals:
     void conferenceLocalFrame(const QImage &image);
     void conferenceRemoteFrame(const QImage &image);
     void conferenceAudioReceived(quint64 buffers, double peak);
+    void conferencePeerFrame(const QString &id, const QImage &image);
+    void conferencePeerAudioReceived(const QString &id, quint64 buffers, double peak);
 
 private:
     friend class ::WindowTests;
@@ -135,6 +142,11 @@ private:
     void clearConference(bool notifyPeer);
     void beginConferenceMedia(bool offerer);
     void startConferenceMediaWhenReady();
+    void syncConferencePeers();
+    void receiveMeshConference(const QJsonObject &payload);
+    QString meshSessionId(const QString &id) const;
+    void sendMeshCamera(const QString &id);
+    void updateMeshState();
 
     SignalingClient signaling_;
     EventLog events_;
@@ -164,6 +176,14 @@ private:
     MediaEngine media_;
     ScreenShare screen_;
     ConferenceMedia conference_;
+    MeetingMedia meetingMedia_;
+    QMap<QString, QString> conferencePeers_, meshStatus_;
+    QMap<QString, bool> meshHidden_;
+    QSet<QString> meshPeers_;
+    QMap<QString, QDeadlineTimer> meshDeadlines_;
+    QTimer meshDeadline_;
+    QList<QJsonObject> meshPending_;
+    bool meshActive_ = false, meshReady_ = false;
     ConferenceDevices conferenceDevices_;
     ConferenceState conferenceState_ = ConferenceState::Idle;
     QString conferenceDetail_ = QStringLiteral("视频会议未开启");

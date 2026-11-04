@@ -105,6 +105,8 @@ if(BUILD_TESTING)
     if(ZJDESK_ENABLE_GSTREAMER)
         qt_add_executable(zjdesk-media-tests tests/integration/tst_media.cpp)
         target_link_libraries(zjdesk-media-tests PRIVATE zjdesk_client_core zjdesk_signaling Qt6::Test)
+        qt_add_executable(zjdesk-meeting-probe tests/manual/meeting_probe.cpp)
+        target_link_libraries(zjdesk-meeting-probe PRIVATE zjdesk_client_core)
         add_test(NAME media COMMAND zjdesk-media-tests -o "${CMAKE_BINARY_DIR}/test-results/media.xml,junitxml")
         set_tests_properties(media PROPERTIES TIMEOUT 180)
     endif()
@@ -125,7 +127,7 @@ endif()
 # at low integrity, where Windows denies camera access despite enabled consent.
 if(WIN32)
     find_program(ZJDESK_POWERSHELL NAMES powershell REQUIRED)
-    foreach(runtime_target zjdesk zjdesk-unit-tests zjdesk-file-tests zjdesk-integration-tests zjdesk-media-tests zjdesk-ui-tests)
+    foreach(runtime_target zjdesk zjdesk-unit-tests zjdesk-file-tests zjdesk-integration-tests zjdesk-media-tests zjdesk-ui-tests zjdesk-meeting-probe)
         if(TARGET ${runtime_target})
             add_custom_command(TARGET ${runtime_target} POST_BUILD
                 COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath

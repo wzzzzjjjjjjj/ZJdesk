@@ -8,6 +8,8 @@
 #include "remote-control/input_injector.h"
 #include "media/frame_timing.h"
 
+class QPushButton;
+
 class VideoSurface final : public QOpenGLWidget
 {
     Q_OBJECT
@@ -23,6 +25,8 @@ public:
     // Meeting-only presentation; the remote-control canvas keeps its existing rendering.
     void setParticipantTile(bool enabled) { participantTile_ = enabled; update(); }
     void setFrameHidden(bool hidden) { frameHidden_ = hidden; update(); }
+    void setExpandable(bool enabled);
+    void setExpanded(bool expanded);
     void setControlEnabled(bool enabled);
     void setRemoteCursor(const zjdesk::RemoteCursor &cursor);
     bool hasRemoteCursor() const { return remoteCursor_.visible && !remoteCursor_.image.isNull(); }
@@ -30,10 +34,12 @@ public:
 signals:
     void remoteInput(const QJsonObject &input);
     void frameAvailabilityChanged();
+    void expandRequested();
 
 protected:
     bool event(QEvent *event) override;
     void paintGL() override;
+    void resizeEvent(QResizeEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
@@ -65,6 +71,8 @@ private:
     bool controlEnabled_ = false;
     bool participantTile_ = false;
     bool frameHidden_ = false;
+    QPushButton *expandButton_ = nullptr;
+    bool expanded_ = false;
     Qt::MouseButtons remoteButtons_ = Qt::NoButton;
     QTimer motionTimer_;
     QJsonObject pendingMotion_;

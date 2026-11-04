@@ -36,11 +36,11 @@ MediaEnvironment MediaEnvironment::inspect()
     guint major = 0, minor = 0, micro = 0, nano = 0;
     gst_version(&major, &minor, &micro, &nano);
     result.version = QString("%1.%2.%3").arg(major).arg(minor).arg(micro);
-    for (const auto *name : {"videotestsrc", "audiotestsrc", "appsink", "videoconvert", "videoscale",
+    for (const auto *name : {"videotestsrc", "audiotestsrc", "appsrc", "appsink", "videoconvert", "videoscale",
                            "audioconvert", "audioresample", "autoaudiosink",
                            "webrtcbin", "vp9enc", "vp9dec", "rtpvp9pay", "rtpvp9depay", "jpegdec",
                            "tee", "queue", "opusenc", "nicesrc", "dtlssrtpenc", "rtpbin",
-                           "videorate", "sctpenc", "sctpdec", "decodebin", "videobalance", "volume",
+                           "videorate", "sctpenc", "sctpdec", "decodebin", "videobalance", "volume", "audiomixer",
                            "vp8enc", "vp8dec", "rtpvp8pay", "rtpvp8depay", "opusdec", "rtpopuspay", "rtpopusdepay"})
     {
         if (auto *factory = gst_element_factory_find(name))

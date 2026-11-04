@@ -2,18 +2,17 @@
 
 协作和会议使用同一个 `SessionCoordinator`，连接或入房期间禁止同时加入另一房间。信令 `join` 携带 `roomType`，服务端按房间类型和原始房间码联合隔离；未携带类型的旧客户端按协作处理。会议客户端必须在 `joined` 响应中收到 `meeting` 类型确认，避免旧服务忽略类型后混入协作房间。会议禁用远控能力和请求；协作远控仍在本地授权后自动传输桌面。
 
-会议使用独立 `ConferenceMedia` 工作线程与 WebRTC 管线，通过 `conference` 中继消息和
-`sessionId` 区分会话，支持 `start`、`accept`、`stop`、`offer`、`answer` 和 `ice`。
-服务校验消息、绑定实际发送者并检查转发后的消息长度；使用会议需要同步更新服务端。
-`SessionCoordinator` 统一管理 Idle / Calling / Incoming / Connecting / Running / Failed，
-协调层默认保留显式发起 / 接听接口；会议界面启用 `setConferenceAutoConnect(true)`，
-双方加入会议房间后自动发起和接受协商，再创建双方 VP8 / Opus 双向媒体。协作房间不触发自动连接。
-自动发起仅在成员进入可连接状态时进行，失败后等待离会重入，避免循环重试。交叉请求沿用双方 peerId 排序消解。
-Running 要求 WebRTC connected
-且实际收到远端视频与音频；房间状态、屏幕共享及远控保持独立。
-会话代次屏蔽旧协商与帧，设备开启前等待预览和测试音释放；挂断、离开、断线、超时或媒体失败均清理设备。
-本地与远端帧各使用一个最新帧槽交接，避免 UI 事件队列累积画面；设备异常只结束会议并保留可用的房间连接。
-界面只操作协调层，媒体选择、静音和画面隐藏均在会议工作线程执行。使用与限制见 [视频会议](video-conference.md)。
+会议界面启用 `setConferenceAutoConnect(true)`，使用 `MeetingMedia` 工作线程：摄像头与麦克风各采集一次，最多向三位远端分别编码 VP8 / Opus；三路远端音频经 `audiomixer` 后进入一个扬声器。每成员独立 WebRTC 管线、状态、45 秒连接期限及移除操作，一人离会或失败不会结束其余连接。两人显式呼叫 / 接听接口仍使用 `ConferenceMedia`，供原有接口及回归使用；协作房间不自动启动会议。
+
+会议房间最多四人，协作房间最多两人。服务广播成员加入 / 离开，以 `targetPeerId` 定向转发；超过两人时未指定目标会拒绝。目标必须是同房间的其他成员，服务覆盖 `fromPeerId` 并保留消息长度与字段校验。每对成员以排序后的成员 ID 生成一致的 `sessionId`，ID 较小者发 offer；重新入会得到新成员 ID，旧协商不会进入新连接。早到协商消息有界暂存，失败后不循环重试。
+
+`SessionCoordinator` 是成员和会议状态的唯一写入者。有任一远端实际收到音视频且 WebRTC connected 即为 Running，同时显示已连接数 / 远端成员数；单成员连接状态独立保留。隐藏状态按目标同步，入会默认值在采集前应用。最后一位远端离会、退出房间或共享采集失败会释放设备。
+
+本机与各远端均只交接最新帧；媒体线程不向 UI 无界排队。共享本机帧的实际 UI 交付计数同时供各路编码自适应使用，保留原生摄像头采集、先降帧率再降尺寸的策略，最多每路两条编码线程。UI 仅调用协调层，预分配一个本机和三个远端 OpenGL 画面，按成员 ID 更新，不直接操作媒体或网络。
+
+单画面全屏只修改 UI：保留原 OpenGL 控件及父级关系，临时隐藏兄弟控件、解除尺寸约束并调整布局伸展，退出时恢复窗口位置、状态和布局；不修改媒体会话。成员身份更换或画面清空时退出全屏，避免显示错人。协作画布全屏继续使用原输入坐标映射，右上角提供恢复按钮。
+
+屏幕共享暂限两人，第三人加入会停止原来的双人共享；一对多屏幕共享未实现。会议禁用远控。使用与验证边界见 [视频会议](video-conference.md)。
 界面从本机 `QSettings(IniFormat, UserScope, "ZJdesk", "meeting")` 读取三个入会默认开关，初始均开启，
 通过 `setConferenceJoinDefaults` 交给协调层；每次新建媒体连接时取用，不改变当前通话。
 媒体工作线程在管线进入 PLAYING 前应用静音和画面隐藏，远端通过当前会话的 `camera` 消息同步默认隐藏状态。
@@ -46,7 +45,7 @@ flowchart TD
 | 目录 / 目标 | 职责 | 约束 |
 | --- | --- | --- |
 | protocol / zjdesk_protocol | 信封编码、版本、输入校验 | 不依赖 UI、GStreamer 或服务状态 |
-| signaling / zjdesk_signaling | 房间成员、双人限制、协商消息路由、心跳 | 不传输媒体和远控输入 |
+| signaling / zjdesk_signaling | 房间成员、会议四人 / 协作两人限制、定向协商消息路由、心跳 | 不传输媒体和远控输入 |
 | signaling / SignalingClient | WebSocket 生命周期与协议消息 | 不修改会议业务状态 |
 | session / SessionCoordinator | 入退会、状态变更、成员和信令事件 | 是会议业务状态的唯一写入者 |
 | diagnostics / EventLog | 有界事件记录、原子文件导出 | 不记录 SDP 内容或实际输入文本 |

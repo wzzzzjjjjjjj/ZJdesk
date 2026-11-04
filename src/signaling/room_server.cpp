@@ -104,12 +104,11 @@ void RoomServer::leave(QWebSocket *socket)
     if (!peers_.contains(socket) || peers_.value(socket).room.isEmpty())
         return;
     const auto peer = peers_.value(socket);
-    auto *other = otherPeer(socket);
     rooms_[peer.room].removeAll(socket);
     if (rooms_[peer.room].isEmpty())
         rooms_.remove(peer.room);
     peers_[socket].room.clear();
-    if (other)
+    for (auto *other : rooms_.value(peer.room))
         send(other, {"peer_left", {{"peerId", peer.id}}});
     emit event("Participant left; room count: " + QString::number(rooms_.size()));
 }
@@ -134,7 +133,7 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
             || (roomType != "assistance" && roomType != "meeting"))
             return reject(socket, "invalid_join");
         const auto roomKey = roomType + QChar(0x1f) + room;
-        if (rooms_.value(roomKey).size() >= 2)
+        if (rooms_.value(roomKey).size() >= (roomType == "meeting" ? 4 : 2))
             return reject(socket, "room_full");
         QJsonArray members;
         for (auto *member : rooms_.value(roomKey))
@@ -144,8 +143,9 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
         rooms_[roomKey].append(socket);
         send(socket, {"joined", {{"roomId", room}, {"peerId", peers_[socket].id},
                                  {"roomType", roomType}, {"peers", members}, {"initiator", members.isEmpty()}}});
-        if (auto *other = otherPeer(socket))
-            send(other, {"peer_joined", {{"peerId", peers_[socket].id}, {"name", name}}});
+        for (auto *other : rooms_.value(roomKey))
+            if (other != socket)
+                send(other, {"peer_joined", {{"peerId", peers_[socket].id}, {"name", name}}});
         emit event("Participant joined; room count: " + QString::number(rooms_.size()));
         return;
     }
@@ -207,6 +207,15 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
         if (peers_[socket].room.isEmpty())
             return reject(socket, "not_joined");
         auto *other = otherPeer(socket);
+        const auto target = message->payload.value("targetPeerId").toString();
+        if (!target.isEmpty())
+        {
+            other = nullptr;
+            for (auto *member : rooms_.value(peers_[socket].room))
+                if (member != socket && peers_[member].id == target) other = member;
+        }
+        else if (rooms_.value(peers_[socket].room).size() > 2)
+            return reject(socket, "target_required");
         if (!other)
             return reject(socket, "peer_unavailable");
         auto payload = message->payload;

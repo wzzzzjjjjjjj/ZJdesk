@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QImage>
+#include <QHash>
+#include <QTimer>
 #include <QJsonObject>
 #include <QMutex>
 #include <QObject>
@@ -24,6 +26,42 @@ struct ConferenceMailbox
 };
 
 class ConferenceWorker;
+class MeetingWorker;
+struct MeetingMailbox
+{
+    QMutex mutex;
+    quint64 epoch = 0;
+    QImage local;
+    QHash<QString, QImage> remote;
+    quint64 localDelivered = 0;
+};
+class MeetingMedia final : public QObject
+{
+    Q_OBJECT
+public:
+    explicit MeetingMedia(QObject *parent = nullptr);
+    ~MeetingMedia() override;
+    void start(const ConferenceDevices &devices, quint64 epoch,
+        bool microphoneMuted = false, bool cameraHidden = false, bool speakerMuted = false);
+    void stop(quint64 epoch);
+    void addPeer(const QString &id, bool offerer, quint64 epoch);
+    void removePeer(const QString &id, quint64 epoch);
+    void negotiate(const QString &id, const QString &type, const QJsonObject &payload, quint64 epoch);
+    void setMuted(bool microphone, bool camera, bool speaker, quint64 epoch);
+signals:
+    void negotiationReady(quint64 epoch, const QString &id, const QString &type, const QJsonObject &payload);
+    void statusChanged(quint64 epoch, const QString &status, const QString &detail);
+    void peerStatusChanged(quint64 epoch, const QString &id, const QString &status);
+    void localFrame(quint64 epoch, const QImage &image);
+    void remoteFrame(quint64 epoch, const QString &id, const QImage &image);
+    void receivedAudio(quint64 epoch, const QString &id, quint64 buffers, double peak);
+    void mixedAudio(quint64 epoch, quint64 buffers, double peak);
+private:
+    MeetingMailbox mailbox_;
+    QThread thread_;
+    MeetingWorker *worker_;
+    QTimer frames_;
+};
 class ConferenceMedia final : public QObject
 {
     Q_OBJECT

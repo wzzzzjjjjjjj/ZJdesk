@@ -183,6 +183,210 @@ class WindowTests : public QObject
     Q_OBJECT
     QTemporaryDir preferenceDirectory_;
 private slots:
+    void meetingEmptyExpansionRestoresOnLeave()
+    {
+        using Session = zjdesk::SessionCoordinator;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const auto url = QString("ws://127.0.0.1:%1").arg(server.port());
+        MainWindow window(url, {}, "Local");
+        window.setWindowFlag(Qt::Tool);
+        window.setWindowFlag(Qt::WindowDoesNotAcceptFocus);
+        window.setAttribute(Qt::WA_ShowWithoutActivating);
+        window.move(window.screen()->virtualGeometry().left() - 2000, 0);
+        window.show();
+        window.findChildren<QPushButton *>("navButton").at(1)->click();
+        for (auto *surface : {window.meetingLocalVideo_, window.meetingShareVideo_})
+        {
+            QVERIFY(window.session_.join(QUrl(url), "empty-expansion", "Local", Session::RoomType::Meeting));
+            QTRY_COMPARE(window.session_.state(), Session::State::WaitingForPeer);
+            QVERIFY(!surface->hasFrame());
+            surface->findChild<QPushButton *>("expandFrameButton")->click();
+            QTRY_VERIFY(window.isFullScreen());
+            if (surface == window.meetingLocalVideo_) window.session_.leave();
+            else server.close();
+            QTRY_VERIFY(!window.isFullScreen());
+            QVERIFY(window.findChild<QPushButton *>("meetingJoinButton")->isVisible());
+        }
+    }
+
+    void meetingEarlyStopKeepsOtherMembers()
+    {
+        using Session = zjdesk::SessionCoordinator;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        Session a, b, c;
+        for (auto *peer : {&a, &b, &c})
+        {
+            QVERIFY(peer->setConferenceDevices({"test", "test", "test"}));
+            QVERIFY(peer->join(url, "early-stop", "Peer", Session::RoomType::Meeting));
+        }
+        for (auto *peer : {&a, &b, &c}) QTRY_COMPARE(peer->memberCount(), 3);
+        a.setConferenceAutoConnect(true);
+        QVERIFY(!a.meshReady_);
+        // Deliver a stop while capture startup is still queued on the media thread.
+        a.receiveMeshConference({{"fromPeerId", b.ownPeerId_}, {"action", "stop"},
+            {"sessionId", a.meshSessionId(b.ownPeerId_)}});
+        QVERIFY(a.conferenceActive());
+        c.setConferenceAutoConnect(true);
+        QTRY_COMPARE_WITH_TIMEOUT(a.conferencePeerStatus().value(c.ownPeerId_), "running", 15000);
+        QCOMPARE(a.conferencePeerStatus().value(b.ownPeerId_), "stopped");
+        for (auto *peer : {&a, &b, &c}) peer->leave();
+        for (auto *peer : {&a, &b, &c}) QTRY_VERIFY(!peer->conferenceDevicesBusy());
+
+        // When the only remote stops during startup, release capture after ready.
+        a.setConferenceAutoConnect(false);
+        QVERIFY(a.join(url, "early-stop", "A", Session::RoomType::Meeting));
+        QVERIFY(b.join(url, "early-stop", "B", Session::RoomType::Meeting));
+        QTRY_COMPARE(a.memberCount(), 2);
+        a.setConferenceAutoConnect(true);
+        a.receiveMeshConference({{"fromPeerId", b.ownPeerId_}, {"action", "stop"},
+            {"sessionId", a.meshSessionId(b.ownPeerId_)}});
+        QTRY_COMPARE(a.conferenceState(), Session::ConferenceState::Idle);
+        QTRY_VERIFY(!a.conferenceDevicesBusy());
+        a.leave(); b.leave();
+    }
+
+    void meetingFourVideoTiles()
+    {
+        using Session = zjdesk::SessionCoordinator;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const auto url = QString("ws://127.0.0.1:%1").arg(server.port());
+        MainWindow window(url, {}, "Local");
+        window.setWindowFlag(Qt::Tool);
+        window.setWindowFlag(Qt::WindowDoesNotAcceptFocus);
+        window.setAttribute(Qt::WA_ShowWithoutActivating);
+        window.move(window.screen()->virtualGeometry().left() - 2000, 0);
+        window.resize(1040, 720);
+        window.show();
+        window.findChildren<QPushButton *>("navButton").at(1)->click();
+        QVERIFY(window.session_.setConferenceDevices({"test", "test", "test"}));
+        QVERIFY(window.session_.join(QUrl(url), "four-tiles", "Local", Session::RoomType::Meeting));
+        Session b, c, d;
+        for (auto *peer : {&b, &c, &d})
+        {
+            peer->setConferenceAutoConnect(true);
+            QVERIFY(peer->setConferenceDevices({"test", "test", "test"}));
+            QVERIFY(peer->join(QUrl(url), "four-tiles", "Remote", Session::RoomType::Meeting));
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(window.session_.conferencePeerStatus().values().count("running"), 3, 15000);
+        QCOMPARE(window.findChild<QLabel *>("meetingMemberCount")->text(), QStringLiteral("4 人参与"));
+        QVERIFY(!window.findChild<QPushButton *>("shareButton")->isEnabled());
+        for (auto *surface : QList<VideoSurface *>{window.meetingLocalVideo_} + window.meetingRemoteVideos_)
+        {
+            QTRY_VERIFY(surface->isVisible() && surface->hasFrame());
+            QVERIFY(window.rect().contains(QRect(surface->mapTo(&window, QPoint()), surface->size())));
+            QVERIFY(surface->isValid());
+            QVERIFY(!surface->grabFramebuffer().isNull());
+        }
+        const auto surfaces = QList<VideoSurface *>{window.meetingLocalVideo_} + window.meetingRemoteVideos_;
+        for (int i = 0; i < surfaces.size(); ++i)
+            for (int j = i + 1; j < surfaces.size(); ++j)
+                QTRY_VERIFY2(!surfaces.at(i)->geometry().intersects(surfaces.at(j)->geometry()),
+                    qPrintable(QString("%1 (%2,%3 %4x%5), %6 (%7,%8 %9x%10), parent height=%11, window height=%12")
+                        .arg(surfaces.at(i)->objectName()).arg(surfaces.at(i)->x()).arg(surfaces.at(i)->y())
+                        .arg(surfaces.at(i)->width()).arg(surfaces.at(i)->height()).arg(surfaces.at(j)->objectName())
+                        .arg(surfaces.at(j)->x()).arg(surfaces.at(j)->y()).arg(surfaces.at(j)->width()).arg(surfaces.at(j)->height())
+                        .arg(surfaces.at(i)->parentWidget()->height()).arg(window.height())));
+        QDir().mkpath("output");
+        QVERIFY(window.grab().save("output/ui-meeting-four-small.png"));
+        QImage sharedFrame(1280, 720, QImage::Format_RGB32);
+        sharedFrame.fill(QColor("#176ee8"));
+        window.meetingShareVideo_->setFrame(sharedFrame);
+        const auto normalGeometry = window.geometry();
+        for (auto *surface : surfaces + QList<VideoSurface *>{window.meetingShareVideo_})
+        {
+            auto *parent = surface->parentWidget();
+            const auto normalSize = surface->size();
+            auto *button = surface->findChild<QPushButton *>("expandFrameButton");
+            QVERIFY(button && button->isVisible());
+            const auto epoch = window.session_.conferenceEpoch_;
+            button->click();
+            QTRY_VERIFY(window.isFullScreen());
+            QCOMPARE(surface->parentWidget(), parent);
+            QTRY_VERIFY(surface->width() > normalSize.width() && surface->height() > normalSize.height());
+            QVERIFY(surface->width() >= window.width() - 40);
+            QVERIFY(surface->height() >= window.height() - 40);
+            QVERIFY(button->isVisible());
+            QCOMPARE(button->text(), QStringLiteral("缩小"));
+            window.refreshMeetingParticipants();
+            QTest::qWait(100);
+            QTRY_VERIFY2(surface->height() >= window.height() - 40,
+                qPrintable(QString("%1 height %2 of %3").arg(surface->objectName()).arg(surface->height()).arg(window.height())));
+            for (auto *other : surfaces + QList<VideoSurface *>{window.meetingShareVideo_})
+                QCOMPARE(other->isVisible(), other == surface);
+            if (surface == surfaces.at(2))
+            {
+                // A local hide moves the primary remote tile above the local avatar.
+                window.session_.setConferenceMuted(false, true, false);
+                QTRY_VERIFY(window.session_.conferenceCameraHidden());
+                QTest::qWait(100);
+                QTRY_VERIFY(surface->height() >= window.height() - 40);
+                window.session_.setConferenceMuted(false, false, false);
+                QTRY_VERIFY(!window.session_.conferenceCameraHidden());
+                QTest::qWait(100);
+                QTRY_VERIFY(surface->height() >= window.height() - 40);
+            }
+            if (surface != window.meetingShareVideo_)
+            {
+                const auto frames = surface->presentedFrames();
+                QTRY_VERIFY(surface->presentedFrames() > frames);
+            }
+            QVERIFY(!surface->grabFramebuffer().isNull());
+            if (surface == window.meetingShareVideo_)
+            {
+                const auto image = surface->grabFramebuffer();
+                QCOMPARE(image.pixelColor(image.rect().center()), QColor("#176ee8"));
+                QVERIFY(window.grab().save("output/ui-meeting-expanded-share.png"));
+            }
+            if (surface == window.meetingLocalVideo_)
+                QVERIFY(window.grab().save("output/ui-meeting-expanded-camera.png"));
+            button->click();
+            QTRY_VERIFY(!window.isFullScreen());
+            QTRY_COMPARE(window.geometry(), normalGeometry);
+            QTRY_COMPARE(surface->size(), normalSize);
+            for (auto *other : surfaces) QVERIFY(other->isVisible());
+            QCOMPARE(window.session_.conferenceEpoch_, epoch);
+            QCOMPARE(window.session_.conferencePeerStatus().values().count("running"), 3);
+            button->click();
+            QTRY_VERIFY(window.isFullScreen());
+            QTest::keyClick(surface, Qt::Key_Escape);
+            QTRY_VERIFY(!window.isFullScreen());
+        }
+        window.meetingShareVideo_->findChild<QPushButton *>("expandFrameButton")->click();
+        QTRY_VERIFY(window.isFullScreen());
+        window.meetingShareVideo_->setFrame({});
+        QTRY_VERIFY(!window.isFullScreen());
+        window.showMaximized();
+        QTRY_VERIFY(window.isMaximized());
+        window.meetingLocalVideo_->findChild<QPushButton *>("expandFrameButton")->click();
+        QTRY_VERIFY(window.isFullScreen());
+        window.meetingLocalVideo_->findChild<QPushButton *>("expandFrameButton")->click();
+        QTRY_VERIFY(window.isMaximized() && !window.isFullScreen());
+        window.showNormal();
+        window.setGeometry(normalGeometry);
+        auto *leavingSurface = *std::find_if(window.meetingRemoteVideos_.begin(), window.meetingRemoteVideos_.end(),
+            [&b](VideoSurface *surface) { return surface->property("peerId").toString() == b.ownPeerId_; });
+        leavingSurface->findChild<QPushButton *>("expandFrameButton")->click();
+        QTRY_VERIFY(window.isFullScreen());
+        b.leave();
+        QTRY_COMPARE(window.session_.memberCount(), 3);
+        QTRY_VERIFY(!window.isFullScreen());
+        QTRY_COMPARE(window.session_.conferencePeerStatus().values().count("running"), 2);
+        QTRY_VERIFY(window.meetingRemoteVideos_.last()->isHidden());
+        for (auto *surface : window.meetingRemoteVideos_.mid(0, 2)) QTRY_VERIFY(surface->hasFrame());
+        const auto timedOut = c.ownPeerId_;
+        window.session_.meshDeadlines_[timedOut] = QDeadlineTimer(0);
+        QVERIFY(QMetaObject::invokeMethod(&window.session_.meshDeadline_, "timeout", Qt::DirectConnection));
+        QTRY_COMPARE(window.session_.conferencePeerStatus().values().count("running"), 1);
+        QCOMPARE(window.session_.conferencePeerStatus().value(timedOut), "failed");
+        QCOMPARE(window.session_.conferencePeerStatus().value(d.ownPeerId_), "running");
+        QCOMPARE(window.session_.conferenceState(), Session::ConferenceState::Running);
+        window.session_.leave(); c.leave(); d.leave();
+    }
+
     void fileClipboardNativePasteAndLocalCopyCancels()
     {
         auto *cb = QGuiApplication::clipboard();
@@ -1499,7 +1703,7 @@ sys.stdout.buffer.write(data)
         MainWindow window("ws://127.0.0.1:8765", "demo", "Viewer");
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
-        auto *surface = window.findChild<VideoSurface *>();
+        auto *surface = window.findChild<VideoSurface *>("videoSurface");
         auto *expand = window.findChild<QPushButton *>("expandVideoButton");
         const auto normalSize = surface->size();
         const auto normalGeometry = window.geometry();
@@ -1516,7 +1720,7 @@ sys.stdout.buffer.write(data)
         QTRY_VERIFY(window.isFullScreen());
         QVERIFY(!expand->isVisible());
         QTRY_VERIFY(surface->width() > normalSize.width() && surface->height() > normalSize.height());
-        QCOMPARE(window.findChild<VideoSurface *>(), surface);
+        QCOMPARE(window.findChild<VideoSurface *>("videoSurface"), surface);
         surface->setControlEnabled(true);
         QTest::mouseClick(surface, Qt::LeftButton, Qt::NoModifier, surface->rect().center());
         QVERIFY(input.size() >= 2);
@@ -1540,7 +1744,10 @@ sys.stdout.buffer.write(data)
         expand->click();
         QTRY_VERIFY(window.isFullScreen());
         QVERIFY(!expand->isVisible());
-        QTest::keyClick(surface, Qt::Key_Escape);
+        auto *shrink = surface->findChild<QPushButton *>("expandFrameButton");
+        QVERIFY(shrink && shrink->isVisible());
+        QCOMPARE(shrink->text(), QStringLiteral("缩小"));
+        shrink->click();
         QTRY_VERIFY(!window.isFullScreen());
         QVERIFY(expand->isVisible());
     }
@@ -2452,6 +2659,8 @@ sys.stdout.buffer.write(data)
         QVERIFY(window.findChild<QLineEdit *>("meetingServerAddress")->isHidden());
         settings->hide();
         // UI fixtures cover the future roster boundary, without adding fake room members.
+        window.session_.stopConference();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.session_.conferenceDevicesBusy(), 15000);
         window.resize(1040, 720);
         const QStringList fourNames{QStringLiteral("张三"), QStringLiteral("李四"), QStringLiteral("王五"), QStringLiteral("赵六")};
         window.setMeetingRoster(fourNames);

@@ -613,6 +613,14 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     meetingRemoteVideo_ = remoteConference;
     remoteConference->setObjectName("conferenceRemoteVideo");
     remoteConference->setParticipantTile(true);
+    meetingRemoteVideos_.append(remoteConference);
+    for (int index = 2; index <= 3; ++index)
+    {
+        auto *surface = new VideoSurface;
+        surface->setObjectName(QString("conferenceRemoteVideo%1").arg(index));
+        surface->setParticipantTile(true);
+        meetingRemoteVideos_.append(surface);
+    }
     auto *participants = card();
     participants->setObjectName("meetingParticipants");
     participants->setMinimumWidth(190);
@@ -621,7 +629,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     meetingParticipantLayout_->setContentsMargins(10, 12, 10, 12);
     meetingParticipantLayout_->setSpacing(10);
     meetingParticipantLayout_->addWidget(text(QStringLiteral("参会画面"), "sectionTitle"));
-    for (auto *surface : {localConference, remoteConference})
+    for (auto *surface : QList<VideoSurface *>{localConference} + meetingRemoteVideos_)
     {
         surface->setMinimumSize(160, 110);
         surface->setMaximumHeight(230);
@@ -753,6 +761,11 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     for (auto *button : {muteMic, hideCamera, muteSpeaker}) connect(button, &QPushButton::toggled, this, mute);
     connect(&session_, &zjdesk::SessionCoordinator::conferenceLocalFrame, localConference, &VideoSurface::setFrame);
     connect(&session_, &zjdesk::SessionCoordinator::conferenceRemoteFrame, remoteConference, &VideoSurface::setFrame);
+    connect(&session_, &zjdesk::SessionCoordinator::conferencePeerFrame, this,
+        [this](const QString &id, const QImage &image) {
+            for (auto *surface : meetingRemoteVideos_)
+                if (surface->property("peerId").toString() == id) surface->setFrame(image);
+        });
     auto refreshMeeting = [=] {
         using CS = zjdesk::SessionCoordinator::ConferenceState;
         const auto state = session_.conferenceState();
@@ -844,7 +857,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     footer->setContentsMargins(0, 0, 0, 0);
     auto *footerWidget = new QWidget;
     footerWidget->setLayout(footer);
-    footer->addWidget(text(QStringLiteral("局域网双人协作"), "footer"));
+    footer->addWidget(text(QStringLiteral("局域网协作"), "footer"));
     footer->addStretch();
     footer->addWidget(text(QString("ZJdesk %1").arg(zjdesk::build::Version), "footer"));
     contentLayout->addWidget(footerWidget);
@@ -852,6 +865,18 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     normalWidgets_ = {sidebar, headerWidget, connectionCard, sessionScroll, stageHeader,
         deviceActionsCard, footerWidget};
     connect(expandButton_, &QPushButton::toggled, this, &MainWindow::expandVideo);
+    connect(video_, &VideoSurface::expandRequested, this, [this] { expandButton_->setChecked(false); });
+    for (auto *surface : QList<VideoSurface *>{meetingLocalVideo_, meetingShareVideo_} + meetingRemoteVideos_)
+    {
+        surface->setExpandable(true);
+        connect(surface, &VideoSurface::expandRequested, this, [this, surface] {
+            if (expandedMeetingVideo_ == surface) restoreMeetingVideo();
+            else expandMeetingVideo(surface);
+        });
+        connect(surface, &VideoSurface::frameAvailabilityChanged, this, [this, surface] {
+            if (expandedMeetingVideo_ == surface && !surface->hasFrame()) restoreMeetingVideo();
+        });
+    }
     qApp->installEventFilter(this);
 
     connect(workspaceButton, &QPushButton::clicked, pages, [pages, pageTitle, pageSubtitle] {
@@ -1050,6 +1075,7 @@ void MainWindow::refreshMeetingParticipants()
     using State = zjdesk::SessionCoordinator::State;
     const bool inMeeting = session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting
         && (session_.state() == State::WaitingForPeer || session_.state() == State::PeerAvailable);
+    if (!inMeeting && expandedMeetingVideo_) restoreMeetingVideo();
     const int count = inMeeting ? session_.memberCount() : 0;
     const bool hasPeer = count > 1;
     const QString localName = meetingNameEdit_->text().trimmed().isEmpty()
@@ -1057,11 +1083,34 @@ void MainWindow::refreshMeetingParticipants()
     const QString remoteName = session_.peerName().isEmpty() ? QStringLiteral("参会成员") : session_.peerName();
     const bool hidden = session_.conferenceCameraHidden();
     const bool remoteHidden = session_.conferenceRemoteCameraHidden();
+    meetingParticipantLayout_->setContentsMargins(10, count > 2 ? 8 : 12, 10, count > 2 ? 8 : 12);
+    meetingParticipantLayout_->setSpacing(count > 2 ? 6 : 10);
+    meetingLocalVideo_->setMinimumHeight(count > 2 ? 60 : 110);
     QStringList members;
     if (count > 0) members.append(localName + QStringLiteral("（我）"));
-    if (hasPeer) members.append(remoteName);
+    auto peers = inMeeting ? session_.conferencePeers() : QMap<QString, QString>{};
+    QStringList ids = peers.keys();
+    if (ids.removeOne(session_.peerId())) ids.prepend(session_.peerId());
+    for (const auto &id : ids) members.append(peers.value(id));
     setMeetingRoster(members);
-    meetingRemoteVideo_->setVisible(hasPeer);
+    for (int index = 0; index < meetingRemoteVideos_.size(); ++index)
+    {
+        auto *surface = meetingRemoteVideos_.at(index);
+        const QString id = inMeeting && index < ids.size() ? ids.at(index) : QString{};
+        if (surface->property("peerId").toString() != id)
+        {
+            surface->setProperty("peerId", id);
+            if (expandedMeetingVideo_ == surface) restoreMeetingVideo();
+            surface->setFrame({});
+        }
+        surface->setVisible(!id.isEmpty());
+        surface->setMinimumHeight(count > 2 ? 60 : 110);
+        const bool peerHidden = session_.conferencePeerCameraHidden(id);
+        surface->setParticipant(peers.value(id), peerHidden
+            ? QStringLiteral("画面已隐藏") : QStringLiteral("等待摄像头画面"));
+        surface->setFrameCaption(peers.value(id));
+        surface->setFrameHidden(peerHidden);
+    }
     findChild<QLabel *>("meetingWaiting")->setVisible(!hasPeer);
     meetingLocalVideo_->setParticipant(localName + QStringLiteral("（我）"),
         hidden ? QStringLiteral("画面已隐藏") : QStringLiteral("摄像头未开启"));
@@ -1079,6 +1128,7 @@ void MainWindow::refreshMeetingParticipants()
         meetingParticipantLayout_->removeWidget(first);
         meetingParticipantLayout_->insertWidget(1, first, 1);
     }
+    refreshExpandedMeetingVideo();
 }
 
 void MainWindow::setMeetingRoster(const QStringList &names)
@@ -1128,6 +1178,7 @@ void MainWindow::refreshShare()
 {
     using Preview = zjdesk::SessionCoordinator::PreviewState;
     shareButton_->setEnabled(session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting
+        && session_.memberCount() <= 2
         && session_.mediaEnvironment().ready
         && session_.state() == zjdesk::SessionCoordinator::State::PeerAvailable
         && !session_.receivingScreen() && session_.shareState() != Preview::Stopping);
@@ -1146,6 +1197,8 @@ void MainWindow::refreshShare()
 
 void MainWindow::expandVideo(bool expanded)
 {
+    video_->setExpanded(expanded);
+    video_->setExpandable(expanded);
     session_.sendRemoteInput({{"kind", "release"}});
     for (auto *widget : normalWidgets_)
         widget->setVisible(!expanded);
@@ -1155,26 +1208,103 @@ void MainWindow::expandVideo(bool expanded)
     if (expanded)
     {
         normalWindowState_ = windowState();
+        normalWindowGeometry_ = geometry();
         showFullScreen();
     }
     else
     {
         setWindowState(normalWindowState_);
+        if (!isMaximized() && !isFullScreen()) setGeometry(normalWindowGeometry_);
     }
     refreshShare();
     if (session_.remoteState() == zjdesk::SessionCoordinator::RemoteState::Controlling)
         video_->setFocus();
 }
 
+void MainWindow::expandMeetingVideo(VideoSurface *surface)
+{
+    if (!surface->isVisible()) return;
+    if (expandedMeetingVideo_) restoreMeetingVideo();
+    expandedMeetingVideo_ = surface;
+    normalWindowState_ = windowState();
+    normalWindowGeometry_ = geometry();
+    // Keep the OpenGL widget in its original parent and layout.
+    for (QWidget *widget = surface; widget; widget = widget->parentWidget())
+    {
+        auto *layout = widget->layout();
+        videoLayoutStates_.append({widget, widget->minimumSize(), widget->maximumSize(),
+            layout ? layout->contentsMargins() : QMargins(), layout ? layout->spacing() : 0});
+        if (widget == centralWidget()) break;
+        for (auto *sibling : widget->parentWidget()->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly))
+            if (sibling != widget)
+                videoSiblingVisibility_.append({sibling, !sibling->isHidden()});
+    }
+    surface->setExpanded(true);
+    for (int index = 0; index < meetingParticipantLayout_->count(); ++index)
+    {
+        videoParticipantStretches_.append(meetingParticipantLayout_->stretch(index));
+        meetingParticipantLayout_->setStretch(index, meetingParticipantLayout_->itemAt(index)->widget() == surface ? 1 : 0);
+    }
+    refreshExpandedMeetingVideo();
+    showFullScreen();
+    surface->setFocus();
+}
+
+void MainWindow::refreshExpandedMeetingVideo()
+{
+    if (!expandedMeetingVideo_) return;
+    for (const auto &state : videoLayoutStates_)
+    {
+        state.widget->setMinimumSize(0, 0);
+        state.widget->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+        if (auto *layout = state.widget->layout())
+        {
+            layout->setContentsMargins(0, 0, 0, 0);
+            layout->setSpacing(0);
+        }
+    }
+    // Hidden camera tiles must not reserve their normal minimum height.
+    for (auto *surface : QList<VideoSurface *>{meetingLocalVideo_} + meetingRemoteVideos_)
+        surface->setMinimumHeight(0);
+    for (const auto &sibling : videoSiblingVisibility_) sibling.first->hide();
+}
+
+void MainWindow::restoreMeetingVideo()
+{
+    if (!expandedMeetingVideo_) return;
+    expandedMeetingVideo_->setExpanded(false);
+    expandedMeetingVideo_ = nullptr;
+    for (const auto &state : videoLayoutStates_)
+    {
+        state.widget->setMinimumSize(state.minimum);
+        state.widget->setMaximumSize(state.maximum);
+        if (auto *layout = state.widget->layout())
+        {
+            layout->setContentsMargins(state.margins);
+            layout->setSpacing(state.spacing);
+        }
+    }
+    for (const auto &sibling : videoSiblingVisibility_) sibling.first->setVisible(sibling.second);
+    videoLayoutStates_.clear();
+    videoSiblingVisibility_.clear();
+    for (int index = 0; index < videoParticipantStretches_.size(); ++index)
+        meetingParticipantLayout_->setStretch(index, videoParticipantStretches_.at(index));
+    videoParticipantStretches_.clear();
+    setWindowState(normalWindowState_);
+    if (!isMaximized() && !isFullScreen()) setGeometry(normalWindowGeometry_);
+    refreshMeetingParticipants();
+}
+
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
-    if (event->type() == QEvent::KeyPress && expandButton_->isChecked()
+    if (event->type() == QEvent::KeyPress && (expandButton_->isChecked() || expandedMeetingVideo_)
         && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)
     {
         auto *widget = qobject_cast<QWidget *>(watched);
         if (widget && widget->window() == this)
         {
-            expandButton_->setChecked(false);
+            if (expandedMeetingVideo_) restoreMeetingVideo();
+            else expandButton_->setChecked(false);
             event->accept();
             return true;
         }
@@ -1213,7 +1343,7 @@ void MainWindow::refreshSession()
     meetingJoinButton_->setText(idle || !meeting ? QStringLiteral("加入会议")
         : state == State::Connecting || state == State::Joining ? QStringLiteral("取消连接") : QStringLiteral("离开会议"));
     const QString labels[] = {QStringLiteral("未加入房间"), QStringLiteral("正在连接"), QStringLiteral("正在入会"),
-        QStringLiteral("等待成员"), QStringLiteral("双方已入会"), QStringLiteral("连接失败")};
+        QStringLiteral("等待成员"), meeting ? QStringLiteral("成员已入会") : QStringLiteral("双方已入会"), QStringLiteral("连接失败")};
     const auto label = (idle ? QString() : meeting ? QStringLiteral("会议 · ") : QStringLiteral("协作 · "))
         + labels[static_cast<int>(state)];
     if (statusLabel_->text() != label)
@@ -1227,7 +1357,7 @@ void MainWindow::refreshSession()
     statusLabel_->style()->unpolish(statusLabel_);
     statusLabel_->style()->polish(statusLabel_);
     statusDetail_->setText(session_.detail());
-    memberLabel_->setText(QStringLiteral("%1 / 2 人").arg(session_.memberCount()));
+    memberLabel_->setText(QStringLiteral("%1 / %2 人").arg(session_.memberCount()).arg(meeting ? 4 : 2));
     peerLabel_->setText(session_.peerName().isEmpty() ? QStringLiteral("尚未加入") : session_.peerName());
     refreshMeetingParticipants();
     refreshShare();

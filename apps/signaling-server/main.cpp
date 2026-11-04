@@ -11,7 +11,7 @@ int main(int argc, char **argv)
     QCoreApplication::setApplicationName("zjdesk-server");
     QCoreApplication::setApplicationVersion(zjdesk::build::Version);
     QCommandLineParser parser;
-    parser.setApplicationDescription("ZJdesk two-person LAN signaling service");
+    parser.setApplicationDescription("ZJdesk LAN signaling service (four-person meetings, two-person assistance)");
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addOption({"listen", "Listen address (use 0.0.0.0 for LAN)", "address", "127.0.0.1"});

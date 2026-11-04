@@ -11,6 +11,60 @@ class SignalingTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void meetingRejectsLateScreenShare()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator a, b, c;
+        using RT = zjdesk::SessionCoordinator::RoomType;
+        QVERIFY(a.join(url, "late-share", "A", RT::Meeting));
+        QVERIFY(b.join(url, "late-share", "B", RT::Meeting));
+        QTRY_COMPARE(a.memberCount(), 2);
+        QVERIFY(c.join(url, "late-share", "C", RT::Meeting));
+        for (auto *peer : {&a, &b, &c}) QTRY_COMPARE(peer->memberCount(), 3);
+        QSignalSpy received(&a, &zjdesk::SessionCoordinator::negotiationReceived);
+        QVERIFY(b.sendNegotiation("share", {{"action", "start"}, {"streamId", "late-stream"}}));
+        QTRY_COMPARE(received.count(), 1);
+        QVERIFY(!a.screenActive());
+        QVERIFY(!a.receivingScreen());
+    }
+
+    void meetingFourMembersAndTargetedRelay()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator a, b, c, d, fifth;
+        using RT = zjdesk::SessionCoordinator::RoomType;
+        QVERIFY(a.join(url, "mesh", "A", RT::Meeting));
+        QVERIFY(b.join(url, "mesh", "B", RT::Meeting));
+        QTRY_COMPARE(a.memberCount(), 2);
+        QVERIFY(c.join(url, "mesh", "C", RT::Meeting));
+        QTRY_COMPARE(a.memberCount(), 3);
+        QVERIFY(d.join(url, "mesh", "D", RT::Meeting));
+        for (auto *session : {&a, &b, &c, &d}) QTRY_COMPARE(session->memberCount(), 4);
+        QVERIFY(fifth.join(url, "mesh", "E", RT::Meeting));
+        QTRY_COMPARE(fifth.state(), State::Failed);
+        QSignalSpy receivedA(&a, &zjdesk::SessionCoordinator::negotiationReceived);
+        QSignalSpy receivedB(&b, &zjdesk::SessionCoordinator::negotiationReceived);
+        QSignalSpy receivedC(&c, &zjdesk::SessionCoordinator::negotiationReceived);
+        QString target;
+        const auto members = d.conferencePeers();
+        for (auto it = members.cbegin(); it != members.cend(); ++it)
+            if (it.value() == "B") target = it.key();
+        QVERIFY(!target.isEmpty());
+        QVERIFY(d.sendNegotiation("offer", {{"targetPeerId", target}, {"sdp", "targeted"}}));
+        QTRY_COMPARE(receivedB.count(), 1);
+        QTest::qWait(100);
+        QVERIFY(receivedA.isEmpty()); QVERIFY(receivedC.isEmpty());
+        QCOMPARE(qvariant_cast<zjdesk::protocol::Message>(receivedB.first().first()).payload.value("sdp").toString(), "targeted");
+        c.leave();
+        for (auto *session : {&a, &b, &d}) QTRY_COMPARE(session->memberCount(), 3);
+        QVERIFY(c.join(url, "mesh", "C", RT::Meeting));
+        for (auto *session : {&a, &b, &c, &d}) QTRY_COMPARE(session->memberCount(), 4);
+    }
+
     void roomTypesIsolateIdenticalCodes()
     {
         zjdesk::RoomServer server;

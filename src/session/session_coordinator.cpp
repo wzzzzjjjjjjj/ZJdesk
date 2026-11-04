@@ -1,5 +1,6 @@
 #include "session_coordinator.h"
 #include <QJsonArray>
+#include <QCryptographicHash>
 #include <QJsonDocument>
 #include <QUuid>
 #include <QBuffer>
@@ -14,6 +15,28 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
     qRegisterMetaType<PreviewState>();
     qRegisterMetaType<RemoteCursor>();
     qRegisterMetaType<ConferenceState>();
+    meshDeadline_.setInterval(1000);
+    connect(&meshDeadline_, &QTimer::timeout, this, [this] {
+        for (const auto &id : meshDeadlines_.keys())
+        {
+            if (!meshDeadlines_.value(id).hasExpired()) continue;
+            meshDeadlines_.remove(id);
+            meshStatus_[id] = "failed";
+            meshPeers_.remove(id);
+            meetingMedia_.removePeer(id, conferenceEpoch_);
+            sendNegotiation("conference", {{"action", "stop"}, {"sessionId", meshSessionId(id)}, {"targetPeerId", id}});
+            emit conferencePeerFrame(id, {});
+        }
+        if (meshDeadlines_.isEmpty()) meshDeadline_.stop();
+        if (meshActive_ && meshPeers_.isEmpty())
+        {
+            clearConference(false);
+            conferenceState_ = ConferenceState::Failed;
+            conferenceDetail_ = QStringLiteral("会议成员连接超时");
+            emit conferenceChanged();
+        }
+        else if (meshActive_) updateMeshState();
+    });
     conferenceDeadline_.setSingleShot(true);
     connect(&conferenceDeadline_, &QTimer::timeout, this, [this] {
         clearConference(true);
@@ -59,6 +82,54 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
     });
     connect(&conference_, &ConferenceMedia::receivedAudio, this, [this](quint64 epoch, quint64 count, double peak) {
         if (epoch == conferenceEpoch_ && conferenceActive()) emit conferenceAudioReceived(count, peak);
+    });
+    connect(&meetingMedia_, &MeetingMedia::negotiationReady, this,
+        [this](quint64 epoch, const QString &id, const QString &type, QJsonObject payload) {
+            if (epoch != conferenceEpoch_ || !meshActive_ || !meshPeers_.contains(id)) return;
+            payload.insert("action", type); payload.insert("sessionId", meshSessionId(id)); payload.insert("targetPeerId", id);
+            sendNegotiation("conference", payload);
+        });
+    connect(&meetingMedia_, &MeetingMedia::statusChanged, this,
+        [this](quint64 epoch, const QString &status, const QString &detail) {
+            if (epoch != conferenceEpoch_) return;
+            if (status == "stopped") { conferenceCleanupPending_ = false; emit conferenceChanged(); return; }
+            if (!meshActive_) return;
+            if (status == "ready") { meshReady_ = true; syncConferencePeers(); }
+            else if (status == "failed")
+            {
+                clearConference(true); conferenceState_ = ConferenceState::Failed; conferenceDetail_ = detail;
+                emit conferenceChanged();
+            }
+        });
+    connect(&meetingMedia_, &MeetingMedia::peerStatusChanged, this,
+        [this](quint64 epoch, const QString &id, const QString &status) {
+            if (epoch != conferenceEpoch_ || !meshActive_ || !meshPeers_.contains(id)) return;
+            meshStatus_[id] = status;
+            if (status == "running" || status == "failed") meshDeadlines_.remove(id);
+            if (status == "failed")
+            {
+                sendNegotiation("conference", {{"action", "stop"}, {"sessionId", meshSessionId(id)}, {"targetPeerId", id}});
+                meshPeers_.remove(id); meetingMedia_.removePeer(id, epoch);
+                emit conferencePeerFrame(id, {});
+                if (meshPeers_.isEmpty()) { clearConference(false); return; }
+            }
+            updateMeshState();
+        });
+    connect(&meetingMedia_, &MeetingMedia::localFrame, this, [this](quint64 epoch, const QImage &image) {
+        if (epoch == conferenceEpoch_ && meshActive_) emit conferenceLocalFrame(image);
+    });
+    connect(&meetingMedia_, &MeetingMedia::remoteFrame, this,
+        [this](quint64 epoch, const QString &id, const QImage &image) {
+            if (epoch != conferenceEpoch_ || !meshPeers_.contains(id)) return;
+            emit conferencePeerFrame(id, image);
+            if (id == peerId_) emit conferenceRemoteFrame(image);
+        });
+    connect(&meetingMedia_, &MeetingMedia::receivedAudio, this,
+        [this](quint64 epoch, const QString &id, quint64 buffers, double peak) {
+            if (epoch == conferenceEpoch_ && meshPeers_.contains(id)) emit conferencePeerAudioReceived(id, buffers, peak);
+        });
+    connect(&meetingMedia_, &MeetingMedia::mixedAudio, this, [this](quint64 epoch, quint64 buffers, double peak) {
+        if (epoch == conferenceEpoch_ && meshActive_) emit conferenceAudioReceived(buffers, peak);
     });
     cursorTimer_.setInterval(16);
     cursorTimer_.setTimerType(Qt::PreciseTimer);
@@ -237,7 +308,7 @@ int SessionCoordinator::memberCount() const
 {
     if (state_ == State::WaitingForPeer)
         return 1;
-    return state_ == State::PeerAvailable ? 2 : 0;
+    return state_ == State::PeerAvailable ? conferencePeers_.size() + 1 : 0;
 }
 
 bool SessionCoordinator::join(const QUrl &url, const QString &roomId, const QString &name, RoomType type)
@@ -270,6 +341,8 @@ void SessionCoordinator::clearMembership()
     clearControl();
     peerControllable_ = false;
     peerMaximumFps_ = 0;
+    conferencePeers_.clear();
+    meshStatus_.clear(); meshHidden_.clear();
     ownPeerId_.clear();
     peerId_.clear();
     peerName_.clear();
@@ -409,15 +482,18 @@ void SessionCoordinator::stopAudioTest()
 
 bool SessionCoordinator::sendNegotiation(const QString &type, const QJsonObject &payload)
 {
+    auto routed = payload;
+    if (roomType_ == RoomType::Meeting && !routed.contains("targetPeerId") && !peerId_.isEmpty())
+        routed.insert("targetPeerId", peerId_);
     return state_ == State::PeerAvailable && protocol::isRelayType(type)
-           && signaling_.send({type, payload});
+           && signaling_.send({type, routed});
 }
 
 bool SessionCoordinator::startScreenShare(const QString &source, int targetFps)
 {
     if (targetFps != 0 && targetFps != 15 && targetFps != 30 && targetFps != 60)
         return false;
-    if (state_ != State::PeerAvailable || screenActive() || shareState_ == PreviewState::Stopping)
+    if (state_ != State::PeerAvailable || memberCount() > 2 || screenActive() || shareState_ == PreviewState::Stopping)
         return false;
     failedStreamId_.clear();
     if (!media_.environment().ready)
@@ -870,6 +946,7 @@ void SessionCoordinator::receiveShare(const protocol::Message &message)
     if (message.type == "share")
     {
         const auto action = message.payload.value("action").toString();
+        if (action == "start" && memberCount() > 2) return;
         if (action == "stop" && id == streamId_)
         {
             clearScreenShare(false);
@@ -916,6 +993,22 @@ bool SessionCoordinator::startConference()
 {
     if (roomType_ != RoomType::Meeting || state_ != State::PeerAvailable || conferenceActive() || !media_.environment().ready)
         return false;
+    if (conferenceAutoConnect_)
+    {
+        meshActive_ = true; meshReady_ = false;
+        conferenceId_ = "mesh";
+        conferenceMicMuted_ = !conferenceJoinMicrophoneEnabled_;
+        conferenceCameraHidden_ = !conferenceJoinCameraEnabled_;
+        conferenceSpeakerMuted_ = !conferenceJoinSpeakerEnabled_;
+        conferenceState_ = ConferenceState::Connecting;
+        conferenceDetail_ = QStringLiteral("正在连接会议成员音视频");
+        conferenceMediaPending_ = true;
+        ++conferenceEpoch_;
+        stopPreview(); stopAudioTest();
+        emit conferenceChanged();
+        startConferenceMediaWhenReady();
+        return true;
+    }
     conferenceId_ = QUuid::createUuid().toString(QUuid::Id128);
     conferenceState_ = ConferenceState::Calling;
     conferenceDetail_ = conferenceAutoConnect_ ? QStringLiteral("正在连接会议音视频")
@@ -972,6 +1065,11 @@ void SessionCoordinator::startConferenceMediaWhenReady()
     const auto released = [](PreviewState state) { return state == PreviewState::Stopped || state == PreviewState::Failed; };
     if (!released(previewState_) || !released(audioState_)) return;
     conferenceMediaPending_ = false;
+    if (meshActive_)
+    {
+        meetingMedia_.start(conferenceDevices_, conferenceEpoch_, conferenceMicMuted_, conferenceCameraHidden_, conferenceSpeakerMuted_);
+        return;
+    }
     conference_.start(conferenceOfferer_, conferenceDevices_, conferenceEpoch_,
         conferenceMicMuted_, conferenceCameraHidden_, conferenceSpeakerMuted_);
     const auto pending = conferencePendingSignals_; conferencePendingSignals_.clear();
@@ -997,8 +1095,13 @@ void SessionCoordinator::setConferenceMuted(bool microphone, bool camera, bool s
     conferenceSpeakerMuted_ = speaker;
     if (conferenceState_ == ConferenceState::Connecting || conferenceState_ == ConferenceState::Running)
     {
-        conference_.setMuted(microphone, camera, speaker, conferenceEpoch_);
-        if (cameraChanged)
+        if (meshActive_)
+        {
+            meetingMedia_.setMuted(microphone, camera, speaker, conferenceEpoch_);
+            if (cameraChanged) for (const auto &id : meshPeers_) sendMeshCamera(id);
+        }
+        else conference_.setMuted(microphone, camera, speaker, conferenceEpoch_);
+        if (cameraChanged && !meshActive_)
             sendNegotiation("conference", {{"action", "camera"}, {"sessionId", conferenceId_}, {"hidden", camera}});
     }
     if (cameraChanged) emit conferenceCameraChanged();
@@ -1010,7 +1113,19 @@ void SessionCoordinator::clearConference(bool notifyPeer)
 {
     if (!conferenceActive()) return;
     conferenceDeadline_.stop();
-    if (notifyPeer) sendNegotiation("conference", {{"action", "stop"}, {"sessionId", conferenceId_}});
+    const bool wasMesh = meshActive_;
+    meshDeadline_.stop();
+    meshDeadlines_.clear();
+    if (notifyPeer)
+    {
+        if (wasMesh)
+            for (const auto &id : conferencePeers_.keys())
+                sendNegotiation("conference", {{"action", "stop"}, {"sessionId", meshSessionId(id)}, {"targetPeerId", id}});
+        else sendNegotiation("conference", {{"action", "stop"}, {"sessionId", conferenceId_}});
+    }
+    meshActive_ = meshReady_ = false;
+    for (const auto &id : meshPeers_) emit conferencePeerFrame(id, {});
+    meshPeers_.clear(); meshStatus_.clear(); meshHidden_.clear(); meshPending_.clear();
     conferenceId_.clear();
     conferenceMediaPending_ = false;
     conferencePendingSignals_.clear();
@@ -1018,7 +1133,8 @@ void SessionCoordinator::clearConference(bool notifyPeer)
     conferenceState_ = ConferenceState::Idle;
     conferenceCameraHidden_ = conferenceRemoteCameraHidden_ = false;
     conferenceDetail_ = QStringLiteral("会议已结束");
-    conference_.stop(++conferenceEpoch_);
+    if (wasMesh) meetingMedia_.stop(++conferenceEpoch_);
+    else conference_.stop(++conferenceEpoch_);
     emit conferenceLocalFrame({}); emit conferenceRemoteFrame({});
     events_.append("conference", conferenceDetail_);
     emit conferenceChanged();
@@ -1028,6 +1144,7 @@ void SessionCoordinator::receiveConference(const QJsonObject &payload)
 {
     if (roomType_ != RoomType::Meeting)
         return;
+    if (conferenceAutoConnect_) { receiveMeshConference(payload); return; }
     const auto id = payload.value("sessionId").toString();
     const auto action = payload.value("action").toString();
     if (action == "start")
@@ -1077,15 +1194,87 @@ void SessionCoordinator::receiveConference(const QJsonObject &payload)
     }
 }
 
+QString SessionCoordinator::meshSessionId(const QString &id) const
+{
+    const auto pair = ownPeerId_ < id ? ownPeerId_ + ":" + id : id + ":" + ownPeerId_;
+    return QString::fromLatin1(QCryptographicHash::hash(pair.toUtf8(), QCryptographicHash::Sha256).toHex().left(32));
+}
+
+void SessionCoordinator::sendMeshCamera(const QString &id)
+{
+    sendNegotiation("conference", {{"action", "camera"}, {"sessionId", meshSessionId(id)},
+        {"targetPeerId", id}, {"hidden", conferenceCameraHidden_}});
+}
+
+void SessionCoordinator::syncConferencePeers()
+{
+    if (!meshActive_ || !meshReady_) return;
+    for (auto it = conferencePeers_.cbegin(); it != conferencePeers_.cend(); ++it)
+    {
+        const auto &id = it.key();
+        if (meshPeers_.contains(id) || meshStatus_.contains(id)) continue;
+        meshPeers_.insert(id); meshStatus_[id] = "connecting";
+        meshDeadlines_.insert(id, QDeadlineTimer(45000));
+        meshDeadline_.start();
+        meetingMedia_.addPeer(id, ownPeerId_ < id, conferenceEpoch_);
+        sendMeshCamera(id);
+    }
+    const auto pending = meshPending_; meshPending_.clear();
+    for (const auto &payload : pending) receiveMeshConference(payload);
+    if (meshActive_ && meshPeers_.isEmpty()) { clearConference(false); return; }
+    updateMeshState();
+}
+
+void SessionCoordinator::updateMeshState()
+{
+    if (!meshActive_) return;
+    int running = 0;
+    for (const auto &status : meshStatus_) if (status == "running") ++running;
+    conferenceState_ = running ? ConferenceState::Running : ConferenceState::Connecting;
+    conferenceDetail_ = QStringLiteral("已连接 %1 / %2 位远端成员").arg(running).arg(conferencePeers_.size());
+    emit conferenceChanged();
+}
+
+void SessionCoordinator::receiveMeshConference(const QJsonObject &payload)
+{
+    const auto id = payload.value("fromPeerId").toString();
+    if (!conferencePeers_.contains(id) || payload.value("sessionId").toString() != meshSessionId(id)) return;
+    const auto action = payload.value("action").toString();
+    if (action == "camera")
+    {
+        meshHidden_[id] = payload.value("hidden").toBool();
+        if (id == peerId_) conferenceRemoteCameraHidden_ = meshHidden_.value(id);
+        emit conferenceCameraChanged(); return;
+    }
+    if (action == "stop")
+    {
+        if (!meshActive_) return;
+        meshStatus_[id] = "stopped"; meshPeers_.remove(id);
+        meshDeadlines_.remove(id);
+        meetingMedia_.removePeer(id, conferenceEpoch_); emit conferencePeerFrame(id, {});
+        // Before ready, the other members have not been added to meshPeers_ yet.
+        if (meshReady_ && meshPeers_.isEmpty()) clearConference(false);
+        else updateMeshState();
+        return;
+    }
+    if (!meshActive_) return;
+    if (!meshReady_)
+    {
+        if (meshPending_.size() >= 768) { clearConference(true); return; }
+        meshPending_.append(payload); return;
+    }
+    if (meshPeers_.contains(id)) meetingMedia_.negotiate(id, action, payload, conferenceEpoch_);
+}
+
 void SessionCoordinator::receive(const protocol::Message &message)
 {
     if (message.type == "error")
     {
         const auto code = message.payload.value("code").toString();
-        if (code == "peer_unavailable" && state_ == State::WaitingForPeer)
+        if (code == "peer_unavailable" && (state_ == State::WaitingForPeer || state_ == State::PeerAvailable))
             return;
         if (code == "room_full")
-            fail(QStringLiteral("房间已满，当前版本最多支持两人"));
+            fail(roomType_ == RoomType::Meeting ? QStringLiteral("会议房间已满，最多支持四人") : QStringLiteral("协助房间已满，最多支持两人"));
         else
             fail(QStringLiteral("信令服务返回错误：") + code);
         return;
@@ -1101,26 +1290,58 @@ void SessionCoordinator::receive(const protocol::Message &message)
         deadline_.stop();
         ownPeerId_ = message.payload.value("peerId").toString();
         const auto peers = message.payload.value("peers").toArray();
+        for (const auto &value : peers)
+        {
+            const auto peer = value.toObject();
+            conferencePeers_.insert(peer.value("peerId").toString(), peer.value("name").toString());
+        }
         if (peers.isEmpty())
             changeState(State::WaitingForPeer, QStringLiteral("已加入房间，等待另一位成员"));
         else
         {
             peerId_ = peers.first().toObject().value("peerId").toString();
             peerName_ = peers.first().toObject().value("name").toString();
-            changeState(State::PeerAvailable, QStringLiteral("双方已入会，音视频尚未开启"));
+            changeState(State::PeerAvailable, roomType_ == RoomType::Meeting
+                ? QStringLiteral("会议成员已入会，正在连接音视频") : QStringLiteral("双方已入会，音视频尚未开启"));
         }
         emit membersChanged();
         return;
     }
-    if (message.type == "peer_joined" && state_ == State::WaitingForPeer)
+    if (message.type == "peer_joined" && (state_ == State::WaitingForPeer || state_ == State::PeerAvailable))
     {
-        peerId_ = message.payload.value("peerId").toString();
-        peerName_ = message.payload.value("name").toString();
-        changeState(State::PeerAvailable, QStringLiteral("双方已入会，音视频尚未开启"));
+        const auto id = message.payload.value("peerId").toString();
+        conferencePeers_.insert(id, message.payload.value("name").toString());
+        if (memberCount() > 2 && screenActive()) stopScreenShare();
+        if (peerId_.isEmpty()) { peerId_ = id; peerName_ = conferencePeers_.value(id); }
+        if (state_ == State::WaitingForPeer)
+            changeState(State::PeerAvailable, QStringLiteral("成员已入会"));
+        else if (meshActive_) syncConferencePeers();
         emit membersChanged();
     }
     else if (message.type == "peer_left" && state_ == State::PeerAvailable)
     {
+        const auto id = message.payload.value("peerId").toString();
+        if (!conferencePeers_.remove(id)) return;
+        if (meshActive_)
+        {
+            meshPeers_.remove(id); meshStatus_.remove(id); meshHidden_.remove(id);
+            meshDeadlines_.remove(id);
+            meetingMedia_.removePeer(id, conferenceEpoch_); emit conferencePeerFrame(id, {});
+            for (qsizetype i = meshPending_.size(); i-- > 0;)
+                if (meshPending_.at(i).value("fromPeerId").toString() == id) meshPending_.removeAt(i);
+        }
+        else if (id == peerId_) clearConference(false);
+        if (id == peerId_) { clearScreenShare(false); clearControl(); }
+        if (!conferencePeers_.isEmpty())
+        {
+            if (id == peerId_)
+            {
+                peerId_ = conferencePeers_.firstKey(); peerName_ = conferencePeers_.first();
+                emit conferenceRemoteFrame({});
+                conferenceRemoteCameraHidden_ = meshHidden_.value(peerId_);
+            }
+            updateMeshState(); emit membersChanged(); return;
+        }
         clearConference(false);
         clearScreenShare(false);
         clearControl();
@@ -1135,7 +1356,7 @@ void SessionCoordinator::receive(const protocol::Message &message)
     else if (protocol::isRelayType(message.type) && state_ == State::PeerAvailable)
     {
         // Do not accept an event from an old peer after a room membership change.
-        if (message.payload.value("fromPeerId").toString() == peerId_)
+        if (conferencePeers_.contains(message.payload.value("fromPeerId").toString()))
         {
             if (message.type == "control")
                 receiveControlRequest(message.payload);
@@ -1143,7 +1364,7 @@ void SessionCoordinator::receive(const protocol::Message &message)
                 receiveConference(message.payload);
             else
             {
-                receiveShare(message);
+                if (message.payload.value("fromPeerId").toString() == peerId_) receiveShare(message);
                 emit negotiationReceived(message);
             }
         }
