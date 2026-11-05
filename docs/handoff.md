@@ -1,5 +1,9 @@
 # ZJdesk 项目交接
 
+## 2026-11-05 应用与界面图标
+
+使用用户提供的 `D:\edgedown\ZJ创意图标设计.png` 为参考制作圆形透明图标，保存在 `packaging/zjdesk.png`，另转换七种尺寸的 `packaging/zjdesk.ico`。客户端窗口、任务栏及左上角品牌图标使用新图；Windows 客户端与自解压 EXE 嵌入 ICO，Linux AppImage 使用同一 PNG，移除旧 SVG。Windows 自解压缓存权限限制及验证边界见 [发布包说明](packaging.md)。
+
 ## 2026-11-05 两端有线优先、无线回退
 
 双端启动器通过 `select-network.ps1` 查询 Linux 的当前接口和 IPv4 地址，并枚举 Windows 当前可用的物理网卡与首选 IPv4 地址。Linux 按有线、Wi-Fi 排序，每个目标再按 Windows 有线、Wi-Fi 排序，逐对检查指定源地址和网卡的路由、绑定源地址的 SSH TCP 连通性。所选地址同时用于信令目标和两端媒体绑定，不依赖远控方向；未实现中途切网重连。默认 SSH 候选保留当前两张网卡的已知地址，支持手动指定 SSH / Linux / Windows 地址；虚拟接口仅显式指定时使用。网络选择在停止旧实例和编译之前完成，未改变原构建缓存、锁、失败标记和重启流程。验证及边界见 [有线 / 无线启动验证](validation-network-startup-20261105.md)。

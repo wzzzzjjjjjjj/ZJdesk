@@ -1,5 +1,15 @@
 # 发布包使用与构建
 
+## 应用图标（2026-11-05）
+
+`packaging/zjdesk.png` 是以用户提供的 `D:\edgedown\ZJ创意图标设计.png` 为参考生成的圆形透明图标；`packaging/zjdesk.ico` 为 16 / 24 / 32 / 48 / 64 / 128 / 256 像素格式转换。Qt 资源用于窗口及左上角品牌图标，Windows RC 与自解压编译器嵌入 ICO，AppImage 的桌面入口及 `.DirIcon` 使用 PNG。
+
+圆形版本的 Windows 与 Ubuntu 22.04 Release 构建及原生桌面 `workspaceFitsSmallWindowAndLongNames` 各 3 passed / 0 failed（含初始化 / 清理）；截图确认界面图标外侧透明。Windows 客户端和自解压包提取出的图标与 ICO 的 32 像素图一致且四角透明，Linux AppDir 的 PNG 与资源哈希一致。新版 ZIP 客户端 `--version` 退出 0、标准错误为空；AppImage 的 `--version` 和媒体插件检查通过。发布包哈希已核对。
+
+清除开发 SDK 路径后，Windows ZIP 内客户端 `--version` 退出 0、标准错误为空；AppImage 在真实 X11 会话的 `--version`、`--check-media` 通过。本次 Windows 自解压 EXE 在临时目录提交阶段报 `System.IO.IOException`（目录访问被拒），工作区继承了 `Everyone / DeleteSubdirectoriesAndFiles` 拒绝权限；未修改 ACL 或启动器，不能记为默认缓存自解压启动通过。可使用已验证的 ZIP 解压启动。日志及图标提取结果位于 `build/packaging-validation/icon-*`；本轮未重跑实际跨机远控或音视频。
+
+方形版本的集中补审读取了 Qt 初始化与窗口创建、RC 资源依赖、两端打包脚本及 AppRun / desktop 入口，未发现明确逻辑问题；圆形版本仅更新图片资源并重新构建。尚未进行干净系统验收，前述 EXE 自解压权限限制仍保留。
+
 ## 使用
 
 发布目录为 `dist/packages/`，版本取自根目录 CMakeLists.txt，目前为 0.4.5。

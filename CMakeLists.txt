@@ -73,6 +73,14 @@ if(ZJDESK_BUILD_CLIENT)
         apps/client/main.cpp apps/client/main_window.cpp apps/client/main_window.h
         apps/client/video_surface.cpp apps/client/video_surface.h)
     qt_add_resources(zjdesk styles PREFIX "/" FILES resources/styles.qss)
+    qt_add_resources(zjdesk branding PREFIX "/icons" BASE packaging FILES packaging/zjdesk.png)
+    if(WIN32)
+        enable_language(RC)
+        configure_file(packaging/zjdesk.rc.in generated/zjdesk.rc @ONLY)
+        set_source_files_properties("${CMAKE_BINARY_DIR}/generated/zjdesk.rc" PROPERTIES
+            OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/zjdesk.ico")
+        target_sources(zjdesk PRIVATE "${CMAKE_BINARY_DIR}/generated/zjdesk.rc")
+    endif()
     target_link_libraries(zjdesk PRIVATE zjdesk_client_core Qt6::Widgets Qt6::OpenGLWidgets)
     install(TARGETS zjdesk RUNTIME DESTINATION bin)
     qt_generate_deploy_app_script(TARGET zjdesk OUTPUT_SCRIPT deploy_script
@@ -118,6 +126,7 @@ if(BUILD_TESTING)
         target_link_libraries(zjdesk-ui-tests PRIVATE zjdesk_client_core zjdesk_signaling
             Qt6::Widgets Qt6::OpenGLWidgets Qt6::Test)
         qt_add_resources(zjdesk-ui-tests test_styles PREFIX "/" FILES resources/styles.qss)
+        qt_add_resources(zjdesk-ui-tests test_branding PREFIX "/icons" BASE packaging FILES packaging/zjdesk.png)
         add_test(NAME desktop COMMAND zjdesk-ui-tests -o "${CMAKE_BINARY_DIR}/test-results/desktop.xml,junitxml")
         set_tests_properties(desktop PROPERTIES TIMEOUT 90)
     endif()

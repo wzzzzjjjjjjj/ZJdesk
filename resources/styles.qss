@@ -5,7 +5,7 @@ QFrame#sidebar {
     background: qlineargradient(x1:0, y1:0, x2:0.5, y2:1, stop:0 #172535, stop:1 #0e1927);
     border: none;
 }
-QLabel#brandMark { color: #d5fff1; background: #236f66; border: 1px solid #39887c; border-radius: 10px; font-size: 18pt; font-weight: 700; }
+QLabel#brandMark { background: transparent; border: none; }
 QLabel#brand { color: #f4f8fc; font-size: 20pt; font-weight: 700; }
 QLabel#sidebarSubtitle { color: #8fa4b8; font-size: 9pt; padding-left: 3px; }
 QLabel#navCaption { color: #688297; font-size: 8pt; font-weight: 600; padding-left: 8px; }

@@ -108,7 +108,7 @@ for entry in manifest:
             (licenses / 'system').mkdir(exist_ok=True)
             shutil.copy2(notice, licenses / 'system' / (package + '.copyright'))
 (appdir / 'usr/share/bundled-libraries.txt').write_text('\n'.join(sorted(manifest)) + '\n')
-for name in ('AppRun', 'zjdesk.desktop', 'zjdesk.svg', 'zjdesk.png'):
+for name in ('AppRun', 'zjdesk.desktop', 'zjdesk.png'):
     shutil.copy2(root / 'packaging' / name, appdir / name)
 (appdir / 'AppRun').chmod(0o755)
 (appdir / '.DirIcon').symlink_to('zjdesk.png')

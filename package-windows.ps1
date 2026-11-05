@@ -38,7 +38,7 @@ Compress-Archive -Path "$stage/*" -DestinationPath $archive -CompressionLevel Op
 $compiler = "$env:WINDIR/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
 $executable = Join-Path $output "ZJdesk-$version-windows-x64.exe"
 $launcherSource = (Resolve-Path -LiteralPath "$PSScriptRoot/packaging/WindowsLauncher.cs").Path
-& $compiler /nologo /target:winexe /platform:x64 /optimize+ "/out:$executable" "/resource:$archive,payload.zip" /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /reference:System.Windows.Forms.dll $launcherSource
+& $compiler /nologo /target:winexe /platform:x64 /optimize+ "/out:$executable" "/win32icon:$PSScriptRoot/packaging/zjdesk.ico" "/resource:$archive,payload.zip" /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /reference:System.Windows.Forms.dll $launcherSource
 if ($LASTEXITCODE -ne 0) { throw 'EXE launcher compilation failed.' }
 $packageHashes = foreach ($package in (Get-ChildItem -LiteralPath $output -File | Where-Object { $_.Extension -in '.exe', '.zip', '.AppImage' } | Sort-Object Name)) {
     $stream = [System.IO.File]::OpenRead($package.FullName)

@@ -4,6 +4,7 @@
 #include <QCommandLineParser>
 #include <QFile>
 #include <QHostInfo>
+#include <QIcon>
 #include <QTimer>
 
 int main(int argc, char **argv)
@@ -12,6 +13,7 @@ int main(int argc, char **argv)
     QCoreApplication::setApplicationName("ZJdesk");
     QCoreApplication::setOrganizationName("ZJdesk");
     QCoreApplication::setApplicationVersion(zjdesk::build::Version);
+    QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/zjdesk.png")));
     QApplication::setStyle("Fusion");
     QFont font;
     font.setFamilies({"Microsoft YaHei UI", "Noto Sans CJK SC", "sans-serif"});

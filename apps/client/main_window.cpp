@@ -232,6 +232,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
 {
     Q_UNUSED(roomId) // Legacy launch argument; remote connections now use peer codes.
     setWindowTitle(QStringLiteral("ZJdesk · 跨平台协作工作台"));
+    setWindowIcon(QIcon(QStringLiteral(":/icons/zjdesk.png")));
     session_.setConferenceAutoConnect(true);
     resize(1280, 820);
     setMinimumSize(1040, 720);
@@ -249,9 +250,10 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     nav->setSpacing(8);
     auto *brandRow = new QHBoxLayout;
     brandRow->setSpacing(10);
-    auto *brandMark = text("Z", "brandMark");
+    auto *brandMark = text({}, "brandMark");
     brandMark->setAlignment(Qt::AlignCenter);
     brandMark->setFixedSize(34, 34);
+    brandMark->setPixmap(windowIcon().pixmap(QSize(34, 34), devicePixelRatioF()));
     brandRow->addWidget(brandMark);
     brandRow->addWidget(text("ZJdesk", "brand"));
     nav->addLayout(brandRow);
