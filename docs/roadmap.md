@@ -61,6 +61,8 @@
 
 ## 0.4 Windows 控制 Linux（当前）
 
+- 2026-11-05：远控改为在线 9 位数字码配对，不再手动入协作房间；设置可选择手动二次验证或校验码后自动授权，会议仍使用房间码。验证见 validation-remote-codes-20261105.md。
+
 - 按用户最新要求，先在 Linux 部署运行，两台电脑各启动一个客户端，先完成 Windows → Linux。
 - 已实现：同一 WebRTC 共享连接上的 DataChannel、Linux X11 / XTest 与 Windows SendInput、坐标映射和键鼠输入。
 - 已实现：Linux 本地确认、拒绝、双方撤销、失焦释放及房间 / 共享退出清理。

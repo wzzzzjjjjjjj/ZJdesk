@@ -24,6 +24,7 @@
 #include <QScrollArea>
 #include <QScreen>
 #include <QSettings>
+#include <QRegularExpressionValidator>
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QApplication>
@@ -228,6 +229,7 @@ QString cameraHintReason(const zjdesk::SessionCoordinator &session)
 MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QString &name,
                        QWidget *parent) : QMainWindow(parent)
 {
+    Q_UNUSED(roomId) // Legacy launch argument; remote connections now use peer codes.
     setWindowTitle(QStringLiteral("ZJdesk · 跨平台协作工作台"));
     session_.setConferenceAutoConnect(true);
     resize(1280, 820);
@@ -306,7 +308,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     titles->addWidget(pageSubtitle);
     header->addLayout(titles);
     header->addStretch();
-    statusLabel_ = text(QStringLiteral("未加入房间"), "statusBadge");
+    statusLabel_ = text(QStringLiteral("未连接"), "statusBadge");
     auto *statusEffect = new QGraphicsOpacityEffect(statusLabel_);
     statusEffect->setOpacity(1.0);
     statusLabel_->setGraphicsEffect(statusEffect);
@@ -349,23 +351,27 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     workspaceLayout->setSpacing(14);
 
     auto *connectionCard = card();
+    remoteCodeLabel_ = text(QStringLiteral("本机校验码：未在线"), "localRemoteCode");
+    remoteCodeLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    workspaceLayout->addWidget(remoteCodeLabel_);
     auto *connectionLayout = new QHBoxLayout(connectionCard);
     connectionLayout->setContentsMargins(20, 16, 20, 16);
     connectionLayout->setSpacing(14);
     serverEdit_ = new QLineEdit(serverUrl);
-    roomEdit_ = new QLineEdit(roomId);
+    roomEdit_ = new QLineEdit;
     nameEdit_ = new QLineEdit(name);
     serverEdit_->setObjectName("serverAddress");
-    roomEdit_->setObjectName("roomId");
+    roomEdit_->setObjectName("remoteCode");
     nameEdit_->setObjectName("displayName");
     serverEdit_->setPlaceholderText("ws://192.168.1.100:8765");
-    roomEdit_->setPlaceholderText(QStringLiteral("输入房间码"));
-    roomEdit_->setToolTip(QStringLiteral("1–32 位字母、数字、下划线或连字符，区分大小写"));
+    roomEdit_->setPlaceholderText(QStringLiteral("输入对方 9 位校验码"));
+    roomEdit_->setValidator(new QRegularExpressionValidator(QRegularExpression("[0-9]{9}"), roomEdit_));
+    roomEdit_->setToolTip(QStringLiteral("两端连接同一服务，输入对方显示的 9 位数字"));
     nameEdit_->setPlaceholderText(QStringLiteral("输入你的昵称"));
-    roomEdit_->setMaxLength(32);
+    roomEdit_->setMaxLength(9);
     nameEdit_->setMaxLength(40);
     const QList<QPair<QString, QLineEdit *>> fields = {
-        {QStringLiteral("服务地址"), serverEdit_}, {QStringLiteral("房间码"), roomEdit_},
+        {QStringLiteral("服务地址"), serverEdit_}, {QStringLiteral("对方校验码"), roomEdit_},
         {QStringLiteral("你的昵称"), nameEdit_}};
     for (const auto &field : fields)
     {
@@ -378,7 +384,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         column->addWidget(field.second);
         connectionLayout->addLayout(column, field.second == serverEdit_ ? 3 : 2);
     }
-    joinButton_ = new QPushButton(QStringLiteral("加入房间"));
+    joinButton_ = new QPushButton(QStringLiteral("连接对方"));
     joinButton_->setObjectName("primaryButton");
     joinButton_->setMinimumWidth(108);
     connectionLayout->addWidget(joinButton_, 0, Qt::AlignBottom);
@@ -409,7 +415,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     sessionLayout->setContentsMargins(18, 16, 18, 16);
     sessionLayout->setSpacing(8);
     auto *memberHeader = new QHBoxLayout;
-    memberHeader->addWidget(text(QStringLiteral("房间成员"), "sectionTitle"));
+    memberHeader->addWidget(text(QStringLiteral("连接设备"), "sectionTitle"));
     memberLabel_ = text(QStringLiteral("0 / 2 人"), "memberCount");
     memberHeader->addStretch();
     memberHeader->addWidget(memberLabel_);
@@ -421,7 +427,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     localName->setWordWrap(true);
     localName->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     members->addRow(text(QStringLiteral("本机"), "fieldLabel"), localName);
-    peerLabel_ = text(QStringLiteral("尚未加入"), "peerName");
+    peerLabel_ = text(QStringLiteral("尚未连接"), "peerName");
     peerLabel_->setWordWrap(true);
     peerLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     members->addRow(text(QStringLiteral("对方"), "fieldLabel"), peerLabel_);
@@ -456,7 +462,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     shareButton_ = new QPushButton(QStringLiteral("共享主屏幕"));
     shareButton_->setObjectName("shareButton");
     shareButton_->setMinimumWidth(120);
-    shareButton_->setToolTip(QStringLiteral("将整个主屏幕及鼠标指针发送给房间中的另一位成员"));
+    shareButton_->setToolTip(QStringLiteral("将整个主屏幕及鼠标指针发送给已连接的对方"));
     shareLabel_ = text(session_.shareDetail(), "shareStatus");
     shareLabel_->setWordWrap(true);
     sessionLayout->addWidget(text(QStringLiteral("远程协助"), "sectionTitle"));
@@ -510,6 +516,19 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     meetingSettings->setWindowTitle(QStringLiteral("设置"));
     meetingSettings->resize(660, 360);
     auto *settingsLayout = new QVBoxLayout(meetingSettings);
+    settingsLayout->addWidget(text(QStringLiteral("远程控制"), "sectionTitle"));
+    auto *requireApproval = new QCheckBox(QStringLiteral("需要二次验证（连接后手动点击允许）"));
+    requireApproval->setObjectName("requireRemoteApproval");
+    QSettings remotePreferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "remote-control");
+    requireApproval->setChecked(remotePreferences.value("requireApproval", true).toBool());
+    session_.setRequiresRemoteApproval(requireApproval->isChecked());
+    requireApproval->setToolTip(QStringLiteral("关闭后，知道本机校验码的人可直接控制本机并复制文件；下次请求生效"));
+    connect(requireApproval, &QCheckBox::toggled, this, [this](bool enabled) {
+        session_.setRequiresRemoteApproval(enabled);
+        QSettings preferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "remote-control");
+        preferences.setValue("requireApproval", enabled);
+    });
+    settingsLayout->addWidget(requireApproval);
     settingsLayout->addWidget(text(QStringLiteral("音视频设备"), "sectionTitle"));
     meetingServerEdit_ = new QLineEdit(serverUrl);
     meetingRoomEdit_ = new QLineEdit;
@@ -892,20 +911,34 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     connect(joinButton_, &QPushButton::clicked, this, [this] {
         using State = zjdesk::SessionCoordinator::State;
         if (session_.state() == State::Idle || session_.state() == State::Failed)
-            session_.join(QUrl(serverEdit_->text().trimmed()), roomEdit_->text().trimmed(), nameEdit_->text().trimmed());
+            startRemoteAccess();
+        else if (session_.remoteAccess() && session_.state() == State::WaitingForPeer)
+            session_.connectRemote(roomEdit_->text().trimmed());
+        else if (session_.remoteAccess() && session_.state() == State::PeerAvailable)
+            session_.disconnectRemote();
         else
+            session_.leave();
+    });
+    connect(roomEdit_, &QLineEdit::textChanged, this, &MainWindow::refreshSession);
+    connect(serverEdit_, &QLineEdit::textEdited, this, [this] {
+        if (session_.remoteAccess() && session_.state() == zjdesk::SessionCoordinator::State::WaitingForPeer)
             session_.leave();
     });
     connect(meetingJoinButton_, &QPushButton::clicked, this, [this, selectMeetingDevices] {
         using State = zjdesk::SessionCoordinator::State;
-        if (session_.state() == State::Idle || session_.state() == State::Failed)
+        if (session_.state() == State::Idle || session_.state() == State::Failed
+            || (session_.remoteAccess() && session_.state() == State::WaitingForPeer))
         {
             if (!selectMeetingDevices()) return;
+            if (session_.remoteAccess()) session_.leave();
             session_.join(QUrl(meetingServerEdit_->text().trimmed()), meetingRoomEdit_->text().trimmed(),
                 meetingNameEdit_->text().trimmed(), zjdesk::SessionCoordinator::RoomType::Meeting);
         }
         else
+        {
             session_.leave();
+            startRemoteAccess();
+        }
     });
     connect(nameEdit_, &QLineEdit::textChanged, findChild<QLabel *>("localName"), &QLabel::setText);
     connect(&session_, &zjdesk::SessionCoordinator::stateChanged, this, &MainWindow::refreshSession);
@@ -1329,21 +1362,26 @@ void MainWindow::refreshSession()
     using State = zjdesk::SessionCoordinator::State;
     const auto state = session_.state();
     const bool idle = state == State::Idle || state == State::Failed;
-    serverEdit_->setEnabled(idle);
-    roomEdit_->setEnabled(idle);
+    const bool remote = session_.remoteAccess();
+    const bool ready = remote && state == State::WaitingForPeer;
+    remoteCodeLabel_->setText(session_.remoteCode().isEmpty() ? QStringLiteral("本机校验码：未在线")
+        : QStringLiteral("本机校验码：%1").arg(session_.remoteCode()));
+    serverEdit_->setEnabled(idle || ready);
+    roomEdit_->setEnabled(idle || ready);
     nameEdit_->setEnabled(idle);
     meetingServerEdit_->setEnabled(idle);
-    meetingRoomEdit_->setEnabled(idle);
+    meetingRoomEdit_->setEnabled(idle || ready);
     meetingNameEdit_->setEnabled(idle);
     const bool meeting = session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting;
-    joinButton_->setEnabled(idle || !meeting);
-    meetingJoinButton_->setEnabled(idle || meeting);
-    joinButton_->setText(idle || meeting ? QStringLiteral("加入房间")
-        : state == State::Connecting || state == State::Joining ? QStringLiteral("取消连接") : QStringLiteral("离开房间"));
+    joinButton_->setEnabled(idle || (!meeting && !session_.remoteConnecting() && (!ready || (roomEdit_->hasAcceptableInput()
+        && roomEdit_->text() != session_.remoteCode()))));
+    meetingJoinButton_->setEnabled(idle || meeting || ready);
+    joinButton_->setText(idle ? QStringLiteral("获取校验码") : ready ? QStringLiteral("连接对方")
+        : state == State::Connecting || state == State::Joining ? QStringLiteral("取消连接") : QStringLiteral("断开连接"));
     meetingJoinButton_->setText(idle || !meeting ? QStringLiteral("加入会议")
         : state == State::Connecting || state == State::Joining ? QStringLiteral("取消连接") : QStringLiteral("离开会议"));
-    const QString labels[] = {QStringLiteral("未加入房间"), QStringLiteral("正在连接"), QStringLiteral("正在入会"),
-        QStringLiteral("等待成员"), meeting ? QStringLiteral("成员已入会") : QStringLiteral("双方已入会"), QStringLiteral("连接失败")};
+    const QString labels[] = {QStringLiteral("未连接"), QStringLiteral("正在连接"), QStringLiteral("正在连接"),
+        remote ? QStringLiteral("远控已在线") : QStringLiteral("等待成员"), meeting ? QStringLiteral("成员已入会") : QStringLiteral("已连接对方"), QStringLiteral("连接失败")};
     const auto label = (idle ? QString() : meeting ? QStringLiteral("会议 · ") : QStringLiteral("协作 · "))
         + labels[static_cast<int>(state)];
     if (statusLabel_->text() != label)
@@ -1358,14 +1396,19 @@ void MainWindow::refreshSession()
     statusLabel_->style()->polish(statusLabel_);
     statusDetail_->setText(session_.detail());
     memberLabel_->setText(QStringLiteral("%1 / %2 人").arg(session_.memberCount()).arg(meeting ? 4 : 2));
-    peerLabel_->setText(session_.peerName().isEmpty() ? QStringLiteral("尚未加入") : session_.peerName());
+    peerLabel_->setText(session_.peerName().isEmpty() ? QStringLiteral("尚未连接") : session_.peerName());
     refreshMeetingParticipants();
     refreshShare();
     if (state == State::PeerAvailable)
         video_->setParticipant(session_.peerName(), QStringLiteral("对方已就绪，可请求远程控制"));
     else
-        video_->setParticipant(QStringLiteral("等待另一位成员"),
-                              state == State::Failed ? session_.detail() : QStringLiteral("双方加入同一房间后，这里将显示远端画面"));
+        video_->setParticipant(QStringLiteral("等待远程连接"),
+                              state == State::Failed ? session_.detail() : QStringLiteral("输入对方校验码连接后，这里将显示远端画面"));
+}
+
+void MainWindow::startRemoteAccess()
+{
+    session_.startRemoteAccess(QUrl(serverEdit_->text().trimmed()), nameEdit_->text().trimmed());
 }
 
 void MainWindow::exportEvents()

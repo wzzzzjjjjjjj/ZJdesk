@@ -9,6 +9,7 @@ if ((Get-Content -Raw -LiteralPath (Join-Path $projectRoot '直接启动.bat')) 
 $testRoot = Join-Path $projectRoot ('build\launcher-tests.' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path (Join-Path $testRoot 'build\windows-release\bin') | Out-Null
 Copy-Item -LiteralPath (Join-Path $projectRoot 'start-both.ps1') -Destination $testRoot
+Copy-Item -LiteralPath (Join-Path $projectRoot 'sync-source.sh') -Destination $testRoot
 @'
 param($Archive, [switch]$Verify)
 Write-Host "SNAPSHOT_VERIFY=$Verify"
@@ -34,6 +35,11 @@ Write-Output "LAUNCH_ADDRESS=$env:ZJDESK_WEBRTC_LOCAL_ADDRESS;SERVER=$ServerUrl"
 @'
 param($Scenario)
 $ErrorActionPreference = 'Stop'
+$sha = [Security.Cryptography.SHA256]::Create()
+try {
+    $key = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(([Environment]::MachineName + '|' + $PSScriptRoot).ToLowerInvariant())) | ForEach-Object { $_.ToString('x2') })
+} finally { $sha.Dispose() }
+$expectedCacheRoot = '/home/orbbec/ZJdesk/zjdesk/build/start-both-cache.' + $key.Substring(0, 16)
 function Find-NetRoute {
     param($RemoteIPAddress, $ErrorAction)
     if ($RemoteIPAddress -ne '10.11.42.4') { throw 'Route lookup used the wrong Linux address.' }
@@ -89,13 +95,22 @@ function ssh {
         if ($Scenario -in @('PortBusy', 'RestartPortBusy')) { $global:LASTEXITCODE = 20 }
         if ($Scenario -eq 'RestartPortProbeFail') { $global:LASTEXITCODE = 22 }
     }
-    if ($args[-1] -like '*mktemp -d*') { '/home/orbbec/ZJdesk/zjdesk/build/start-both-source.Abc12345' }
+    if ($command -like '*mktemp -d*') { throw 'The launcher must reuse its build directory.' }
+    if ($command -like 'bash *.sync.sh*') {
+        if (-not $command.Contains("${expectedCacheRoot}.sync.sh")) { throw 'Cache directory is not stable for this workspace.' }
+        Write-Host 'SOURCE_SYNC_OK'
+        if ($Scenario -eq 'SyncFail') { $global:LASTEXITCODE = 1 }
+    }
     if ($args[-1] -like '*bash ./build.sh*') {
         if ($args[-1] -notlike '*--deploy --skip-tests*') { throw 'Linux build must deploy and skip tests.' }
         Write-Host 'LINUX_BUILD_OK'
         if ($Scenario -eq 'LinuxFail') { $global:LASTEXITCODE = 1 }
     }
-    if ($args[-1] -like 'if test -f *') { 'LEGACY' }
+    if ($args[-1] -like 'if test -f *') {
+        if ($Scenario -eq 'CachedDirect') { $expectedCacheRoot }
+        elseif ($Scenario -eq 'OtherCacheRecord') { '/home/orbbec/ZJdesk/zjdesk/build/start-both-cache.0000000000000000' }
+        else { 'LEGACY' }
+    }
 }
 function scp { $global:LASTEXITCODE = 0 }
 function powershell.exe {
@@ -124,7 +139,7 @@ if ($Scenario -eq 'RestartActiveBuild') {
 }
 $parameters = @{ SkipBuild = $true }
 if ($Scenario -like 'Restart*') { $parameters.ForceRestart = $true }
-if ($Scenario -in @('BuildSuccess', 'LinuxFail', 'WindowsFail', 'RestartBuild')) { $parameters.SkipBuild = $false }
+if ($Scenario -in @('BuildSuccess', 'LinuxFail', 'WindowsFail', 'RestartBuild', 'SyncFail')) { $parameters.SkipBuild = $false }
 if ($Scenario -eq 'Explicit') { $parameters.WindowsAddress = '10.11.42.99' }
 if ($Scenario -eq 'StaleExplicit') { $parameters.WindowsAddress = '10.11.42.3' }
 & (Join-Path $PSScriptRoot 'start-both.ps1') @parameters
@@ -145,6 +160,9 @@ $cases = @(
     @{ Name = 'NoRoute'; ExitCode = 1; Expected = 'Could not select a Windows media address for Linux 10.11.42.4.'; BeforeSsh = $true },
     @{ Name = 'PortBusy'; ExitCode = 1; Expected = 'Linux port 8765 is already in use. Close the existing Linux client/server and retry.' },
     @{ Name = 'BuildSuccess'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'SyncFail'; ExitCode = 1; Expected = 'Could not synchronize the source snapshot on Linux.' },
+    @{ Name = 'CachedDirect'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'OtherCacheRecord'; ExitCode = 1; Expected = 'Invalid Linux build record.' },
     @{ Name = 'LinuxFail'; ExitCode = 1; Expected = 'Linux build or deployment failed.' },
     @{ Name = 'WindowsFail'; ExitCode = 1; Expected = 'Windows build or deployment failed.' },
     @{ Name = 'RestartIdle'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
@@ -167,8 +185,10 @@ foreach ($case in $cases) {
     $output = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $testRoot 'driver.ps1') $case.Name 2>&1) -join "`n"
     $exitCode = $LASTEXITCODE
     $unexpectedSsh = $case.BeforeSsh -and $output.Contains('SSH_CALLED')
-    $invalidBuildFlow = ($case.Name -in @('BuildSuccess', 'RestartBuild') -and (-not $output.Contains('LINUX_BUILD_OK') -or -not $output.Contains('WINDOWS_BUILD_OK'))) -or
-        ($case.Name -in @('LinuxFail', 'WindowsFail') -and $output.Contains('LAUNCH_ADDRESS='))
+    $invalidBuildFlow = ($case.Name -in @('BuildSuccess', 'RestartBuild') -and (-not $output.Contains('SOURCE_SYNC_OK') -or -not $output.Contains('LINUX_BUILD_OK') -or -not $output.Contains('WINDOWS_BUILD_OK'))) -or
+        ($case.Name -in @('LinuxFail', 'WindowsFail', 'SyncFail') -and $output.Contains('LAUNCH_ADDRESS='))
+    if ($case.Name -in @('LinuxFail', 'WindowsFail', 'SyncFail') -and
+        -not (Test-Path -LiteralPath (Join-Path $testRoot 'build/start-both/build-incomplete'))) { $invalidBuildFlow = $true }
     $invalidRestart = ($case.Name -like 'Restart*' -and $case.ExitCode -eq 1 -and $output.Contains('LAUNCH_ADDRESS=')) -or
         ($case.Name -in @('RestartWindowsFail', 'RestartWaitFail', 'RestartPreflightFail', 'RestartActiveBuild') -and $output.Contains('LINUX_STOPPED')) -or
         ($case.Name -eq 'RestartPreflightFail' -and $output.Contains('WINDOWS_STOPPED=')) -or

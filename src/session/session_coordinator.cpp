@@ -234,6 +234,13 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
             shareDetail_ = detail;
             events_.append("screen", detail);
             emit shareChanged();
+            if (remoteAccess_ && state_ == State::PeerAvailable && status == "stopped")
+            {
+                sendNegotiation("control", {{"action", "capabilities"},
+                    {"control", input_.available() && media_.environment().ready},
+                    {"maximumFps", ScreenShare::displayMaximumFps()}});
+                requestRemoteControlWhenReady();
+            }
         });
     connect(&screen_, &ScreenShare::frameReady, this, [this](quint64 epoch, const QImage &image) {
         if (epoch == shareEpoch_ && screenActive())
@@ -276,10 +283,17 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
             emit previewFrame(image);
     });
     deadline_.setSingleShot(true);
-    connect(&deadline_, &QTimer::timeout, this, [this] { fail(QStringLiteral("入会超时，请检查信令服务")); });
+    connect(&deadline_, &QTimer::timeout, this, [this] { fail(QStringLiteral("连接超时，请检查信令服务")); });
     connect(&signaling_, &SignalingClient::connected, this, [this] {
         if (state_ != State::Connecting)
             return;
+        if (remoteAccess_)
+        {
+            changeState(State::Joining, QStringLiteral("正在获取本机校验码"));
+            if (!signaling_.send({"register_remote", {{"name", name_}}}))
+                fail(QStringLiteral("无法注册远程控制服务"));
+            return;
+        }
         changeState(State::Joining, QStringLiteral("已连接，正在加入房间"));
         if (!signaling_.send({"join", {{"roomId", roomId_}, {"name", name_},
             {"roomType", roomType_ == RoomType::Meeting ? "meeting" : "assistance"}}}))
@@ -315,6 +329,7 @@ bool SessionCoordinator::join(const QUrl &url, const QString &roomId, const QStr
 {
     if (state_ != State::Idle && state_ != State::Failed)
         return false;
+    remoteAccess_ = false;
     roomType_ = type;
     if (!url.isValid() || (url.scheme() != "ws" && url.scheme() != "wss")
         || url.host().isEmpty() || !url.userInfo().isEmpty()
@@ -331,6 +346,44 @@ bool SessionCoordinator::join(const QUrl &url, const QString &roomId, const QStr
     deadline_.start(8000);
     signaling_.open(url);
     return true;
+}
+
+bool SessionCoordinator::startRemoteAccess(const QUrl &url, const QString &name)
+{
+    if (state_ != State::Idle && state_ != State::Failed) return false;
+    if (!url.isValid() || (url.scheme() != "ws" && url.scheme() != "wss")
+        || url.host().isEmpty() || !url.userInfo().isEmpty() || !protocol::isPeerNameValid(name))
+    {
+        fail(QStringLiteral("请填写有效的服务地址和昵称"));
+        return false;
+    }
+    remoteAccess_ = true;
+    roomType_ = RoomType::Assistance;
+    remoteCode_.clear();
+    name_ = name.trimmed();
+    changeState(State::Connecting, QStringLiteral("正在连接远程控制服务"));
+    deadline_.start(8000);
+    signaling_.open(url);
+    return true;
+}
+
+bool SessionCoordinator::connectRemote(const QString &code)
+{
+    if (!remoteAccess_ || remoteCode_.isEmpty() || state_ != State::WaitingForPeer
+        || remoteConnecting_ || !protocol::isRemoteCodeValid(code) || code == remoteCode_) return false;
+    if (!signaling_.send({"connect_remote", {{"code", code}}})) return false;
+    remoteConnecting_ = true;
+    deadline_.start(8000);
+    detail_ = QStringLiteral("正在连接对方电脑");
+    emit stateChanged(state_);
+    return true;
+}
+
+void SessionCoordinator::disconnectRemote()
+{
+    if (!remoteAccess_ || remoteCode_.isEmpty()) return;
+    stopControl();
+    signaling_.send({"disconnect_remote", {}});
 }
 
 void SessionCoordinator::clearMembership()
@@ -358,7 +411,11 @@ void SessionCoordinator::leave()
     deadline_.stop();
     signaling_.close();
     clearMembership();
-    changeState(State::Idle, QStringLiteral("尚未加入房间"));
+    remoteCode_.clear();
+    remoteDialPending_ = false;
+    remoteConnecting_ = false;
+    remoteAccess_ = false;
+    changeState(State::Idle, QStringLiteral("连接已断开"));
     emit membersChanged();
 }
 
@@ -371,7 +428,8 @@ void SessionCoordinator::changeState(State state, const QString &detail)
     if (state == State::PeerAvailable)
     {
         sendNegotiation("control", {{"action", "capabilities"},
-            {"control", roomType_ == RoomType::Assistance && input_.available() && media_.environment().ready},
+            {"control", roomType_ == RoomType::Assistance && input_.available() && media_.environment().ready
+                && (!remoteAccess_ || shareState_ != PreviewState::Stopping)},
             {"maximumFps", ScreenShare::displayMaximumFps()}});
         if (conferenceAutoConnect_ && roomType_ == RoomType::Meeting)
             startConference();
@@ -387,6 +445,9 @@ void SessionCoordinator::fail(const QString &reason)
     deadline_.stop();
     signaling_.close();
     clearMembership();
+    remoteCode_.clear();
+    remoteDialPending_ = false;
+    remoteConnecting_ = false;
     changeState(State::Failed, reason);
     emit membersChanged();
 }
@@ -555,6 +616,12 @@ bool SessionCoordinator::canRequestControl() const
         && peerControllable_ && remoteState_ == RemoteState::Idle
         && ((!screenActive() && shareState_ != PreviewState::Stopping)
             || (receivingScreen_ && shareState_ == PreviewState::Running && controlChannelReady_));
+}
+
+void SessionCoordinator::requestRemoteControlWhenReady()
+{
+    if (remoteAccess_ && remoteDialPending_ && canRequestControl() && requestControl())
+        remoteDialPending_ = false;
 }
 
 bool SessionCoordinator::requestControl()
@@ -921,6 +988,7 @@ void SessionCoordinator::receiveControlRequest(const QJsonObject &message)
         const double fps = message.value("maximumFps").toDouble();
         peerMaximumFps_ = std::isfinite(fps) && fps >= 5 && fps <= 240 && fps == int(fps) ? int(fps) : 0;
         emit remoteChanged();
+        requestRemoteControlWhenReady();
     }
     else if (action == "request" && protocol::isRoomIdValid(requestId)
         && input_.available() && media_.environment().ready && remoteState_ == RemoteState::Idle
@@ -933,6 +1001,8 @@ void SessionCoordinator::receiveControlRequest(const QJsonObject &message)
         remoteDetail_ = peerName_ + QStringLiteral(" 请求控制本机（含双方文件复制），请选择允许或拒绝");
         controlDeadline_.start(30000);
         emit remoteChanged();
+        if (remoteAccess_ && !requireRemoteApproval_)
+            grantControl();
     }
     else if (action == "revoke" && !controlRequestId_.isEmpty() && requestId == controlRequestId_)
         stopControl();
@@ -1268,9 +1338,48 @@ void SessionCoordinator::receiveMeshConference(const QJsonObject &payload)
 
 void SessionCoordinator::receive(const protocol::Message &message)
 {
+    if (remoteAccess_ && message.type == "remote_registered" && state_ == State::Joining)
+    {
+        const auto code = message.payload.value("code").toString();
+        if (!protocol::isRemoteCodeValid(code)) return fail(QStringLiteral("服务返回了无效校验码"));
+        remoteCode_ = code;
+        deadline_.stop();
+        changeState(State::WaitingForPeer, QStringLiteral("已在线，可输入对方校验码连接"));
+        return;
+    }
+    if (remoteAccess_ && message.type == "remote_paired" && state_ == State::WaitingForPeer)
+    {
+        remoteConnecting_ = false;
+        roomId_ = message.payload.value("roomId").toString();
+        remoteDialPending_ = message.payload.value("controller").toBool();
+        state_ = State::Joining;
+        receive({"joined", message.payload});
+        return;
+    }
+    if (remoteAccess_ && message.type == "remote_ready")
+    {
+        deadline_.stop();
+        remoteConnecting_ = false;
+        clearScreenShare(false);
+        clearMembership();
+        remoteDialPending_ = false;
+        changeState(State::WaitingForPeer, QStringLiteral("已在线，可输入对方校验码连接"));
+        emit membersChanged();
+        return;
+    }
     if (message.type == "error")
     {
         const auto code = message.payload.value("code").toString();
+        if (remoteAccess_ && state_ == State::WaitingForPeer && code == "not_joined") return;
+        if (remoteAccess_ && (code == "remote_unavailable" || code == "remote_busy" || code == "invalid_remote_code"))
+        {
+            deadline_.stop();
+            remoteConnecting_ = false;
+            detail_ = code == "remote_busy" ? QStringLiteral("对方正在连接其他电脑，请稍后重试")
+                : QStringLiteral("校验码无效或对方不在线，请检查后重试");
+            emit stateChanged(state_);
+            return;
+        }
         if (code == "peer_unavailable" && (state_ == State::WaitingForPeer || state_ == State::PeerAvailable))
             return;
         if (code == "room_full")
@@ -1302,7 +1411,8 @@ void SessionCoordinator::receive(const protocol::Message &message)
             peerId_ = peers.first().toObject().value("peerId").toString();
             peerName_ = peers.first().toObject().value("name").toString();
             changeState(State::PeerAvailable, roomType_ == RoomType::Meeting
-                ? QStringLiteral("会议成员已入会，正在连接音视频") : QStringLiteral("双方已入会，音视频尚未开启"));
+                ? QStringLiteral("会议成员已入会，正在连接音视频") : remoteAccess_
+                ? QStringLiteral("已连接对方，等待远控授权") : QStringLiteral("双方已入会，音视频尚未开启"));
         }
         emit membersChanged();
         return;

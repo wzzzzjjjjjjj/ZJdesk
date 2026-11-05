@@ -33,6 +33,7 @@ private:
         QString room;
         QString name;
         qint64 lastPong = 0;
+        QString remoteCode;
     };
     void acceptConnection();
     void receive(QWebSocket *socket, const QString &text);
@@ -44,6 +45,7 @@ private:
     QWebSocketServer server_;
     QHash<QWebSocket *, Peer> peers_;
     QHash<QString, QList<QWebSocket *>> rooms_;
+    QHash<QString, QWebSocket *> remoteCodes_;
     QTimer heartbeat_;
     QElapsedTimer clock_;
 };
