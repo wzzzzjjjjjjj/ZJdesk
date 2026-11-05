@@ -40,6 +40,8 @@ public:
     bool remoteConnecting() const { return remoteConnecting_; }
     bool requiresRemoteApproval() const { return requireRemoteApproval_; }
     void setRequiresRemoteApproval(bool enabled) { requireRemoteApproval_ = enabled; }
+    bool setRemoteCodePolicy(const QString &policy, const QString &identity);
+    QString remoteCodePolicy() const { return remoteCodePolicy_; }
     bool sendNegotiation(const QString &type, const QJsonObject &payload);
     State state() const { return state_; }
     RoomType roomType() const { return roomType_; }
@@ -160,6 +162,7 @@ private:
     SignalingClient signaling_;
     bool remoteAccess_ = false, remoteDialPending_ = false, remoteConnecting_ = false, requireRemoteApproval_ = true;
     QString remoteCode_;
+    QString remoteCodePolicy_ = "startup", registeredRemoteCodePolicy_ = "startup", remoteIdentity_;
     EventLog events_;
     ControlSession control_;
     FileClipboard fileClipboard_;

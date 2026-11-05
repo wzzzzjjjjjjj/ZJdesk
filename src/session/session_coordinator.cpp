@@ -290,7 +290,14 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
         if (remoteAccess_)
         {
             changeState(State::Joining, QStringLiteral("正在获取本机校验码"));
-            if (!signaling_.send({"register_remote", {{"name", name_}}}))
+            QJsonObject registration{{"name", name_}};
+            registeredRemoteCodePolicy_ = remoteCodePolicy_;
+            if (remoteCodePolicy_ != "startup")
+            {
+                registration.insert("codePolicy", remoteCodePolicy_);
+                registration.insert("identity", remoteIdentity_);
+            }
+            if (!signaling_.send({"register_remote", registration}))
                 fail(QStringLiteral("无法注册远程控制服务"));
             return;
         }
@@ -345,6 +352,15 @@ bool SessionCoordinator::join(const QUrl &url, const QString &roomId, const QStr
     changeState(State::Connecting, QStringLiteral("正在连接信令服务"));
     deadline_.start(8000);
     signaling_.open(url);
+    return true;
+}
+
+bool SessionCoordinator::setRemoteCodePolicy(const QString &policy, const QString &identity)
+{
+    if (policy != "startup" && policy != "three_days" && policy != "never") return false;
+    if (policy != "startup" && !protocol::isRemoteIdentityValid(identity)) return false;
+    remoteCodePolicy_ = policy;
+    remoteIdentity_ = identity;
     return true;
 }
 
@@ -1338,11 +1354,16 @@ void SessionCoordinator::receiveMeshConference(const QJsonObject &payload)
 
 void SessionCoordinator::receive(const protocol::Message &message)
 {
-    if (remoteAccess_ && message.type == "remote_registered" && state_ == State::Joining)
+    if (remoteAccess_ && message.type == "remote_registered"
+        && (state_ == State::Joining || state_ == State::WaitingForPeer))
     {
         const auto code = message.payload.value("code").toString();
         if (!protocol::isRemoteCodeValid(code)) return fail(QStringLiteral("服务返回了无效校验码"));
+        if (registeredRemoteCodePolicy_ != "startup"
+            && message.payload.value("codePolicy").toString() != registeredRemoteCodePolicy_)
+            return fail(QStringLiteral("信令服务不支持所选校验码策略，请更新服务端"));
         remoteCode_ = code;
+        if (state_ == State::WaitingForPeer) { emit stateChanged(state_); return; }
         deadline_.stop();
         changeState(State::WaitingForPeer, QStringLiteral("已在线，可输入对方校验码连接"));
         return;
@@ -1370,6 +1391,10 @@ void SessionCoordinator::receive(const protocol::Message &message)
     if (message.type == "error")
     {
         const auto code = message.payload.value("code").toString();
+        if (remoteAccess_ && code == "remote_identity_in_use")
+            return fail(QStringLiteral("本机固定校验码已被另一个实例使用，请关闭重复实例后重试"));
+        if (remoteAccess_ && code == "remote_registry_unavailable")
+            return fail(QStringLiteral("信令服务无法保存校验码，请检查服务端配置目录的读写权限"));
         if (remoteAccess_ && state_ == State::WaitingForPeer && code == "not_joined") return;
         if (remoteAccess_ && (code == "remote_unavailable" || code == "remote_busy" || code == "invalid_remote_code"))
         {

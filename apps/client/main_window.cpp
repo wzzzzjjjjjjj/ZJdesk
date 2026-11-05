@@ -30,6 +30,7 @@
 #include <QApplication>
 #include <QKeyEvent>
 #include <QVBoxLayout>
+#include <QUuid>
 
 namespace
 {
@@ -529,6 +530,50 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         preferences.setValue("requireApproval", enabled);
     });
     settingsLayout->addWidget(requireApproval);
+    auto *codePolicy = new QComboBox;
+    codePolicy->setObjectName("remoteCodePolicy");
+    codePolicy->addItem(QStringLiteral("每次打开变化"), "startup");
+    codePolicy->addItem(QStringLiteral("3天变一次"), "three_days");
+    codePolicy->addItem(QStringLiteral("从不变"), "never");
+    codePolicy->setToolTip(QStringLiteral("下次上线生效；3天按连续72小时计算，连接期间到期会延后至断开后更换"));
+    auto identity = remotePreferences.value("identity").toString();
+    if (!zjdesk::protocol::isRemoteIdentityValid(identity))
+    {
+        identity = QUuid::createUuid().toString(QUuid::Id128);
+        remotePreferences.setValue("identity", identity);
+    }
+    codePolicy->setCurrentIndex(qMax(0, codePolicy->findData(remotePreferences.value("codePolicy", "startup"))));
+    auto *codePolicyError = text(QStringLiteral("校验码设置保存失败，请检查本机配置目录的读写权限"), "remoteCodePolicyError");
+    codePolicyError->setWordWrap(true);
+    codePolicyError->hide();
+    remotePreferences.sync();
+    if (remotePreferences.status() != QSettings::NoError)
+    {
+        codePolicy->setCurrentIndex(0);
+        remotePreferences.setValue("codePolicy", "startup");
+        codePolicyError->show();
+    }
+    session_.setRemoteCodePolicy(codePolicy->currentData().toString(), identity);
+    connect(codePolicy, &QComboBox::currentIndexChanged, this, [this, codePolicy, codePolicyError, identity] {
+        QSettings preferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "remote-control");
+        preferences.setValue("identity", identity);
+        preferences.setValue("codePolicy", codePolicy->currentData());
+        preferences.sync();
+        if (preferences.status() != QSettings::NoError)
+        {
+            preferences.setValue("codePolicy", session_.remoteCodePolicy());
+            const QSignalBlocker blocker(codePolicy);
+            codePolicy->setCurrentIndex(codePolicy->findData(session_.remoteCodePolicy()));
+            codePolicyError->show();
+            return;
+        }
+        session_.setRemoteCodePolicy(codePolicy->currentData().toString(), identity);
+        codePolicyError->hide();
+    });
+    auto *codePolicyForm = new QFormLayout;
+    codePolicyForm->addRow(QStringLiteral("校验码变化"), codePolicy);
+    settingsLayout->addLayout(codePolicyForm);
+    settingsLayout->addWidget(codePolicyError);
     settingsLayout->addWidget(text(QStringLiteral("音视频设备"), "sectionTitle"));
     meetingServerEdit_ = new QLineEdit(serverUrl);
     meetingRoomEdit_ = new QLineEdit;
