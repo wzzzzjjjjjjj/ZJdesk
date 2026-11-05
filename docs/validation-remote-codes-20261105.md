@@ -42,3 +42,27 @@ Windows 11 / MSVC2022 x64 与 Ubuntu 22.04 / GCC 11.4，Qt 6.8.3 / GStreamer 1.2
 最终两端 Release 构建部署通过；Windows core / signaling 2/2（10.59 秒），Linux core / signaling 2/2（5.37 秒）。含两种停止顺序与此前五项专项的两端各 9 项通过、0 跳过（Windows 5801 ms，Linux 1004 ms）。Windows 客户端构建 / 部署 SHA-256 均为 `81450BF9C192BAD24A2E23BFCF5FB8D1C106B64E451BEECCE3CB02A091058DB2`。新日志为 `build/remote-code-stop-order-{build,check}-{windows,linux}.log`、`build/remote-code-stop-order-green-{windows,linux}.txt`。
 
 该修复限协调层的就绪通告与请求触发，未修改媒体实现，未重复完整媒体套件；真实双机快速重连、系统输入与 OpenGL 呈现仍未验收。原始 Linux 检出与运行客户端均未改动或重启。
+
+### 远控放大画面隐藏本机码与缩小按钮
+
+新增断言先复现放大后本机码仍可见；随后将本机码加入原有全屏隐藏 / 恢复列表，并移除协作画面的缩小按钮创建及其连接，保留 Esc 恢复。会议画面的放大 / 缩小逻辑未改动。
+
+Windows 与 Ubuntu 22.04 X11 均完成 Release 构建；三个界面专项（远控 Esc 恢复、全屏尺寸 / 像素 / 归一化坐标 / 覆盖控件隐藏、四人会议放大恢复）各 5 项通过，含初始化 / 清理，分别 11482 ms / 8074 ms。使用原生桌面与 OpenGL，未用 offscreen；合成画面不代表真实双机远控验收。Linux 的全屏用例保留普通窗口，避免 GNOME 将测试专用 Tool 窗口限制在普通尺寸。
+
+日志为 `build/packaging-validation/fullscreen-before.txt`、`build/packaging-validation/fullscreen-final.txt` 与 `build/packaging-validation/linux-fullscreen-final.txt`。Windows 原构建 EXE 正在运行，链接因文件占用失败，故在 `build/fullscreen-release-source` 隔离构建并更新部署 / 发布包；保留原运行进程，用户需启动新版包才会看到改动。未操作系统输入或重跑真实音视频。
+
+### Linux 设置页设备文字重叠
+
+按用户截图在 Ubuntu 22.04 X11 原生桌面复现：设置窗口的初始高度不足以容纳样式应用后的完整控件，下拉框与下方“入会后默认开启”复选框相交。新增 `meetingSettingsDeviceRowsDoNotOverlap`，修复前设备间距断言失败。只增加设备卡片的最小高度仍会挤压相邻卡片，因此最终在设置窗口完成样式和字体初始化后，用整个窗口的内容建议高度作为最小高度。默认开关、设备选择和设置持久化逻辑未改。
+
+回归将窗口请求高度压到 1，检查系统按最小高度扩展后，三列设备下拉框与复选框间距足够、文字容纳完整、设置各区域均在窗口内且互不相交。与入会默认开关保存、小窗口布局、远控 Esc 恢复、远控全屏像素 / 输入坐标及四人会议放大恢复一起运行，两端各 6 个用例通过（含初始化 / 清理各 8 项）：Windows 15550 ms，Ubuntu 5475 ms。Ubuntu 另以 `QT_SCALE_FACTOR=1.5` 和 `2` 各运行布局用例，均通过；已目视检查原生窗口截图。
+
+最终日志为 `build/packaging-validation/ui-settings-fullscreen-final-windows.txt`、`build/packaging-validation/ui-settings-fullscreen-final-linux.txt`、`build/packaging-validation/settings-final-{1.5x,2x}.txt`。截图为 `build/packaging-validation/ui-settings-device-rows-{1x,1.5x,2x}.png`。两端重新构建 Release 并更新 Windows EXE / ZIP 和 Linux AppImage，未主动结束或重启用户客户端；新功能需启动新版包。本轮使用原生桌面 / OpenGL 和合成画面，未重复真实双机远控、系统输入或音视频验收。
+
+最终 Windows EXE 清除 SDK 路径且不指定缓存目录执行 `--version`，退出 0、标准错误为空；AppImage 清除 SDK 路径后 `--version` 与所需媒体插件检查均退出 0。启动冒烟检查不代表新增实机媒体验收。
+
+### 本轮界面集中补审
+
+逐项复核本轮差异、设置创建与设备刷新、样式 / 字体初始化顺序、远控全屏进入与 Esc 恢复、校验码状态刷新以及 `VideoSurface` 按钮调用方。未发现新的明确逻辑问题：校验码刷新仅更新文字，不会重新显示全屏隐藏的控件；远控画布不再创建缩小按钮，会议控件仍使用原有独立按钮；设置约束不修改设备和默认开关状态。
+
+补充设置窗口最小宽度的数据行，覆盖默认宽度和最小宽度下各区域的边界 / 间距。Windows 两行通过（含初始化 / 清理共 4 项，5510 ms），Ubuntu 普通缩放、150% 和 200% 各两行通过（分别 243 / 253 / 176 ms），并目视检查 200% 最小宽度截图。日志为 `build/packaging-validation/settings-review-windows.txt`、`build/packaging-validation/settings-review-width.txt`、`build/packaging-validation/settings-review-{1.5x,2x}.txt`。本次补审仅增加测试覆盖和记录，应用代码及已交付包未变，未重复真实双机或音视频验收。

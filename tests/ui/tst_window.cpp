@@ -796,6 +796,54 @@ sys.stdout.buffer.write(data)
         preferences.clear();
     }
 
+    void meetingSettingsDeviceRowsDoNotOverlap_data()
+    {
+        QTest::addColumn<int>("width");
+        QTest::newRow("normal") << 660;
+        QTest::newRow("minimum") << 1;
+    }
+
+    void meetingSettingsDeviceRowsDoNotOverlap()
+    {
+        QFETCH(int, width);
+        MainWindow window("ws://127.0.0.1:8765", {}, "Tester");
+        auto *settings = window.findChild<QWidget *>("meetingSettings");
+        QVERIFY(settings);
+        settings->resize(width, 1);
+        settings->setAttribute(Qt::WA_ShowWithoutActivating);
+        settings->show();
+        QVERIFY(QTest::qWaitForWindowExposed(settings));
+        QVERIFY(QDir().mkpath("output"));
+        QVERIFY(settings->grab().save(width == 660 ? "output/ui-settings-device-rows.png"
+                                                   : "output/ui-settings-device-rows-minimum.png"));
+        for (const auto &device : {QStringLiteral("Camera"), QStringLiteral("Microphone"), QStringLiteral("Speaker")})
+        {
+            auto *combo = window.findChild<QComboBox *>("conference" + device);
+            auto *check = window.findChild<QCheckBox *>("join" + device + "Enabled");
+            QVERIFY(combo && check && combo->isVisible() && check->isVisible());
+            const QRect comboRect(combo->mapTo(settings, QPoint()), combo->size());
+            const QRect checkRect(check->mapTo(settings, QPoint()), check->size());
+            QVERIFY2(comboRect.bottom() + 6 <= checkRect.top(), qPrintable(
+                QString("%1: combo y=%2 height=%3 hint=%4 min=%5; checkbox y=%6 height=%7 hint=%8; card height=%9 hint=%10")
+                    .arg(device).arg(comboRect.y()).arg(comboRect.height()).arg(combo->sizeHint().height())
+                    .arg(combo->minimumHeight()).arg(checkRect.y()).arg(checkRect.height())
+                    .arg(check->sizeHint().height()).arg(combo->parentWidget()->height())
+                    .arg(combo->parentWidget()->sizeHint().height())));
+            QVERIFY2(check->height() >= check->fontMetrics().height(), qPrintable(device));
+            QVERIFY2(check->width() >= check->sizeHint().width(), qPrintable(device));
+        }
+        QList<QRect> occupied;
+        for (auto *widget : settings->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly))
+        {
+            if (!widget->isVisible())
+                continue;
+            QVERIFY(settings->rect().contains(widget->geometry()));
+            for (const auto &rect : occupied)
+                QVERIFY2(!rect.intersects(widget->geometry()), qPrintable(widget->objectName()));
+            occupied.append(widget->geometry());
+        }
+    }
+
     void meetingJoinDefaultsPersist()
     {
         MainWindow window("ws://127.0.0.1:8765", "demo", "Tester");
@@ -1810,10 +1858,17 @@ sys.stdout.buffer.write(data)
     void expandedVideoKeepsSurfaceAndRestoresWindow()
     {
         MainWindow window("ws://127.0.0.1:8765", "demo", "Viewer");
+#ifdef Q_OS_WIN
+        window.setWindowFlag(Qt::Tool);
+        window.setWindowFlag(Qt::WindowDoesNotAcceptFocus);
+        window.setAttribute(Qt::WA_ShowWithoutActivating);
+#endif
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
         auto *surface = window.findChild<VideoSurface *>("videoSurface");
         auto *expand = window.findChild<QPushButton *>("expandVideoButton");
+        auto *code = window.findChild<QLabel *>("localRemoteCode");
+        QVERIFY(code && code->isVisible());
         const auto normalSize = surface->size();
         const auto normalGeometry = window.geometry();
         QImage frame(window.screen()->size() * window.screen()->devicePixelRatio(), QImage::Format_RGB32);
@@ -1828,6 +1883,9 @@ sys.stdout.buffer.write(data)
         expand->click();
         QTRY_VERIFY(window.isFullScreen());
         QVERIFY(!expand->isVisible());
+        QVERIFY(!code->isVisible());
+        auto *shrink = surface->findChild<QPushButton *>("expandFrameButton");
+        QVERIFY(!shrink || !shrink->isVisible());
         QTRY_VERIFY(surface->width() > normalSize.width() && surface->height() > normalSize.height());
         QCOMPARE(window.findChild<VideoSurface *>("videoSurface"), surface);
         surface->setControlEnabled(true);
@@ -1849,16 +1907,18 @@ sys.stdout.buffer.write(data)
         QTRY_VERIFY(!window.isFullScreen());
         QTRY_COMPARE(window.geometry(), normalGeometry);
         QVERIFY(expand->isVisible());
+        QVERIFY(code->isVisible());
         QVERIFY(window.findChild<QPushButton *>("primaryButton")->isVisible());
         expand->click();
         QTRY_VERIFY(window.isFullScreen());
         QVERIFY(!expand->isVisible());
-        auto *shrink = surface->findChild<QPushButton *>("expandFrameButton");
-        QVERIFY(shrink && shrink->isVisible());
-        QCOMPARE(shrink->text(), QStringLiteral("缩小"));
-        shrink->click();
+        QVERIFY(!code->isVisible());
+        shrink = surface->findChild<QPushButton *>("expandFrameButton");
+        QVERIFY(!shrink || !shrink->isVisible());
+        QTest::keyClick(surface, Qt::Key_Escape);
         QTRY_VERIFY(!window.isFullScreen());
         QVERIFY(expand->isVisible());
+        QVERIFY(code->isVisible());
     }
 
     void controlSurfaceRejectsLetterboxAndReleasesOnFocusLoss()

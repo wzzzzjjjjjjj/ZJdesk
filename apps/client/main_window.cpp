@@ -622,6 +622,9 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     auto *closeSettings = new QPushButton(QStringLiteral("完成"));
     settingsLayout->addWidget(closeSettings, 0, Qt::AlignRight);
     connect(closeSettings, &QPushButton::clicked, meetingSettings, &QDialog::hide);
+    meetingSettings->ensurePolished();
+    // Keep the styled device rows from being compressed below their full content height.
+    meetingSettings->setMinimumHeight(meetingSettings->sizeHint().height());
     auto *views = new QHBoxLayout;
     views->setSpacing(14);
     auto *localConference = new VideoSurface;
@@ -881,10 +884,9 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     footer->addWidget(text(QString("ZJdesk %1").arg(zjdesk::build::Version), "footer"));
     contentLayout->addWidget(footerWidget);
     rootLayout->addWidget(content, 1);
-    normalWidgets_ = {sidebar, headerWidget, connectionCard, sessionScroll, stageHeader,
+    normalWidgets_ = {sidebar, headerWidget, remoteCodeLabel_, connectionCard, sessionScroll, stageHeader,
         deviceActionsCard, footerWidget};
     connect(expandButton_, &QPushButton::toggled, this, &MainWindow::expandVideo);
-    connect(video_, &VideoSurface::expandRequested, this, [this] { expandButton_->setChecked(false); });
     for (auto *surface : QList<VideoSurface *>{meetingLocalVideo_, meetingShareVideo_} + meetingRemoteVideos_)
     {
         surface->setExpandable(true);
@@ -1230,8 +1232,6 @@ void MainWindow::refreshShare()
 
 void MainWindow::expandVideo(bool expanded)
 {
-    video_->setExpanded(expanded);
-    video_->setExpandable(expanded);
     session_.sendRemoteInput({{"kind", "release"}});
     for (auto *widget : normalWidgets_)
         widget->setVisible(!expanded);
