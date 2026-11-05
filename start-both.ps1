@@ -1,6 +1,6 @@
 param(
-    [string]$LinuxSsh = 'orbbec@10.11.47.137',
-    [string]$LinuxAddress = '10.11.42.4',
+    [string[]]$LinuxSsh = @('orbbec@10.11.42.4', 'orbbec@10.11.47.137'),
+    [string]$LinuxAddress = '',
     [string]$LinuxRoot = '/home/orbbec/ZJdesk/zjdesk',
     [string]$WindowsAddress = '',
     [string]$Display = ':1',
@@ -9,6 +9,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
+. (Join-Path $PSScriptRoot 'select-network.ps1')
 $logDir = Join-Path $PSScriptRoot 'build\start-both'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $tempDir = Join-Path $logDir 'temp'
@@ -39,13 +40,11 @@ function Stop-WindowsZjdeskInstances {
 }
 try {
     Write-Host 'Checking Linux SSH and display...'
-    if (-not $WindowsAddress) {
-        $WindowsAddress = Find-NetRoute -RemoteIPAddress $LinuxAddress -ErrorAction Stop |
-            Where-Object { $_.IPAddress } | Select-Object -First 1 -ExpandProperty IPAddress
-        if (-not $WindowsAddress) { throw "Could not select a Windows media address for Linux $LinuxAddress. Pass -WindowsAddress explicitly." }
-    }
-    if (-not (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $WindowsAddress })) { throw "Windows media address $WindowsAddress is unavailable." }
-    Write-Host "Media addresses: Windows $WindowsAddress; Linux $LinuxAddress"
+    $network = Resolve-ZjdeskNetwork -LinuxSsh $LinuxSsh -LinuxAddress $LinuxAddress -WindowsAddress $WindowsAddress
+    $LinuxSsh = $network.LinuxSsh
+    $LinuxAddress = $network.LinuxAddress
+    $WindowsAddress = $network.WindowsAddress
+    Write-Host "Media addresses: Windows $WindowsAddress ($($network.WindowsInterface), $($network.WindowsKind)); Linux $LinuxAddress ($($network.Interface), $($network.Kind)); SSH $LinuxSsh"
     & ssh -o BatchMode=yes -o ConnectTimeout=8 $LinuxSsh "test -d '$LinuxRoot' && test -r /run/user/1000/gdm/Xauthority && ip -4 -o addr show | grep -Fq ' $LinuxAddress/'"
     if ($LASTEXITCODE -ne 0) { throw 'Linux SSH, desktop, project directory or media address is unavailable.' }
     try {

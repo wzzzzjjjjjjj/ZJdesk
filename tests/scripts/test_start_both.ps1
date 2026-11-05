@@ -9,6 +9,16 @@ if ((Get-Content -Raw -LiteralPath (Join-Path $projectRoot '直接启动.bat')) 
 $testRoot = Join-Path $projectRoot ('build\launcher-tests.' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path (Join-Path $testRoot 'build\windows-release\bin') | Out-Null
 Copy-Item -LiteralPath (Join-Path $projectRoot 'start-both.ps1') -Destination $testRoot
+Copy-Item -LiteralPath (Join-Path $projectRoot 'select-network.ps1') -Destination $testRoot
+# Replace only the real socket operation; selection and SSH fallback run unchanged.
+@'
+function Test-ZjdeskTcpPort {
+    param($Address, $LocalAddress)
+    if (-not $LocalAddress) { throw 'Reachability must use the chosen Windows source address.' }
+    if ($Scenario -eq 'WindowsWiredBlocked' -and $LocalAddress -eq '10.11.42.57') { return $false }
+    return $Scenario -ne 'NoReachable' -and -not ($Scenario -eq 'WiredBlocked' -and $Address -eq '10.11.42.4')
+}
+'@ | Add-Content -Encoding UTF8 -LiteralPath (Join-Path $testRoot 'select-network.ps1')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'sync-source.sh') -Destination $testRoot
 @'
 param($Archive, [switch]$Verify)
@@ -41,21 +51,40 @@ try {
 } finally { $sha.Dispose() }
 $expectedCacheRoot = '/home/orbbec/ZJdesk/zjdesk/build/start-both-cache.' + $key.Substring(0, 16)
 function Find-NetRoute {
-    param($RemoteIPAddress, $ErrorAction)
-    if ($RemoteIPAddress -ne '10.11.42.4') { throw 'Route lookup used the wrong Linux address.' }
+    param($RemoteIPAddress, $LocalIPAddress, $InterfaceIndex, $ErrorAction)
+    if ($RemoteIPAddress -notin @('10.11.42.4', '10.11.47.137', '10.11.42.8')) { throw 'Route lookup used the wrong Linux address.' }
     [pscustomobject]@{ DestinationPrefix = '10.11.42.0/24'; NextHop = '0.0.0.0' }
-    if ($Scenario -ne 'NoRoute') {
+    if ($Scenario -ne 'NoRoute' -and -not ($Scenario -eq 'WindowsWiredNoRoute' -and $LocalIPAddress -eq '10.11.42.57')) {
         $address = '10.11.42.57'
+        if ($RemoteIPAddress -eq '10.11.47.137') { $address = '10.11.48.95' }
         if ($Scenario -eq 'DhcpChanged') { $address = '10.11.42.58' }
+        if ($Scenario -eq 'WindowsDefaultRouteWifi') { $address = '10.11.48.95' }
+        if ($Scenario -eq 'WindowsVirtualOnly') { $address = '100.100.100.100' }
+        if ($LocalIPAddress) { $address = $LocalIPAddress }
         [pscustomobject]@{ IPAddress = $address }
     }
 }
 function Get-NetIPAddress {
     param($AddressFamily, $ErrorAction)
-    [pscustomobject]@{ IPAddress = '100.100.100.100' }
-    [pscustomobject]@{ IPAddress = '10.11.42.57' }
-    [pscustomobject]@{ IPAddress = '10.11.42.58' }
-    [pscustomobject]@{ IPAddress = '10.11.42.99' }
+    [pscustomobject]@{ IPAddress = '100.100.100.100'; InterfaceIndex = 30; AddressState = 'Preferred'; SkipAsSource = $false }
+    $address = if ($Scenario -eq 'DhcpChanged') { '10.11.42.58' } else { '10.11.42.57' }
+    if ($Scenario -notin @('WindowsWirelessOnly', 'BothWirelessOnly')) {
+        [pscustomobject]@{ IPAddress = $address; InterfaceIndex = 15; AddressState = 'Preferred'; SkipAsSource = $false }
+    }
+    [pscustomobject]@{ IPAddress = '10.11.48.95'; InterfaceIndex = 22; AddressState = 'Preferred'; SkipAsSource = $false }
+    [pscustomobject]@{ IPAddress = '10.11.42.99'; InterfaceIndex = 15; AddressState = 'Preferred'; SkipAsSource = $true }
+}
+function Get-NetAdapter {
+    param([switch]$Physical, $ErrorAction)
+    if (-not $Physical) { throw 'Automatic selection must exclude virtual Windows adapters.' }
+    if ($Scenario -eq 'WindowsVirtualOnly') { return }
+    # Wi-Fi first, even when the system default route prefers it.
+    [pscustomobject]@{ Name = 'WLAN'; ifIndex = 22; Status = 'Up'; NdisPhysicalMedium = 9 }
+    if ($Scenario -notin @('WindowsWirelessOnly', 'BothWirelessOnly')) {
+        $status = if ($Scenario -eq 'WindowsDisconnected') { 'Disconnected' } else { 'Up' }
+        $medium = if ($Scenario -eq 'WindowsUnspecifiedEthernet') { 0 } else { 14 }
+        [pscustomobject]@{ Name = 'Ethernet'; ifIndex = 15; Status = $status; NdisPhysicalMedium = $medium; MediaType = '802.3' }
+    }
 }
 function Get-Process {
     param($Name, $ErrorAction)
@@ -84,6 +113,22 @@ function ssh {
     $global:LASTEXITCODE = 0
     Write-Host 'SSH_CALLED'
     $command = $args[-1]
+    if ($command -like 'ip -4 -o addr*') {
+        if ($Scenario -eq 'SshUnavailable' -or ($Scenario -in @('WirelessOnly', 'BothWirelessOnly') -and $args[-2] -eq 'orbbec@10.11.42.4')) {
+            $global:LASTEXITCODE = 255
+            return
+        }
+        # Deliberately list Wi-Fi first in the preference test.
+        if ($Scenario -in @('WirelessOnly', 'BothWirelessOnly', 'WiredBlocked', 'WiredPreferred', 'ExplicitWireless', 'StaleLinux')) {
+            "wireless`twlp0s20f3`t10.11.47.137"
+        }
+        if ($Scenario -eq 'VirtualOnly') { "other`ttailscale0`t100.87.60.58" }
+        if ($Scenario -notin @('WirelessOnly', 'BothWirelessOnly', 'VirtualOnly')) {
+            $address = if ($Scenario -eq 'LinuxDhcpChanged') { '10.11.42.8' } else { '10.11.42.4' }
+            "wired`tenp0s31f6`t$address"
+        }
+        return
+    }
     if ($command -like 'test -d *' -and $Scenario -eq 'RestartPreflightFail') { $global:LASTEXITCODE = 1 }
     if ($command -like '*pkill -KILL*') {
         if (-not $command.Contains("pkill -KILL -u `$uid -x 'zjdesk|zjdesk-server'")) { throw 'Linux shutdown must select exact application names and the SSH user.' }
@@ -142,6 +187,9 @@ if ($Scenario -like 'Restart*') { $parameters.ForceRestart = $true }
 if ($Scenario -in @('BuildSuccess', 'LinuxFail', 'WindowsFail', 'RestartBuild', 'SyncFail')) { $parameters.SkipBuild = $false }
 if ($Scenario -eq 'Explicit') { $parameters.WindowsAddress = '10.11.42.99' }
 if ($Scenario -eq 'StaleExplicit') { $parameters.WindowsAddress = '10.11.42.3' }
+if ($Scenario -eq 'ExplicitWireless') { $parameters.LinuxAddress = '10.11.47.137' }
+if ($Scenario -eq 'WindowsExplicitWireless') { $parameters.WindowsAddress = '10.11.48.95' }
+if ($Scenario -eq 'StaleLinux') { $parameters.LinuxAddress = '10.11.42.3' }
 & (Join-Path $PSScriptRoot 'start-both.ps1') @parameters
 if ($Scenario -eq 'RestartLegacyLock') {
     $holder.EndInvoke($holderResult)
@@ -157,7 +205,25 @@ $cases = @(
     @{ Name = 'DhcpChanged'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.58;SERVER=ws://10.11.42.4:8765' },
     @{ Name = 'Explicit'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.99;SERVER=ws://10.11.42.4:8765' },
     @{ Name = 'StaleExplicit'; ExitCode = 1; Expected = 'Windows media address 10.11.42.3 is unavailable.'; BeforeSsh = $true },
-    @{ Name = 'NoRoute'; ExitCode = 1; Expected = 'Could not select a Windows media address for Linux 10.11.42.4.'; BeforeSsh = $true },
+    @{ Name = 'NoRoute'; ExitCode = 1; Expected = 'No reachable Linux media address with a Windows route.' },
+    @{ Name = 'WiredPreferred'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'WirelessOnly'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.47.137:8765' },
+    @{ Name = 'WiredBlocked'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.47.137:8765' },
+    @{ Name = 'LinuxDhcpChanged'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.8:8765' },
+    @{ Name = 'ExplicitWireless'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.47.137:8765' },
+    @{ Name = 'WindowsDefaultRouteWifi'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'WindowsWirelessOnly'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.48.95;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'WindowsWiredBlocked'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.48.95;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'WindowsVirtualOnly'; ExitCode = 1; Expected = 'No reachable Linux media address with a Windows route.' },
+    @{ Name = 'WindowsWiredNoRoute'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.48.95;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'WindowsDisconnected'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.48.95;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'WindowsUnspecifiedEthernet'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'WindowsExplicitWireless'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.48.95;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'BothWirelessOnly'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.48.95;SERVER=ws://10.11.47.137:8765' },
+    @{ Name = 'StaleLinux'; ExitCode = 1; Expected = 'Linux media address 10.11.42.3 is unavailable.' },
+    @{ Name = 'NoReachable'; ExitCode = 1; Expected = 'No reachable Linux media address with a Windows route.' },
+    @{ Name = 'SshUnavailable'; ExitCode = 1; Expected = 'Could not query Linux network addresses over SSH.' },
+    @{ Name = 'VirtualOnly'; ExitCode = 1; Expected = 'No reachable Linux media address with a Windows route.' },
     @{ Name = 'PortBusy'; ExitCode = 1; Expected = 'Linux port 8765 is already in use. Close the existing Linux client/server and retry.' },
     @{ Name = 'BuildSuccess'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
     @{ Name = 'SyncFail'; ExitCode = 1; Expected = 'Could not synchronize the source snapshot on Linux.' },

@@ -233,18 +233,22 @@ bash ./run.sh
 Windows 继续复用 `build/windows-release`；Linux 按 Windows 机器和工作树路径复用 `build/start-both-cache.<hash>` 独立目录。同步包括未提交源码，按内容校验，仅更新变更文件并清理已删除的源码，保留编译缓存和部署目录，Linux 原项目源码保持原样。首次使用新缓存需要完整编译，后续仅编译变化及其依赖；Linux 需要 `rsync`。已有的旧快照目录保留。
 双击 `直接启动.bat` 会跳过构建、测试和部署，直接使用两端已有的 Release 构建；代码更新后请先重新构建两端。
 这两个入口使用 `start-both.ps1` 中配置的机器地址、SSH 和 Linux 桌面环境。
-Windows 媒体地址默认按到 Linux 媒体地址的路由自动选择，适应本机 DHCP 地址变化；需要固定网卡时可向 `start-both.ps1` 传入 `-WindowsAddress '本机IPv4地址'`。`构建启动.bat` 自动传入 `-ForceRestart`，先强制结束 Windows 上的 `zjdesk.exe` / `zjdesk-server.exe`，以及 Linux SSH 用户名下的 `zjdesk` / `zjdesk-server` 旧实例，再检查 8765 端口并继续构建启动。无法结束进程或端口仍被其他程序占用时停止并报错。`直接启动.bat` 保持原行为，需先关闭旧实例。
+`start-both.ps1` 启动时通过 SSH 查询 Linux 当前地址，优先选择可达的有线接口，没有可达有线地址时回退 Wi-Fi；Windows 同样优先选择当前可用的物理有线接口，不能到达所选 Linux 地址时回退 Wi-Fi。逐对检查源地址、网卡路由及绑定源地址的 TCP 连通性，随后信令和两端媒体使用同一组地址，不再固定旧 IP。Docker / VPN 等虚拟接口不参与自动选择，仍可手动指定。两端的选择不依赖谁是控制方；只在启动时选择，切换网络后需要重新启动连接。
+
+默认 SSH 候选为 `orbbec@10.11.42.4` 和 `orbbec@10.11.47.137`，需预先配置免密登录并核对主机密钥；如果两端 DHCP 地址均变化或换电脑，传入 `-LinuxSsh '用户名@当前可达地址'`。有一个候选可登录时，会查询到其他网卡的新地址。需要固定网卡时传入 `-LinuxAddress 'Linux当前IPv4地址'` / `-WindowsAddress 'Windows当前IPv4地址'`；显式地址失效时报错，避免静默改用其他接口。验证范围见 [有线 / 无线启动验证](docs/validation-network-startup-20261105.md)。
+
+`构建启动.bat` 自动传入 `-ForceRestart`，先强制结束 Windows 上的 `zjdesk.exe` / `zjdesk-server.exe`，以及 Linux SSH 用户名下的 `zjdesk` / `zjdesk-server` 旧实例，再检查 8765 端口并继续构建启动。无法结束进程或端口仍被其他程序占用时停止并报错。`直接启动.bat` 保持原行为，需先关闭旧实例。
 
 ### Windows 与 Linux 双向远程控制
 
 Linux 桌面运行 `bash ./run.sh`，Windows 运行：
 
 ```powershell
-$env:ZJDESK_WEBRTC_LOCAL_ADDRESS = '10.11.48.48'
-.\run.ps1 -Preset windows-release -ServerUrl 'ws://10.11.47.137:8765' -Name Windows
+Remove-Item Env:ZJDESK_WEBRTC_LOCAL_ADDRESS -ErrorAction SilentlyContinue
+.\run.ps1 -Preset windows-release -ServerUrl 'ws://Linux当前可达IP:8765' -Name Windows
 ```
 
-本次 Linux 启动使用 `ZJDESK_WEBRTC_LOCAL_ADDRESS=10.11.47.137 bash ./run.sh ws://127.0.0.1:8765 demo Linux`。
+手动启动 Linux 可用 `env -u ZJDESK_WEBRTC_LOCAL_ADDRESS bash ./run.sh`，让 ICE 自动收集当前地址；不要沿用上次网络的固定媒体地址。有线优先的自动探测由上面的双端启动器完成。
 不同网络经 Tailscale 的验证按用户要求暂停，当前局域网结果见 [validation.md](docs/validation.md)。
 
 两端均更新客户端和信令服务后启动。协作空间在线时显示“本机校验码”，控制方输入对方 9 位数字码并点击“连接对方”，自动发起请求。
