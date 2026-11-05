@@ -21,6 +21,7 @@ std::optional<Message> decode(const QString &text, QString *error = nullptr);
 bool isRoomIdValid(const QString &roomId);
 bool isPeerNameValid(const QString &name);
 bool isRemoteCodeValid(const QString &code);
+bool isRemoteIdentityValid(const QString &identity);
 bool isRelayType(const QString &type);
 } // namespace zjdesk::protocol
 

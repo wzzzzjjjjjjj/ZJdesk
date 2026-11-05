@@ -5,6 +5,7 @@
 #include <QHostAddress>
 #include <QElapsedTimer>
 #include <QTimer>
+#include <QSettings>
 #include <QWebSocketServer>
 
 class QWebSocket;
@@ -15,7 +16,7 @@ class RoomServer final : public QObject
 {
     Q_OBJECT
 public:
-    explicit RoomServer(QObject *parent = nullptr);
+    explicit RoomServer(QObject *parent = nullptr, const QString &remoteRegistryFile = {});
     ~RoomServer() override;
     bool listen(const QHostAddress &address, quint16 port);
     void close();
@@ -26,6 +27,9 @@ public:
 signals:
     void event(const QString &message);
 
+private slots:
+    void refreshRemoteCodes();
+
 private:
     struct Peer
     {
@@ -34,6 +38,8 @@ private:
         QString name;
         qint64 lastPong = 0;
         QString remoteCode;
+        QString remoteIdentity;
+        QString remotePolicy;
     };
     void acceptConnection();
     void receive(QWebSocket *socket, const QString &text);
@@ -41,11 +47,14 @@ private:
     void send(QWebSocket *socket, const protocol::Message &message);
     void reject(QWebSocket *socket, const QString &code);
     QWebSocket *otherPeer(QWebSocket *socket) const;
+    bool assignRemoteCode(QWebSocket *socket, const QString &identity, const QString &policy);
 
     QWebSocketServer server_;
     QHash<QWebSocket *, Peer> peers_;
     QHash<QString, QList<QWebSocket *>> rooms_;
     QHash<QString, QWebSocket *> remoteCodes_;
+    QSettings remoteRegistry_;
+    QHash<QString, QString> reservedCodes_;
     QTimer heartbeat_;
     QElapsedTimer clock_;
 };

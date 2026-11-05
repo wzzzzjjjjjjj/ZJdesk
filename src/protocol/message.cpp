@@ -56,4 +56,9 @@ bool isRemoteCodeValid(const QString &code)
     static const QRegularExpression pattern("\\A[0-9]{9}\\z");
     return pattern.match(code).hasMatch();
 }
+bool isRemoteIdentityValid(const QString &identity)
+{
+    static const QRegularExpression pattern("\\A[0-9a-f]{32}\\z");
+    return pattern.match(identity).hasMatch();
+}
 } // namespace zjdesk::protocol

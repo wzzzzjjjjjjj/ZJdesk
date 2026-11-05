@@ -258,10 +258,41 @@ private slots:
         auto *approval = window.findChild<QCheckBox *>("requireRemoteApproval");
         QVERIFY(approval && approval->isChecked());
         QVERIFY(window.session_.requiresRemoteApproval());
+        auto *policy = window.findChild<QComboBox *>("remoteCodePolicy");
+        QVERIFY(policy);
+        QCOMPARE(policy->count(), 3);
+        QCOMPARE(policy->currentData().toString(), "startup");
+        policy->setCurrentIndex(1);
+        QCOMPARE(window.session_.remoteCodePolicy(), "three_days");
+        policy->setCurrentIndex(2);
         approval->setChecked(false);
         MainWindow reopened("ws://127.0.0.1:8765", "", "Tester");
         QVERIFY(!reopened.findChild<QCheckBox *>("requireRemoteApproval")->isChecked());
         QVERIFY(!reopened.session_.requiresRemoteApproval());
+        QCOMPARE(reopened.findChild<QComboBox *>("remoteCodePolicy")->currentData().toString(), "never");
+        QCOMPARE(reopened.session_.remoteCodePolicy(), "never");
+        QVERIFY(zjdesk::protocol::isRemoteIdentityValid(preferences.value("identity").toString()));
+    }
+
+    void remoteCodePolicyDoesNotClaimPersistenceWhenSettingsFail()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        QVERIFY(QDir(directory.path()).mkpath("ZJdesk/remote-control.ini"));
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory.path());
+        const auto restore = qScopeGuard([this] {
+            QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, preferenceDirectory_.path());
+        });
+        MainWindow window("ws://127.0.0.1:8765", "", "Tester");
+        auto *policy = window.findChild<QComboBox *>("remoteCodePolicy");
+        QVERIFY(policy);
+        policy->setCurrentIndex(2);
+        QCOMPARE(window.session_.remoteCodePolicy(), "startup");
+        QCOMPARE(policy->currentData().toString(), "startup");
+        auto *error = window.findChild<QLabel *>("remoteCodePolicyError");
+        QVERIFY(error && !error->isHidden() && !error->text().isEmpty());
+        QSettings preferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "remote-control");
+        QCOMPARE(preferences.value("codePolicy", "startup").toString(), "startup");
     }
 
     void remoteCodeApprovalCanBeAutomaticWithoutDesktopInput()

@@ -3,15 +3,28 @@
 #include <QRandomGenerator>
 #include <QUuid>
 #include <QWebSocket>
+#include <QCryptographicHash>
+#include <QDateTime>
+#include <QDir>
+#include <QStandardPaths>
 
 namespace zjdesk
 {
-RoomServer::RoomServer(QObject *parent)
-    : QObject(parent), server_("ZJdesk signaling", QWebSocketServer::NonSecureMode)
+RoomServer::RoomServer(QObject *parent, const QString &remoteRegistryFile)
+    : QObject(parent), server_("ZJdesk signaling", QWebSocketServer::NonSecureMode),
+      remoteRegistry_(remoteRegistryFile.isEmpty()
+          ? QDir(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation)).filePath("ZJdesk/remote-codes.ini")
+          : remoteRegistryFile, QSettings::IniFormat)
 {
+    for (const auto &identity : remoteRegistry_.childGroups())
+    {
+        const auto code = remoteRegistry_.value(identity + "/code").toString();
+        if (protocol::isRemoteCodeValid(code)) reservedCodes_.insert(code, identity);
+    }
     clock_.start();
     connect(&server_, &QWebSocketServer::newConnection, this, &RoomServer::acceptConnection);
     heartbeat_.setInterval(10000);
+    connect(&heartbeat_, &QTimer::timeout, this, &RoomServer::refreshRemoteCodes);
     connect(&heartbeat_, &QTimer::timeout, this, [this] {
         const auto now = clock_.elapsed();
         for (auto *socket : peers_.keys())
@@ -93,6 +106,62 @@ void RoomServer::reject(QWebSocket *socket, const QString &code)
     send(socket, {"error", {{"code", code}}});
 }
 
+bool RoomServer::assignRemoteCode(QWebSocket *socket, const QString &identity, const QString &policy)
+{
+    const auto now = QDateTime::currentMSecsSinceEpoch();
+    remoteRegistry_.sync();
+    if (!identity.isEmpty() && remoteRegistry_.status() != QSettings::NoError)
+    {
+        reject(socket, "remote_registry_unavailable");
+        return false;
+    }
+    const auto oldCode = identity.isEmpty() ? QString() : remoteRegistry_.value(identity + "/code").toString();
+    const auto created = remoteRegistry_.value(identity + "/createdMs").toLongLong();
+    if (!oldCode.isEmpty() && remoteCodes_.contains(oldCode) && remoteCodes_.value(oldCode) != socket)
+    {
+        reject(socket, "remote_identity_in_use");
+        return false;
+    }
+    QString code = oldCode;
+    if (!protocol::isRemoteCodeValid(code) || (policy == "three_days" && (created <= 0 || now - created >= 72LL * 60 * 60 * 1000)))
+    {
+        do { code = QString::number(QRandomGenerator::system()->bounded(100000000u, 1000000000u)); }
+        while (remoteCodes_.contains(code) || reservedCodes_.contains(code));
+        if (!identity.isEmpty())
+        {
+            remoteRegistry_.setValue(identity + "/code", code);
+            remoteRegistry_.setValue(identity + "/createdMs", now);
+            remoteRegistry_.sync();
+            if (remoteRegistry_.status() != QSettings::NoError)
+            {
+                reject(socket, "remote_registry_unavailable");
+                return false;
+            }
+            reservedCodes_.remove(oldCode);
+            reservedCodes_.insert(code, identity);
+        }
+    }
+    auto &peer = peers_[socket];
+    peer.remoteIdentity = identity;
+    peer.remotePolicy = policy;
+    if (peer.remoteCode == code) return true;
+    remoteCodes_.remove(peer.remoteCode);
+    peer.remoteCode = code;
+    remoteCodes_.insert(code, socket);
+    send(socket, {"remote_registered", {{"code", code}, {"codePolicy", policy}}});
+    return true;
+}
+
+void RoomServer::refreshRemoteCodes()
+{
+    for (auto *socket : peers_.keys())
+    {
+        const auto peer = peers_.value(socket);
+        if (peer.remotePolicy == "three_days" && peer.room.isEmpty())
+            assignRemoteCode(socket, peer.remoteIdentity, peer.remotePolicy);
+    }
+}
+
 QWebSocket *RoomServer::otherPeer(QWebSocket *socket) const
 {
     const auto members = rooms_.value(peers_.value(socket).room);
@@ -141,13 +210,15 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
         if (!peer.room.isEmpty() || !peer.remoteCode.isEmpty()) return reject(socket, "already_registered");
         const auto name = message->payload.value("name").toString().trimmed();
         if (!protocol::isPeerNameValid(name)) return reject(socket, "invalid_name");
-        QString code;
-        do { code = QString::number(QRandomGenerator::system()->bounded(100000000u, 1000000000u)); }
-        while (remoteCodes_.contains(code));
-        peer.remoteCode = code;
+        const auto policy = message->payload.value("codePolicy").toString("startup");
+        const auto identity = message->payload.value("identity").toString();
+        if (policy != "startup" && policy != "three_days" && policy != "never")
+            return reject(socket, "invalid_remote_policy");
+        if (policy != "startup" && !protocol::isRemoteIdentityValid(identity))
+            return reject(socket, "invalid_remote_identity");
         peer.name = name;
-        remoteCodes_.insert(code, socket);
-        send(socket, {"remote_registered", {{"code", code}}});
+        assignRemoteCode(socket, policy == "startup" ? QString()
+            : QString::fromLatin1(QCryptographicHash::hash(identity.toUtf8(), QCryptographicHash::Sha256).toHex()), policy);
         return;
     }
     if (message->type == "connect_remote")

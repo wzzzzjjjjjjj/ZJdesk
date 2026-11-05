@@ -2,7 +2,28 @@
 
 实现位置：`C:\Users\29822\.codex\worktrees\033f\ZJdesk`，`codex/ZJdesk-1`。Linux 构建使用隔离的 `/home/orbbec/ZJdesk/codex-033f-control-20261103`，未覆盖原始 Linux 检出。
 
-## 行为
+## 校验码变化策略（2026-11-05 增补）
+
+设置 → 远程控制 → 校验码变化提供“每次打开变化”（默认）、“3天变一次”、“从不变”，修改下次上线生效。默认仍在每次注册时随机分配；三天按码签发后连续 72 小时计算，服务每 10 秒检查，配对中到期延期到断开；从不变在同一客户端身份与信令服务注册数据保留时跨重启恢复。离线保留码不可连接，也不会再随机分配给别人。固定码同一身份不能同时注册两个在线实例。
+
+客户端 `QSettings` remote-control 的 `codePolicy` / `identity` 保存策略与随机身份；服务 GenericConfigLocation/ZJdesk/remote-codes.ini 保存身份 SHA-256 摘要对应的码与 createdMs，不保存原始凭据。注册响应回传 codePolicy，固定策略拒绝旧服务的无策略响应；配置目录不可写时明确失败，不假装已经持久化。删除配置或换信令服务可能获得新码。
+
+- Windows 与隔离 Ubuntu Release 增量构建 / 部署通过；core + signaling 分别 2/2，11.74 秒 / 6.37 秒。未重跑媒体 / 文件剪贴板 / 完整桌面套件。
+- 新 `remoteCodePoliciesPersistAndExpire` 数据用例覆盖 never 与 three_days：客户端和服务同时重建后保持码；未满 72 小时保持；连接期间到期不更新，断开后仅 three_days 换码；相同固定身份重复上线被拒绝。注册数据使用独立临时 INI，不写真实用户注册文件。
+- 新旧服务兼容及注册存储失败用例通过；隐藏设置测试覆盖三选项、默认值、切换 / 保存 / 重新读取与原有二次验证共存。设置 / 原有连接与停止顺序专项两端各 6 项通过（含初始化 / 清理），Windows 1461 ms、Linux 815 ms；不显示窗口、不注入系统输入，不作为布局或实际远控验收。
+- 已复核注册 / 退出 / 计时刷新、离线预留、持久化失败、旧服务响应和等待中的连接超时生命周期。尚未重启用户现有客户端，真实双机和连续运行三天的验收未执行；到期由测试调整签发时间触发，不能称为连续三天实测。
+
+日志：`build/code-policy-final-build-{windows,linux}.log`、`build/code-policy-final-check-{windows,linux}.log`、`build/code-policy-final-ui-{windows,linux}.txt`。
+
+### 变化策略集中补审：本机设置保存失败
+
+复核本轮 diff、注册 / 刷新 / 注销调用方、设置生命周期及相关回归，发现客户端只调用 setValue、没有确认持久化成功：配置路径不可写时仍将“从不变”应用到协调层，重启后身份可能丢失。新增 `remoteCodePolicyDoesNotClaimPersistenceWhenSettingsFail`，以临时目录占用 INI 文件路径复现；旧实现实际策略 never、预期 startup，见 `build/code-policy-review-red.txt`。
+
+最小修复是在初次身份保存和策略切换时显式 sync 并检查状态；失败时初次回退 startup、切换保留原策略，恢复缓存中的策略值并显示读写权限提示；成功后才应用新选择并清除提示。该用例和原有保存 / 重开、自动请求、两种停止顺序在 Windows / Linux 各 7 项通过（含初始化 / 清理，1500 ms / 872 ms），均不显示窗口、不注入系统输入。两端 Release 增量构建部署通过；Linux core / signaling 另行复验 2/2（6.34 秒），Windows 沿用本节先前记录的 2/2，这次界面修正未改动核心与信令源码。
+
+修复后复核保存失败回退、控件信号重入及身份生命周期，未发现其他明确逻辑问题。日志为 `build/code-policy-review-green-{windows,linux}.txt`、`build/code-policy-review-final-build-{windows,linux}.log` 和 `build/code-policy-review-check-linux.log`。未重启现有客户端；真实双机、可见界面 / OpenGL、连续三天运行和完整媒体套件仍未验证。
+
+## 初始版本行为（变化策略以前）
 
 - 应用启动自动连接配置的信令服务，在线后显示本机 9 位数字码。由服务系统随机生成、避免在线重复；退出、信令重连或切换会议时注销旧码。
 - 输入对方码并点击连接后自动发起远控请求。自己码 / 不完整 / 非 ASCII 数字不能连接；错误、离线和忙碌可重试，不注销本机码。连接查询最多一个未完成项，8 秒超时。

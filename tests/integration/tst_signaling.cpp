@@ -4,6 +4,10 @@
 #include <QWebSocket>
 #include <QWebSocketServer>
 #include <QtTest>
+#include <QTemporaryDir>
+#include <QSettings>
+#include <QCryptographicHash>
+#include <QDateTime>
 
 using State = zjdesk::SessionCoordinator::State;
 
@@ -11,6 +15,100 @@ class SignalingTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void remoteCodePoliciesPersistAndExpire_data()
+    {
+        QTest::addColumn<QString>("policy");
+        QTest::newRow("never") << QString("never");
+        QTest::newRow("three-days") << QString("three_days");
+    }
+
+    void remoteCodePoliciesPersistAndExpire()
+    {
+        QFETCH(QString, policy);
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const auto registry = directory.filePath("codes.ini");
+        const QString identity(32, 'a');
+        const auto key = QString::fromLatin1(QCryptographicHash::hash(identity.toUtf8(), QCryptographicHash::Sha256).toHex());
+        QString initial;
+        {
+            zjdesk::RoomServer server(nullptr, registry);
+            QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+            const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+            zjdesk::SessionCoordinator host, duplicate;
+            QVERIFY(host.setRemoteCodePolicy(policy, identity));
+            QVERIFY(!host.setRemoteCodePolicy("bad", identity));
+            QVERIFY(!host.setRemoteCodePolicy(policy, "bad"));
+            QVERIFY(host.startRemoteAccess(url, "Host"));
+            QTRY_VERIFY(!host.remoteCode().isEmpty());
+            initial = host.remoteCode();
+            QVERIFY(duplicate.setRemoteCodePolicy(policy, identity));
+            QVERIFY(duplicate.startRemoteAccess(url, "Duplicate"));
+            QTRY_COMPARE(duplicate.state(), State::Failed);
+            QVERIFY(duplicate.detail().contains(QStringLiteral("另一个实例")));
+        }
+        {
+            zjdesk::RoomServer server(nullptr, registry);
+            QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+            const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+            zjdesk::SessionCoordinator host, controller;
+            QVERIFY(host.setRemoteCodePolicy(policy, identity));
+            QVERIFY(host.startRemoteAccess(url, "Restarted"));
+            QTRY_COMPARE(host.remoteCode(), initial); // Client and server both recreated.
+            QSettings settings(registry, QSettings::IniFormat);
+            settings.setValue(key + "/createdMs", QDateTime::currentMSecsSinceEpoch() - 71LL * 60 * 60 * 1000);
+            settings.sync();
+            QVERIFY(QMetaObject::invokeMethod(&server, "refreshRemoteCodes", Qt::DirectConnection));
+            QTest::qWait(50);
+            QCOMPARE(host.remoteCode(), initial); // Not yet 72 hours old.
+            QVERIFY(controller.startRemoteAccess(url, "Controller"));
+            QTRY_VERIFY(!controller.remoteCode().isEmpty());
+            QVERIFY(controller.connectRemote(initial));
+            QTRY_COMPARE(host.state(), State::PeerAvailable);
+            settings.setValue(key + "/createdMs", QDateTime::currentMSecsSinceEpoch() - 72LL * 60 * 60 * 1000);
+            settings.sync();
+            QVERIFY(QMetaObject::invokeMethod(&server, "refreshRemoteCodes", Qt::DirectConnection));
+            QCOMPARE(host.remoteCode(), initial); // Never interrupt an existing connection.
+            controller.disconnectRemote();
+            QTRY_COMPARE(host.state(), State::WaitingForPeer);
+            QVERIFY(QMetaObject::invokeMethod(&server, "refreshRemoteCodes", Qt::DirectConnection));
+            if (policy == "three_days") QTRY_VERIFY(host.remoteCode() != initial);
+            else { QTest::qWait(50); QCOMPARE(host.remoteCode(), initial); }
+        }
+    }
+
+    void remoteCodePolicyRejectsLegacyServer()
+    {
+        QWebSocketServer server("legacy", QWebSocketServer::NonSecureMode);
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        connect(&server, &QWebSocketServer::newConnection, &server, [&server] {
+            auto *socket = server.nextPendingConnection();
+            QObject::connect(socket, &QWebSocket::textMessageReceived, socket, [socket](const QString &) {
+                socket->sendTextMessage(zjdesk::protocol::encode({"remote_registered", {{"code", "123456789"}}}));
+            });
+        });
+        zjdesk::SessionCoordinator host;
+        QVERIFY(host.setRemoteCodePolicy("never", QString(32, 'b')));
+        QVERIFY(host.startRemoteAccess(QUrl(QString("ws://127.0.0.1:%1").arg(server.serverPort())), "Host"));
+        QTRY_COMPARE(host.state(), State::Failed);
+        QVERIFY(host.detail().contains(QStringLiteral("更新服务端")));
+    }
+
+    void remoteCodePolicyReportsRegistryFailure()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        // An existing directory cannot be used as the registry INI file.
+        zjdesk::RoomServer server(nullptr, directory.path());
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        zjdesk::SessionCoordinator host;
+        QVERIFY(host.setRemoteCodePolicy("never", QString(32, 'c')));
+        QVERIFY(host.startRemoteAccess(QUrl(QString("ws://127.0.0.1:%1").arg(server.port())), "Host"));
+        QTRY_COMPARE(host.state(), State::Failed);
+        QVERIFY(host.remoteCode().isEmpty());
+        QVERIFY(host.detail().contains(QStringLiteral("读写权限")));
+    }
+
     void remoteCodesPairWithoutJoiningRoomsAndRecoverAfterDisconnect()
     {
         zjdesk::RoomServer server;
