@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+APPDIR=${APPDIR:-$(cd -- "$(dirname -- "$0")" && pwd)}
+export LD_LIBRARY_PATH="$APPDIR/usr/lib"
+export QT_PLUGIN_PATH="$APPDIR/usr/plugins"
+export QT_QPA_PLATFORM=xcb
+export GST_PLUGIN_SYSTEM_PATH_1_0="$APPDIR/usr/lib/gstreamer-1.0"
+export GST_PLUGIN_PATH_1_0=''
+export GST_PLUGIN_SCANNER="$APPDIR/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/ZJdesk/appimage"
+mkdir -p "$cache"
+export GST_REGISTRY_1_0="$cache/gst-registry.bin"
+case "${1:-}" in
+    --server-only) shift; exec "$APPDIR/usr/bin/zjdesk-server" "$@" ;;
+    --check-media) shift; exec "$APPDIR/usr/bin/gst-inspect-1.0" --exists "$@" ;;
+    *) exec "$APPDIR/usr/bin/zjdesk" "$@" ;;
+esac

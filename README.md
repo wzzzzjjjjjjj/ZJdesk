@@ -160,6 +160,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run.ps1
 3. 构建后选 `zjdesk` 作为运行目标；先另外启动 `zjdesk-server`。
 4. 默认服务地址为 `ws://127.0.0.1:8765`，房间码默认留空，需在两端输入相同的房间码。
 
+### Windows EXE / Linux AppImage 发布包
+
+当前版本的发布文件放在 `dist/packages/`：
+
+- Windows：双击 `ZJdesk-0.4.5-windows-x64.exe`，首次解压到当前用户目录后启动；也可以解压 `ZJdesk-0.4.5-windows-x64-portable.zip`，运行 `bin/zjdesk.exe`，保留全部 DLL 和子目录。
+- Linux：给 `ZJdesk-0.4.5-linux-x86_64.AppImage` 添加执行权限后运行。包内包含 Qt / GStreamer，验证基线为 Ubuntu 22.04 x64 X11，尚未完成 Ubuntu 24.04 或干净系统验收。
+- 客户端不自动启动信令服务。选一台电脑运行服务，两端填写该电脑的服务地址和相同房间码；[发布包使用、构建与验证说明](docs/packaging.md)。
+
 ### 可直接双击的本地部署
 
 ```powershell

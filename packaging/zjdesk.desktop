@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ZJdesk
+Comment=LAN collaboration and video meetings
+Exec=zjdesk
+Icon=zjdesk
+Terminal=false
+Categories=Network;RemoteAccess;
