@@ -11,6 +11,50 @@ class SignalingTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void remoteCodesPairWithoutJoiningRoomsAndRecoverAfterDisconnect()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator a, b, c;
+        QVERIFY(a.startRemoteAccess(url, "Windows"));
+        QVERIFY(b.startRemoteAccess(url, "Linux"));
+        QVERIFY(c.startRemoteAccess(url, "Other"));
+        QTRY_VERIFY(!a.remoteCode().isEmpty() && !b.remoteCode().isEmpty() && !c.remoteCode().isEmpty());
+        QVERIFY(zjdesk::protocol::isRemoteCodeValid(a.remoteCode()));
+        QVERIFY(a.remoteCode() != b.remoteCode());
+        QVERIFY(!a.connectRemote("12345678"));
+        QVERIFY(!a.connectRemote(QString::fromUtf8("１２３４５６７８９")));
+        QVERIFY(!a.connectRemote(a.remoteCode()));
+        QVERIFY(a.connectRemote("000000000"));
+        QVERIFY(!a.connectRemote(b.remoteCode())); // Only one lookup may be outstanding.
+        QTRY_VERIFY(a.detail().contains(QStringLiteral("校验码")));
+        QCOMPARE(a.state(), State::WaitingForPeer);
+        QVERIFY(a.connectRemote(b.remoteCode()));
+        QTRY_COMPARE(a.state(), State::PeerAvailable);
+        QTRY_COMPARE(b.state(), State::PeerAvailable);
+        QVERIFY(c.connectRemote(b.remoteCode()));
+        QTRY_VERIFY(c.detail().contains(QStringLiteral("请稍后重试")));
+        QCOMPARE(c.state(), State::WaitingForPeer);
+        const auto hostCode = b.remoteCode();
+        a.disconnectRemote();
+        QTRY_COMPARE(a.state(), State::WaitingForPeer);
+        QTRY_COMPARE(b.state(), State::WaitingForPeer);
+        QCOMPARE(b.remoteCode(), hostCode);
+        QVERIFY(c.connectRemote(hostCode));
+        QTRY_COMPARE(b.state(), State::PeerAvailable);
+        const auto retiredCode = c.remoteCode();
+        c.leave();
+        QTRY_COMPARE(b.state(), State::WaitingForPeer);
+        QVERIFY(c.remoteCode().isEmpty());
+        QVERIFY(b.connectRemote(retiredCode));
+        QTRY_VERIFY(!b.remoteConnecting());
+        QCOMPARE(b.state(), State::WaitingForPeer);
+        QVERIFY(b.detail().contains(QStringLiteral("校验码")));
+        a.leave(); b.leave();
+        QCOMPARE(server.roomCount(), 0);
+    }
+
     void meetingRejectsLateScreenShare()
     {
         zjdesk::RoomServer server;

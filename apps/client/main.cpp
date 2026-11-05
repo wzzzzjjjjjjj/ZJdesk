@@ -30,6 +30,7 @@ int main(int argc, char **argv)
     parser.process(app);
     MainWindow window(parser.value("server"), parser.value("room"), parser.value("display-name"));
     window.show();
+    QTimer::singleShot(0, &window, &MainWindow::startRemoteAccess);
     QTimer::singleShot(0, &window, &MainWindow::requestCameraPermission);
     return app.exec();
 }

@@ -183,6 +183,114 @@ class WindowTests : public QObject
     Q_OBJECT
     QTemporaryDir preferenceDirectory_;
 private slots:
+    void remoteCodeWaitsForPreviousStreamsToStop_data()
+    {
+        QTest::addColumn<bool>("controllerFirst");
+        QTest::newRow("controller-stops-first") << true;
+        QTest::newRow("host-stops-first") << false;
+    }
+
+    void remoteCodeWaitsForPreviousStreamsToStop()
+    {
+        QFETCH(bool, controllerFirst);
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator controller, host;
+        if (!host.input_.available() || !host.mediaEnvironment().ready) QSKIP("Native desktop backend required");
+        using Preview = zjdesk::SessionCoordinator::PreviewState;
+        using Remote = zjdesk::SessionCoordinator::RemoteState;
+        controller.shareState_ = host.shareState_ = Preview::Stopping;
+        QVERIFY(controller.startRemoteAccess(url, "Controller"));
+        QVERIFY(host.startRemoteAccess(url, "Host"));
+        QTRY_VERIFY(!controller.remoteCode().isEmpty() && !host.remoteCode().isEmpty());
+        QVERIFY(controller.connectRemote(host.remoteCode()));
+        QTRY_COMPARE(controller.state(), zjdesk::SessionCoordinator::State::PeerAvailable);
+        QTRY_COMPARE(host.state(), zjdesk::SessionCoordinator::State::PeerAvailable);
+        auto &first = controllerFirst ? controller : host;
+        auto &last = controllerFirst ? host : controller;
+        first.screen_.statusChanged(first.shareEpoch_, "stopped", "test previous stream stopped");
+        QTest::qWait(50);
+        QCOMPARE(host.remoteState(), Remote::Idle);
+        last.screen_.statusChanged(last.shareEpoch_, "stopped", "test previous stream stopped");
+        QTRY_COMPARE(host.remoteState(), Remote::Pending);
+        QCOMPARE(controller.remoteState(), Remote::Requesting);
+        QVERIFY(!host.screenActive());
+    }
+
+    void remoteCodeConnectionAutomaticallyRequestsConsent()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator controller, host;
+        if (!host.input_.available() || !host.mediaEnvironment().ready) QSKIP("Native desktop backend required");
+        QVERIFY(controller.startRemoteAccess(url, "Controller"));
+        QVERIFY(host.startRemoteAccess(url, "Host"));
+        QTRY_VERIFY(!controller.remoteCode().isEmpty() && !host.remoteCode().isEmpty());
+        const auto hostCode = host.remoteCode();
+        QVERIFY(controller.connectRemote(hostCode));
+        using Remote = zjdesk::SessionCoordinator::RemoteState;
+        QTRY_COMPARE(host.remoteState(), Remote::Pending);
+        QTRY_COMPARE(controller.remoteState(), Remote::Requesting);
+        QVERIFY(!host.screenActive()); // No capture or input before consent.
+        host.stopControl();
+        QTRY_COMPARE(controller.remoteState(), Remote::Idle);
+        controller.disconnectRemote();
+        QTRY_COMPARE(controller.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        QTRY_COMPARE(host.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        QCOMPARE(host.remoteCode(), hostCode);
+    }
+
+    void remoteCodeSettingsPersistWithoutRoomEntry()
+    {
+        QSettings preferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "remote-control");
+        preferences.clear();
+        const auto reset = qScopeGuard([&] { preferences.clear(); });
+        MainWindow window("ws://127.0.0.1:8765", "old-room", "Tester");
+        QVERIFY(!window.findChild<QLineEdit *>("roomId"));
+        auto *code = window.findChild<QLineEdit *>("remoteCode");
+        QVERIFY(code && code->text().isEmpty());
+        code->setText("123456789");
+        QVERIFY(code->hasAcceptableInput());
+        code->setText("12345678");
+        QVERIFY(!code->hasAcceptableInput());
+        auto *approval = window.findChild<QCheckBox *>("requireRemoteApproval");
+        QVERIFY(approval && approval->isChecked());
+        QVERIFY(window.session_.requiresRemoteApproval());
+        approval->setChecked(false);
+        MainWindow reopened("ws://127.0.0.1:8765", "", "Tester");
+        QVERIFY(!reopened.findChild<QCheckBox *>("requireRemoteApproval")->isChecked());
+        QVERIFY(!reopened.session_.requiresRemoteApproval());
+    }
+
+    void remoteCodeApprovalCanBeAutomaticWithoutDesktopInput()
+    {
+        zjdesk::SessionCoordinator host;
+        if (!host.input_.available() || !host.mediaEnvironment().ready) QSKIP("Native desktop backend required");
+        using Remote = zjdesk::SessionCoordinator::RemoteState;
+        host.state_ = zjdesk::SessionCoordinator::State::PeerAvailable;
+        host.peerId_ = "controller";
+        host.remoteAccess_ = true;
+        // Supply an existing fake stream so approval neither captures nor injects.
+        host.streamId_ = "fixture";
+        host.desktopSource_ = true;
+        host.shareState_ = zjdesk::SessionCoordinator::PreviewState::Running;
+        host.controlChannelReady_ = true;
+        const QJsonObject request{{"action", "request"}, {"requestId", "first"}};
+        host.receiveControlRequest(request);
+        QCOMPARE(host.remoteState(), Remote::Pending);
+        host.clearControl();
+        host.setRequiresRemoteApproval(false);
+        host.receiveControlRequest(request);
+        QCOMPARE(host.remoteState(), Remote::Controlled);
+        host.clearControl();
+        host.remoteAccess_ = false;
+        host.receiveControlRequest(request);
+        QCOMPARE(host.remoteState(), Remote::Pending); // Legacy rooms cannot bypass consent.
+        host.streamId_.clear();
+    }
+
     void meetingEmptyExpansionRestoresOnLeave()
     {
         using Session = zjdesk::SessionCoordinator;
@@ -727,15 +835,16 @@ sys.stdout.buffer.write(data)
         assistance->click();
         QVERIFY(!meeting->isEnabled());
         QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
-        assistance->click();
-        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
+        QVERIFY(!window.session_.remoteCode().isEmpty());
+        QVERIFY(window.findChild<QLabel *>("localRemoteCode")->text().contains(window.session_.remoteCode()));
+        QVERIFY(meetingRoom->isEnabled());
         QVERIFY(meeting->isEnabled());
         meeting->click();
         QVERIFY(!assistance->isEnabled());
         QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
         meeting->click();
-        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
-        QVERIFY(assistance->isEnabled());
+        QTRY_VERIFY(window.session_.remoteAccess() && !window.session_.remoteCode().isEmpty());
+        QCOMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
     }
 
     void enabledDesktopCameraSettingsDoNotPromptAgain()
@@ -899,7 +1008,7 @@ sys.stdout.buffer.write(data)
         MainWindow window(qEnvironmentVariable("ZJDESK_TEST_SERVER"), "physical-first-frame", "Windows");
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
-        window.findChild<QPushButton *>("primaryButton")->click();
+        QVERIFY(window.session_.join(QUrl(qEnvironmentVariable("ZJDESK_TEST_SERVER")), "physical-first-frame", "Windows"));
         QTRY_VERIFY_WITH_TIMEOUT(window.session_.memberCount() == 2
             || window.session_.state() == zjdesk::SessionCoordinator::State::Failed, 30000);
         QVERIFY2(window.session_.memberCount() == 2, qPrintable(window.session_.detail()));
@@ -946,7 +1055,7 @@ sys.stdout.buffer.write(data)
         MainWindow window(server, "remote-test", zjdesk::PlatformInfo::current().system);
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
-        window.findChild<QPushButton *>("primaryButton")->click();
+        QVERIFY(window.session_.join(QUrl(server), "remote-test", zjdesk::PlatformInfo::current().system));
         auto *share = window.findChild<QPushButton *>("shareButton");
         auto *allow = window.findChild<QPushButton *>("allowControlButton");
         auto *stop = window.findChild<QPushButton *>("stopControlButton");
@@ -1248,7 +1357,7 @@ sys.stdout.buffer.write(data)
         });
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
-        window.findChild<QPushButton *>("primaryButton")->click();
+        QVERIFY(window.session_.join(QUrl(qEnvironmentVariable("ZJDESK_TEST_SERVER")), "remote-test", "Windows"));
         auto *request = window.findChild<QPushButton *>("controlButton");
         auto *status = window.findChild<QLabel *>("controlStatus");
         auto *surface = window.findChild<VideoSurface *>();
@@ -2448,8 +2557,8 @@ sys.stdout.buffer.write(data)
         QVERIFY(QTest::qWaitForWindowExposed(&alice));
         bob.show();
         QVERIFY(QTest::qWaitForWindowExposed(&bob));
-        auto *aliceRoom = alice.findChild<QLineEdit *>("roomId");
-        auto *bobRoom = bob.findChild<QLineEdit *>("roomId");
+        auto *aliceRoom = alice.findChild<QLineEdit *>("remoteCode");
+        auto *bobRoom = bob.findChild<QLineEdit *>("remoteCode");
         QVERIFY(aliceRoom && bobRoom);
         QVERIFY(aliceRoom->text().isEmpty() && bobRoom->text().isEmpty());
         auto *aliceJoin = alice.findChild<QPushButton *>("primaryButton");
@@ -2462,13 +2571,12 @@ sys.stdout.buffer.write(data)
         QTRY_VERIFY(surface->isValid());
         QTest::mouseClick(aliceJoin, Qt::LeftButton);
         QCOMPARE(server.roomCount(), 0);
-        aliceRoom->setText("room_123");
-        bobRoom->setText("room_123");
-        QTest::mouseClick(aliceJoin, Qt::LeftButton);
-        QTRY_COMPARE(aliceStatus->text(), QStringLiteral("协作 · 等待成员"));
         QTest::mouseClick(bobJoin, Qt::LeftButton);
-        QTRY_COMPARE(aliceStatus->text(), QStringLiteral("协作 · 双方已入会"));
-        QTRY_COMPARE(bobStatus->text(), QStringLiteral("协作 · 双方已入会"));
+        QTRY_VERIFY(!alice.session_.remoteCode().isEmpty() && !bob.session_.remoteCode().isEmpty());
+        aliceRoom->setText(bob.session_.remoteCode());
+        QTest::mouseClick(aliceJoin, Qt::LeftButton);
+        QTRY_COMPARE(aliceStatus->text(), QStringLiteral("协作 · 已连接对方"));
+        QTRY_COMPARE(bobStatus->text(), QStringLiteral("协作 · 已连接对方"));
         QCOMPARE(members->text(), QStringLiteral("2 / 2 人"));
         QVERIFY(QDir().mkpath("output"));
         alice.raise();
@@ -2481,8 +2589,8 @@ sys.stdout.buffer.write(data)
         QTest::qWait(100);
         QVERIFY(alice.screen()->grabWindow(alice.winId()).save("output/ui-diagnostics.png"));
         QTest::mouseClick(bobJoin, Qt::LeftButton);
-        QTRY_COMPARE(aliceStatus->text(), QStringLiteral("协作 · 等待成员"));
-        QTest::mouseClick(aliceJoin, Qt::LeftButton);
+        QTRY_COMPARE(aliceStatus->text(), QStringLiteral("协作 · 远控已在线"));
+        alice.session_.leave();
         QTRY_COMPARE(server.roomCount(), 0);
     }
 
@@ -2561,9 +2669,11 @@ sys.stdout.buffer.write(data)
         QVERIFY(window.grab().save("output/ui-connection-error.png"));
         window.findChild<QLineEdit *>("serverAddress")->setText(url);
         QTest::mouseClick(window.findChild<QPushButton *>("primaryButton"), Qt::LeftButton);
-        QTRY_COMPARE(window.findChild<QLabel *>("statusBadge")->text(), QStringLiteral("协作 · 等待成员"));
+        QTRY_COMPARE(window.findChild<QLabel *>("statusBadge")->text(), QStringLiteral("协作 · 远控已在线"));
         zjdesk::SessionCoordinator peer;
-        QVERIFY(peer.join(QUrl(url), "demo", longName));
+        QVERIFY(peer.startRemoteAccess(QUrl(url), longName));
+        QTRY_VERIFY(!peer.remoteCode().isEmpty());
+        QVERIFY(peer.connectRemote(window.session_.remoteCode()));
         QTRY_COMPARE(window.session_.memberCount(), 2);
         QCOMPARE(window.size(), QSize(1040, 720));
         window.resize(1280, 820);

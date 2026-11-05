@@ -25,6 +25,7 @@ public:
                         QWidget *parent = nullptr);
     ~MainWindow() override;
     void requestCameraPermission();
+    void startRemoteAccess();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -64,6 +65,7 @@ private:
     zjdesk::SessionCoordinator session_;
     QLineEdit *serverEdit_ = nullptr;
     QLineEdit *roomEdit_ = nullptr;
+    QLabel *remoteCodeLabel_ = nullptr;
     QLineEdit *nameEdit_ = nullptr;
     QPushButton *joinButton_ = nullptr;
     QLineEdit *meetingServerEdit_ = nullptr;

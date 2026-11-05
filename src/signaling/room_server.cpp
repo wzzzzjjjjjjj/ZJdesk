@@ -1,5 +1,6 @@
 #include "room_server.h"
 #include <QJsonArray>
+#include <QRandomGenerator>
 #include <QUuid>
 #include <QWebSocket>
 
@@ -48,6 +49,7 @@ void RoomServer::close()
     }
     peers_.clear();
     rooms_.clear();
+    remoteCodes_.clear();
 }
 
 void RoomServer::acceptConnection()
@@ -69,6 +71,7 @@ void RoomServer::acceptConnection()
                 peers_[socket].lastPong = clock_.elapsed();
         });
         connect(socket, &QWebSocket::disconnected, this, [this, socket] {
+            remoteCodes_.remove(peers_.value(socket).remoteCode);
             leave(socket);
             peers_.remove(socket);
             socket->deleteLater();
@@ -104,6 +107,16 @@ void RoomServer::leave(QWebSocket *socket)
     if (!peers_.contains(socket) || peers_.value(socket).room.isEmpty())
         return;
     const auto peer = peers_.value(socket);
+    if (peer.room.startsWith("remote\x1f"))
+    {
+        const auto members = rooms_.take(peer.room);
+        for (auto *member : members)
+        {
+            peers_[member].room.clear();
+            if (member != socket) send(member, {"remote_ready", {}});
+        }
+        return;
+    }
     rooms_[peer.room].removeAll(socket);
     if (rooms_[peer.room].isEmpty())
         rooms_.remove(peer.room);
@@ -122,12 +135,55 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
         reject(socket, error);
         return;
     }
+    if (message->type == "register_remote")
+    {
+        auto &peer = peers_[socket];
+        if (!peer.room.isEmpty() || !peer.remoteCode.isEmpty()) return reject(socket, "already_registered");
+        const auto name = message->payload.value("name").toString().trimmed();
+        if (!protocol::isPeerNameValid(name)) return reject(socket, "invalid_name");
+        QString code;
+        do { code = QString::number(QRandomGenerator::system()->bounded(100000000u, 1000000000u)); }
+        while (remoteCodes_.contains(code));
+        peer.remoteCode = code;
+        peer.name = name;
+        remoteCodes_.insert(code, socket);
+        send(socket, {"remote_registered", {{"code", code}}});
+        return;
+    }
+    if (message->type == "connect_remote")
+    {
+        const auto code = message->payload.value("code").toString();
+        if (!protocol::isRemoteCodeValid(code)) return reject(socket, "invalid_remote_code");
+        if (peers_[socket].remoteCode.isEmpty()) return reject(socket, "not_registered");
+        auto *target = remoteCodes_.value(code, nullptr);
+        if (!target || target == socket) return reject(socket, "remote_unavailable");
+        if (!peers_[socket].room.isEmpty() || !peers_[target].room.isEmpty()) return reject(socket, "remote_busy");
+        const auto room = QUuid::createUuid().toString(QUuid::Id128);
+        const auto key = QStringLiteral("remote") + QChar(0x1f) + room;
+        rooms_.insert(key, {socket, target});
+        peers_[socket].room = peers_[target].room = key;
+        for (auto *member : {target, socket})
+        {
+            auto *other = member == socket ? target : socket;
+            send(member, {"remote_paired", {{"roomId", room}, {"roomType", "assistance"},
+                {"peerId", peers_[member].id}, {"controller", member == socket},
+                {"peers", QJsonArray{QJsonObject{{"peerId", peers_[other].id}, {"name", peers_[other].name}}}}}});
+        }
+        return;
+    }
+    if (message->type == "disconnect_remote")
+    {
+        if (peers_[socket].remoteCode.isEmpty()) return reject(socket, "not_registered");
+        leave(socket);
+        send(socket, {"remote_ready", {}});
+        return;
+    }
     if (message->type == "join")
     {
         const auto room = message->payload.value("roomId").toString();
         const auto name = message->payload.value("name").toString().trimmed();
         const auto roomType = message->payload.value("roomType").toString("assistance");
-        if (!peers_[socket].room.isEmpty())
+        if (!peers_[socket].room.isEmpty() || !peers_[socket].remoteCode.isEmpty())
             return reject(socket, "already_joined");
         if (!protocol::isRoomIdValid(room) || !protocol::isPeerNameValid(name)
             || (roomType != "assistance" && roomType != "meeting"))

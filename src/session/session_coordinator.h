@@ -32,6 +32,14 @@ public:
     ~SessionCoordinator() override;
     bool join(const QUrl &url, const QString &roomId, const QString &name, RoomType type = RoomType::Assistance);
     void leave();
+    bool startRemoteAccess(const QUrl &url, const QString &name);
+    bool connectRemote(const QString &code);
+    void disconnectRemote();
+    QString remoteCode() const { return remoteCode_; }
+    bool remoteAccess() const { return remoteAccess_; }
+    bool remoteConnecting() const { return remoteConnecting_; }
+    bool requiresRemoteApproval() const { return requireRemoteApproval_; }
+    void setRequiresRemoteApproval(bool enabled) { requireRemoteApproval_ = enabled; }
     bool sendNegotiation(const QString &type, const QJsonObject &payload);
     State state() const { return state_; }
     RoomType roomType() const { return roomType_; }
@@ -134,6 +142,7 @@ private:
     void clearScreenShare(bool notifyPeer);
     void receiveControl(const QJsonObject &message);
     void receiveControlRequest(const QJsonObject &message);
+    void requestRemoteControlWhenReady();
     void sendControlGrant();
     void startFileClipboard();
     void clearControl();
@@ -149,6 +158,8 @@ private:
     void updateMeshState();
 
     SignalingClient signaling_;
+    bool remoteAccess_ = false, remoteDialPending_ = false, remoteConnecting_ = false, requireRemoteApproval_ = true;
+    QString remoteCode_;
     EventLog events_;
     ControlSession control_;
     FileClipboard fileClipboard_;
@@ -216,7 +227,7 @@ private:
     quint64 previewEpoch_ = 0;
     quint64 audioEpoch_ = 0;
     State state_ = State::Idle;
-    QString detail_ = QStringLiteral("尚未加入房间");
+    QString detail_ = QStringLiteral("尚未连接");
     QString roomId_;
     RoomType roomType_ = RoomType::Assistance;
     QString name_;

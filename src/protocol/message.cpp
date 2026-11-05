@@ -50,4 +50,10 @@ bool isRelayType(const QString &type)
     return type == "offer" || type == "answer" || type == "ice" || type == "share" || type == "control"
         || type == "conference";
 }
+
+bool isRemoteCodeValid(const QString &code)
+{
+    static const QRegularExpression pattern("\\A[0-9]{9}\\z");
+    return pattern.match(code).hasMatch();
+}
 } // namespace zjdesk::protocol
