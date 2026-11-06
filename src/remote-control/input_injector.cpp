@@ -1,6 +1,7 @@
 #include "input_injector.h"
 #include <QGuiApplication>
 #include <QScreen>
+#include <QThread>
 #include <algorithm>
 #include <cmath>
 #include "input_injector_win_p.h"
@@ -218,6 +219,7 @@ bool InputInjector::available()
     if (display_)
         return true;
     if (!qobject_cast<QGuiApplication *>(QCoreApplication::instance())
+        || QThread::currentThread() != QCoreApplication::instance()->thread()
         || qEnvironmentVariable("XDG_SESSION_TYPE") == "wayland")
         return false;
     auto *screen = QGuiApplication::primaryScreen();
@@ -288,6 +290,7 @@ RemoteCursor InputInjector::cursor()
 
 bool InputInjector::inject(const QJsonObject &input)
 {
+    lastError_.clear();
 #ifdef Q_OS_WIN
     if (input.value("kind").toString() == "release")
     {
@@ -295,13 +298,24 @@ bool InputInjector::inject(const QJsonObject &input)
         return keys_.isEmpty() && buttons_.isEmpty();
     }
     if (!available())
+    {
+        lastError_ = QStringLiteral("无法访问当前输入桌面");
         return false;
+    }
     const QRect desktop(GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
         GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
     auto events = windowsInputEvents(input, bounds_, desktop);
     if (events.isEmpty())
+    {
+        lastError_ = QStringLiteral("无效或不支持的输入事件");
         return false;
+    }
+    SetLastError(ERROR_SUCCESS);
     const auto sent = SendInput(UINT(events.size()), events.data(), sizeof(INPUT));
+    const auto error = GetLastError();
+    if (sent != UINT(events.size()))
+        lastError_ = QStringLiteral("SendInput 接受 %1/%2 个事件，Win32=%3；请检查被控窗口权限及当前桌面")
+            .arg(sent).arg(events.size()).arg(error);
     // Track only events Windows accepted, including a partial batch.
     for (UINT i = 0; i < sent; ++i)
     {

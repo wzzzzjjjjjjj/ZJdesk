@@ -1588,8 +1588,10 @@ ScreenShare::ScreenShare(QObject *parent) : QObject(parent)
     connect(worker_, &ScreenShareWorker::statusChanged, this, &ScreenShare::statusChanged);
     connect(worker_, &ScreenShareWorker::negotiationReady, this, &ScreenShare::negotiationReady);
     connect(worker_, &ScreenShareWorker::statisticsReady, this, &ScreenShare::statisticsReady);
-    connect(worker_, &ScreenShareWorker::controlChannelChanged, this, &ScreenShare::controlChannelChanged);
-    connect(worker_, &ScreenShareWorker::controlReceived, this, &ScreenShare::controlReceived);
+    // Input receivers must keep running inside native UI move/resize loops.
+    // Normal QObject receivers still queue these signals to their own threads.
+    connect(worker_, &ScreenShareWorker::controlChannelChanged, this, &ScreenShare::controlChannelChanged, Qt::DirectConnection);
+    connect(worker_, &ScreenShareWorker::controlReceived, this, &ScreenShare::controlReceived, Qt::DirectConnection);
     connect(worker_, &ScreenShareWorker::fileReceived, this, &ScreenShare::fileReceived);
     connect(&frames_, &QTimer::timeout, this, [this] {
         QImage image;

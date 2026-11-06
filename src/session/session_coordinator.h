@@ -8,6 +8,7 @@
 #include "remote-control/control_session.h"
 #include "remote-control/file_clipboard.h"
 #include "remote-control/input_injector.h"
+#include "remote-control/input_receiver.h"
 #include "signaling/signaling_client.h"
 #include <QElapsedTimer>
 #include <QDeadlineTimer>
@@ -182,6 +183,9 @@ private:
     quint64 remoteControlEpoch_ = 0;
     quint64 inputSequence_ = 0;
     QMap<quint64, QElapsedTimer> inputProbeClocks_;
+    QElapsedTimer motionProbeClock_;
+    QTimer inputProbeDeadline_;
+    QString inputWarning_;
     QTimer controlDeadline_;
     QTimer cursorTimer_;
     RemoteCursor sentCursor_, remoteCursor_;
@@ -190,6 +194,7 @@ private:
     QTimer deadline_;
     MediaEngine media_;
     ScreenShare screen_;
+    InputReceiver inputReceiver_; // Stops before the media channel is destroyed.
     ConferenceMedia conference_;
     MeetingMedia meetingMedia_;
     QMap<QString, QString> conferencePeers_, meshStatus_;

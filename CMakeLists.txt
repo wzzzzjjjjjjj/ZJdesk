@@ -33,6 +33,7 @@ add_library(zjdesk_client_core STATIC
     src/remote-control/control_session.cpp src/remote-control/control_session.h
     src/remote-control/file_clipboard.cpp src/remote-control/file_clipboard.h
     src/remote-control/input_injector.cpp src/remote-control/input_injector.h
+    src/remote-control/input_receiver.cpp src/remote-control/input_receiver.h
     src/diagnostics/event_log.cpp src/diagnostics/event_log.h
     src/media/media_environment.cpp src/media/media_environment.h
     src/media/media_engine.cpp src/media/media_engine.h
