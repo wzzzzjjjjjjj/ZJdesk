@@ -1,5 +1,9 @@
 # 架构与扩展约定
 
+客户端入口直接显示 `MainWindow`，并启用顶部网络栏：Windows 只填写 Linux IPv4，Linux 只填写 Windows IPv4。界面仅收集输入和显示结果；`session/network_setup.*` 用 UDP connect 选择访问对端的本机源地址（不发送数据），检查活动网卡、异步对端 ping 及信令 WebSocket，10 秒总超时，退出或编辑地址取消探测。Linux 客户端通过 `NetworkSetup` 持有的 `RoomServer` 自动监听 IPv4 端口（默认 8765），已有服务时通过后续握手验证；两端默认连接 Linux 地址，显式非回环 `--server` 参数保留。验证成功才注册远控码、请求摄像头权限、启用远控及入会；编辑地址通过 `SessionCoordinator::leave()` 断开并撤销放行。成功的对端输入保存在独立 `network.ini`，不能代替下次验证。成功后将本机地址写入进程的 `ZJDESK_WEBRTC_LOCAL_ADDRESS`，屏幕共享和会议均在创建 ICE 代理时绑定该地址；会议多成员连接沿用同一媒体实现。验证只证明地址和基础连通性，不能证明动态媒体端口、设备或实际远控可用。构建部署不运行交互验证。见 [启动网络验证](startup-network.md)。
+
+`start-both.ps1` 未传 `-LinuxSsh` 时提示查询方法并要求输入 Linux 用户名和 IPv4，不再内置开发机器的 SSH 地址；显式参数及原有网卡自动选择流程保留。
+
 双端启动器的网络选择在 `select-network.ps1` 完成：查询 Linux 当前物理接口，枚举 Windows 当前可用的物理网卡和首选 IPv4 地址，按 Linux 有线 / Wi-Fi、Windows 有线 / Wi-Fi 的顺序验证地址组合。每组均检查指定源地址与网卡的路由，并绑定该源地址探测 TCP 22。选中后将 Linux 地址用于信令目标，将两端地址分别传给已有 `ZJDESK_WEBRTC_LOCAL_ADDRESS`；媒体层及控制方向不变。自动选择排除虚拟接口，显式指定地址优先且失效时停止。此逻辑只在启动时运行，不修改系统路由或实现运行中网络重连。
 
 协作和会议使用同一个 `SessionCoordinator`，连接或入房期间禁止同时加入另一房间。信令 `join` 携带 `roomType`，服务端按房间类型和原始房间码联合隔离；未携带类型的旧客户端按协作处理。会议客户端必须在 `joined` 响应中收到 `meeting` 类型确认，避免旧服务忽略类型后混入协作房间。会议禁用远控能力和请求；协作远控使用 9 位数字码配对，按本机二次验证设置手动或自动授权后传输桌面。

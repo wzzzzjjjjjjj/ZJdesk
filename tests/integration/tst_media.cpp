@@ -1,6 +1,7 @@
 #include "session/session_coordinator.h"
 #include "signaling/room_server.h"
 #include "media/share_quality.h"
+#include "session/network_setup.h"
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
@@ -15,6 +16,48 @@ class MediaTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void conferenceUsesSelectedLocalAddress()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        const auto addresses = zjdesk::NetworkSetup::localAddresses();
+        if (addresses.isEmpty()) QSKIP("No active IPv4 interface");
+        const auto original = qgetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+        const auto restore = qScopeGuard([original] {
+            if (original.isNull()) qunsetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+            else qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", original);
+        });
+        qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", addresses.first().toUtf8());
+        zjdesk::ConferenceMedia media;
+        QStringList candidates;
+        connect(&media, &zjdesk::ConferenceMedia::negotiationReady, &media,
+            [&](quint64, const QString &type, const QJsonObject &payload) {
+                if (type == "ice") candidates.append(payload.value("candidate").toString());
+            });
+        media.start(true, {"test", "test", "test"}, 1);
+        QTRY_VERIFY_WITH_TIMEOUT(!candidates.isEmpty(), 10000);
+        QTest::qWait(300);
+        for (const auto &candidate : candidates)
+            QCOMPARE(candidate.split(' ').value(4), addresses.first());
+        media.stop(2);
+    }
+
+    void conferenceRejectsUnavailableLocalAddress()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        const auto original = qgetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+        const auto restore = qScopeGuard([original] {
+            if (original.isNull()) qunsetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+            else qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", original);
+        });
+        qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", "invalid-address");
+        zjdesk::ConferenceMedia media;
+        QSignalSpy states(&media, &zjdesk::ConferenceMedia::statusChanged);
+        media.start(true, {"test", "test", "test"}, 1);
+        QTRY_VERIFY(!states.isEmpty());
+        QCOMPARE(states.first().at(1).toString(), QString("failed"));
+        QVERIFY(states.first().at(2).toString().contains(QStringLiteral("本地地址")));
+    }
+
     void meetingAdaptsToSlowFrameConsumer()
     {
         QVERIFY(zjdesk::MediaEnvironment::inspect().ready);

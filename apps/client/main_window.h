@@ -2,6 +2,7 @@
 
 #include "media/media_environment.h"
 #include "session/session_coordinator.h"
+#include "session/network_setup.h"
 #include <QMainWindow>
 #include <QStringList>
 
@@ -26,6 +27,7 @@ public:
     ~MainWindow() override;
     void requestCameraPermission();
     void startRemoteAccess();
+    void enableNetworkSetup();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -63,6 +65,8 @@ private:
     QVBoxLayout *contentLayout_ = nullptr;
     QVBoxLayout *workspaceLayout_ = nullptr;
     zjdesk::SessionCoordinator session_;
+    zjdesk::NetworkSetup networkSetup_;
+    QLineEdit *networkPeer_ = nullptr;
     QLineEdit *serverEdit_ = nullptr;
     QLineEdit *roomEdit_ = nullptr;
     QLabel *remoteCodeLabel_ = nullptr;

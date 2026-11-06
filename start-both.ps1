@@ -1,5 +1,5 @@
 param(
-    [string[]]$LinuxSsh = @('orbbec@10.11.42.4', 'orbbec@10.11.47.137'),
+    [string[]]$LinuxSsh = @(),
     [string]$LinuxAddress = '',
     [string]$LinuxRoot = '/home/orbbec/ZJdesk/zjdesk',
     [string]$WindowsAddress = '',
@@ -39,6 +39,12 @@ function Stop-WindowsZjdeskInstances {
     }
 }
 try {
+    if (-not $LinuxSsh.Count) {
+        Write-Host 'Linux IPv4: run ip -4 addr show up on Linux. Windows IPv4: run ipconfig on Windows.'
+        $endpoint = Read-Host 'Enter Linux SSH target (your Linux username@IPv4 address)'
+        if (-not $endpoint.Trim()) { throw 'Linux SSH target is required. Alternatively pass -LinuxSsh username@IPv4.' }
+        $LinuxSsh = @($endpoint.Trim())
+    }
     Write-Host 'Checking Linux SSH and display...'
     $network = Resolve-ZjdeskNetwork -LinuxSsh $LinuxSsh -LinuxAddress $LinuxAddress -WindowsAddress $WindowsAddress
     $LinuxSsh = $network.LinuxSsh

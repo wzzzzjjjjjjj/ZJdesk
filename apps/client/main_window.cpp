@@ -364,9 +364,11 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     roomEdit_ = new QLineEdit;
     nameEdit_ = new QLineEdit(name);
     serverEdit_->setObjectName("serverAddress");
+    serverEdit_->setReadOnly(true);
+    serverEdit_->setToolTip(QStringLiteral("服务地址由顶部对端 IP 验证自动设置；修改对端 IP 后请重新验证。"));
     roomEdit_->setObjectName("remoteCode");
     nameEdit_->setObjectName("displayName");
-    serverEdit_->setPlaceholderText("ws://192.168.1.100:8765");
+    serverEdit_->setPlaceholderText(QStringLiteral("验证对端 IP 后自动设置"));
     roomEdit_->setPlaceholderText(QStringLiteral("输入对方 9 位校验码"));
     roomEdit_->setValidator(new QRegularExpressionValidator(QRegularExpression("[0-9]{9}"), roomEdit_));
     roomEdit_->setToolTip(QStringLiteral("两端连接同一服务，输入对方显示的 9 位数字"));
@@ -974,6 +976,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
             session_.leave();
     });
     connect(meetingJoinButton_, &QPushButton::clicked, this, [this, selectMeetingDevices] {
+        if (networkPeer_ && !networkSetup_.verified()) return;
         using State = zjdesk::SessionCoordinator::State;
         if (session_.state() == State::Idle || session_.state() == State::Failed
             || (session_.remoteAccess() && session_.state() == State::WaitingForPeer))
@@ -1064,7 +1067,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         else
             session_.stopAudioTest();
     });
-    connect(refreshDevicesButton_, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::requestCameraPermission);
+    connect(refreshDevicesButton_, &QPushButton::clicked, this, &MainWindow::requestCameraPermission);
     auto *statsTimer = new QTimer(this);
     connect(statsTimer, &QTimer::timeout, this, [this] {
         auto *surface = session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting ? meetingShareVideo_ : video_;
@@ -1089,7 +1092,90 @@ MainWindow::~MainWindow()
 
 void MainWindow::requestCameraPermission()
 {
+    if (networkPeer_ && !networkSetup_.verified()) return;
     session_.requestCameraPermission();
+}
+
+void MainWindow::enableNetworkSetup()
+{
+    if (networkPeer_) return;
+    const QUrl initialServer(serverEdit_->text());
+#ifdef Q_OS_LINUX
+    networkSetup_.startLocalServer(initialServer.port(8765));
+#endif
+    auto *panel = card();
+    panel->setObjectName("startupNetworkPanel");
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(16, 10, 16, 10);
+    layout->setSpacing(6);
+    auto *row = new QHBoxLayout;
+#ifdef Q_OS_WIN
+    row->addWidget(text(QStringLiteral("Linux IP")));
+    const QString peerKey = "linuxAddress";
+#else
+    row->addWidget(text(QStringLiteral("Windows IP")));
+    const QString peerKey = "windowsAddress";
+#endif
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+    networkPeer_ = new QLineEdit(settings.value("networkSetup/" + peerKey).toString());
+    networkPeer_->setObjectName("networkPeerAddress");
+    networkPeer_->setPlaceholderText(QStringLiteral("填写对端 IPv4，例如 192.168.1.20"));
+    networkPeer_->setAccessibleName(QStringLiteral("对端 IP 地址"));
+    row->addWidget(networkPeer_, 1);
+    auto *verify = new QPushButton(QStringLiteral("验证 IP"));
+    verify->setObjectName("verifyNetwork");
+    row->addWidget(verify);
+    layout->addLayout(row);
+    auto *help = text(QStringLiteral("查询：Windows 执行 ipconfig；Linux 执行 ip -4 addr show up（取 inet 后 / 前的地址）。本机 IP 自动选择，双方只填写对端 IP。"));
+    help->setWordWrap(true);
+    help->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(help);
+    auto *status = text({}, "networkStatus");
+    status->setWordWrap(true);
+    layout->addWidget(status);
+    contentLayout_->insertWidget(0, panel);
+    normalWidgets_.append(panel);
+    const auto invalidate = [this, status, verify] {
+        networkSetup_.cancel();
+        session_.leave();
+        const bool empty = networkPeer_->text().trimmed().isEmpty();
+        networkPeer_->setStyleSheet(empty ? QStringLiteral("QLineEdit { border: 2px solid #dc3545; background: #fff1f2; }") : QString());
+        networkPeer_->setProperty("networkInvalid", empty);
+        status->setText(empty ? QStringLiteral("请填写对端 IP；验证通过前，远控和会议不可用。")
+                              : QStringLiteral("尚未验证；请确认对端已启动，点击“验证 IP”。"));
+        verify->setEnabled(true);
+        refreshSession();
+    };
+    connect(networkPeer_, &QLineEdit::textChanged, this, invalidate);
+    connect(&networkSetup_, &zjdesk::NetworkSetup::progress, status, &QLabel::setText);
+    connect(&networkSetup_, &zjdesk::NetworkSetup::finished, this,
+        [this, status, verify, peerKey](bool success, const QString &message) {
+            verify->setEnabled(true);
+            status->setText(message);
+            networkPeer_->setProperty("networkInvalid", !success);
+            networkPeer_->setStyleSheet(success ? QString() : QStringLiteral("QLineEdit { border: 2px solid #dc3545; background: #fff1f2; }"));
+            if (success)
+            {
+                const auto configuration = networkSetup_.configuration();
+                serverEdit_->setText(configuration.serverUrl.toString());
+                QSettings saved(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+                saved.setValue("networkSetup/" + peerKey, configuration.peerAddress());
+                status->setText(QStringLiteral("验证通过 · 本机 %1 · 对端 %2").arg(configuration.localAddress(), configuration.peerAddress()));
+                startRemoteAccess();
+                requestCameraPermission();
+            }
+            refreshSession();
+        });
+    const auto verifyPeer = [this, initialServer, verify, invalidate] {
+        invalidate();
+        verify->setEnabled(false);
+        networkSetup_.verifyPeer(networkPeer_->text().trimmed(), initialServer);
+    };
+    connect(verify, &QPushButton::clicked, this, verifyPeer);
+    connect(networkPeer_, &QLineEdit::returnPressed, this, [verify] {
+        if (verify->isEnabled()) verify->click();
+    });
+    invalidate();
 }
 
 void MainWindow::refreshDevices()
@@ -1420,9 +1506,10 @@ void MainWindow::refreshSession()
     meetingRoomEdit_->setEnabled(idle || ready);
     meetingNameEdit_->setEnabled(idle);
     const bool meeting = session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting;
-    joinButton_->setEnabled(idle || (!meeting && !session_.remoteConnecting() && (!ready || (roomEdit_->hasAcceptableInput()
-        && roomEdit_->text() != session_.remoteCode()))));
-    meetingJoinButton_->setEnabled(idle || meeting || ready);
+    const bool networkReady = !networkPeer_ || networkSetup_.verified();
+    joinButton_->setEnabled(networkReady && (idle || (!meeting && !session_.remoteConnecting() && (!ready || (roomEdit_->hasAcceptableInput()
+        && roomEdit_->text() != session_.remoteCode())))));
+    meetingJoinButton_->setEnabled(networkReady && (idle || meeting || ready));
     joinButton_->setText(idle ? QStringLiteral("获取校验码") : ready ? QStringLiteral("连接对方")
         : state == State::Connecting || state == State::Joining ? QStringLiteral("取消连接") : QStringLiteral("断开连接"));
     meetingJoinButton_->setText(idle || !meeting ? QStringLiteral("加入会议")
@@ -1455,6 +1542,7 @@ void MainWindow::refreshSession()
 
 void MainWindow::startRemoteAccess()
 {
+    if (networkPeer_ && !networkSetup_.verified()) return;
     session_.startRemoteAccess(QUrl(serverEdit_->text().trimmed()), nameEdit_->text().trimmed());
 }
 

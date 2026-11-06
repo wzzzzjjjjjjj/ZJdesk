@@ -1,5 +1,17 @@
 # ZJdesk 项目交接
 
+## 2026-11-06 修正本机构建启动入口
+
+`构建启动.bat` 此前仍调用 SSH 双端启动器，导致打开 UI 前询问 Linux SSH 地址。现改为本机 `build.ps1 -Preset windows-release -Deploy -SkipTests`，成功后打开 `dist/windows-release/bin/zjdesk.exe`，失败停止；不再询问 SSH / IP。`直接启动.bat` 只打开本机部署，Linux 端另行启动，IP 均在主界面填写。双端开发者仍可显式使用 `start-both.ps1`；以下旧的批处理双端行为为历史记录。
+
+批处理原文件在含空格的临时路径下使用替身构建脚本和无窗口替身客户端验证：成功时正确传递 Release / Deploy / SkipTests 参数并从部署目录启动，失败返回 1 且不启动旧客户端，两项通过；`git diff --check` 通过。本次只修正入口与文档，未重跑完整构建或双机验证。
+
+## 2026-11-06 启动验证两端地址（codex/ZJdesk-2）
+
+按最新交互要求，已移除单独的 IP 弹框：直接显示主界面，在最上方只填对端 IPv4（Windows 填 Linux，Linux 填 Windows），本机源地址自动选择，空输入标红。Linux 客户端自动提供共用信令服务。本机活动地址、对端 ping 与 WebSocket 通过后才注册远控码、请求摄像头权限并开放远控 / 入会；编辑 IP 会断开并撤销验证。输入会保留，每次重新启动仍需验证。构建无需输入 IP。屏幕共享和会议均绑定验证的本机 IP。使用方法见 [启动网络验证](startup-network.md)。
+
+新版主界面验证与构建结果见 [内嵌验证记录](validation-inline-network-20261106.md)。原弹框版本的 6 组 CTest、44 项启动器模拟回归和媒体验证保留于 [历史记录](validation-startup-network-20261106.md)。ping 测试使用模拟程序，WebSocket 使用真实本地服务；此次 Ubuntu 构建、真实双机远控 / 摄像头 / 语音验收尚未完成。正式 EXE / ZIP / AppImage 未重新打包。
+
 ## 2026-11-05 应用与界面图标
 
 使用用户提供的 `D:\edgedown\ZJ创意图标设计.png` 为参考制作圆形透明图标，保存在 `packaging/zjdesk.png`，另转换七种尺寸的 `packaging/zjdesk.ico`。客户端窗口、任务栏及左上角品牌图标使用新图；Windows 客户端与自解压 EXE 嵌入 ICO，Linux AppImage 使用同一 PNG，移除旧 SVG。Windows 自解压缓存权限限制及验证边界见 [发布包说明](packaging.md)。
