@@ -1,13 +1,6 @@
 @echo off
 cd /d "%~dp0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0build.ps1" -Preset windows-release -Deploy -SkipTests
-if errorlevel 1 (
-  echo.
-  echo Build failed. See the messages above.
-  pause
-  exit /b 1
-)
-start "" /D "%~dp0dist\windows-release\bin" "%~dp0dist\windows-release\bin\zjdesk.exe"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-both.ps1" -LinuxSsh orbbec@10.11.42.4 -ForceRestart
 if errorlevel 1 (
   echo.
   echo Start failed. See the messages above.

@@ -220,9 +220,10 @@ private slots:
         QVERIFY(!window.networkSetup_.verified());
         QVERIFY(peer->property("networkInvalid").toBool());
         QVERIFY(verify->isEnabled());
-        QVERIFY(window.findChild<QLabel *>("networkStatus")->text().contains(QStringLiteral("对端")));
+        QVERIFY(window.findChild<QLabel *>("networkStatus")->toolTip().contains(QStringLiteral("对端")));
         const auto *panel = window.findChild<QWidget *>("startupNetworkPanel");
-        QVERIFY(panel->mapTo(&window, QPoint()).y() < window.statusLabel_->mapTo(&window, QPoint()).y());
+        QCOMPARE(panel->parentWidget(), window.remoteHistory_->parentWidget());
+        QVERIFY(!window.findChild<QFrame *>("sidebar")->isAncestorOf(panel));
         for (auto *widget : QApplication::topLevelWidgets())
             if (qobject_cast<QDialog *>(widget)) QVERIFY(!widget->isVisible());
         QVERIFY(QDir().mkpath("output"));
@@ -273,6 +274,9 @@ private slots:
         window.findChild<QPushButton *>("verifyNetwork")->click();
         QTRY_VERIFY(window.networkSetup_.verified());
         QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        QVERIFY(window.remoteCodeLabel_->isHidden());
+        QVERIFY(window.remoteHistory_->isHidden());
+        QVERIFY(window.joinButton_->isEnabled());
         QCOMPARE(window.serverEdit_->text(), url);
         QVERIFY(window.meetingJoinButton_->isEnabled());
         settings.sync();

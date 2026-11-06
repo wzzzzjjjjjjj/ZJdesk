@@ -9,6 +9,8 @@ QLabel#brandMark { background: transparent; border: none; }
 QLabel#brand { color: #f4f8fc; font-size: 20pt; font-weight: 700; }
 QLabel#sidebarSubtitle { color: #8fa4b8; font-size: 9pt; padding-left: 3px; }
 QLabel#navCaption { color: #688297; font-size: 8pt; font-weight: 600; padding-left: 8px; }
+QLabel#networkLabel { color: #52697e; font-weight: 600; }
+QLabel#networkHelp, QLabel#networkStatus { color: #5e7488; font-size: 8pt; }
 QPushButton#navButton {
     background: transparent; color: #a5b9cb; text-align: left;
     border: 1px solid transparent; border-radius: 9px; padding: 10px 12px;

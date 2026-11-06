@@ -1,7 +1,7 @@
 ﻿$ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-if ((Get-Content -Raw -LiteralPath (Join-Path $projectRoot '构建启动.bat')) -notmatch '-ForceRestart') {
-    throw 'The build launcher must request a force restart.'
+if ((Get-Content -Raw -LiteralPath (Join-Path $projectRoot '构建启动.bat')) -notmatch 'start-both\.ps1.*-LinuxSsh orbbec@10\.11\.42\.4 -ForceRestart') {
+    throw 'The build launcher must use the current Linux SSH target and request a force restart.'
 }
 $directLauncher = Get-Content -Raw -LiteralPath (Join-Path $projectRoot '直接启动.bat')
 if ($directLauncher -match 'start-both|run\.ps1|Read-Host|-ForceRestart' -or

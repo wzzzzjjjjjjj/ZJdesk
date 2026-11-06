@@ -66,6 +66,7 @@ private:
     QRect normalWindowGeometry_;
     QPushButton *expandButton_ = nullptr;
     QVBoxLayout *contentLayout_ = nullptr;
+    QVBoxLayout *networkLayout_ = nullptr;
     QVBoxLayout *workspaceLayout_ = nullptr;
     zjdesk::SessionCoordinator session_;
     zjdesk::NetworkSetup networkSetup_;

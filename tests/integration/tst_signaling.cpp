@@ -109,6 +109,36 @@ private slots:
         QVERIFY(host.detail().contains(QStringLiteral("读写权限")));
     }
 
+    void remoteIpRequiresMutualAddressAndHandlesAmbiguity()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator a, b, c;
+        QVERIFY(a.startRemoteAccess(url, "A", "127.0.0.1"));
+        QVERIFY(b.startRemoteAccess(url, "B", "127.0.0.2"));
+        QTRY_VERIFY(!a.remoteCode().isEmpty() && !b.remoteCode().isEmpty());
+        QVERIFY(a.connectRemoteIp());
+        QTRY_VERIFY(!a.remoteConnecting());
+        QCOMPARE(a.state(), State::WaitingForPeer);
+        QVERIFY(a.detail().contains(QStringLiteral("未验证")));
+        b.leave();
+        QVERIFY(b.startRemoteAccess(url, "B", "127.0.0.1"));
+        QTRY_VERIFY(!b.remoteCode().isEmpty());
+        QVERIFY(c.startRemoteAccess(url, "C", "127.0.0.1"));
+        QTRY_VERIFY(!c.remoteCode().isEmpty());
+        QVERIFY(a.connectRemoteIp());
+        QTRY_VERIFY(!a.remoteConnecting());
+        QCOMPARE(a.state(), State::WaitingForPeer);
+        c.leave();
+        QTest::qWait(100); // Allow the server to process C's socket closure.
+        QVERIFY(a.connectRemoteIp());
+        QTRY_COMPARE(a.state(), State::PeerAvailable);
+        QTRY_COMPARE(b.state(), State::PeerAvailable);
+        a.disconnectRemote();
+        QTRY_COMPARE(b.state(), State::WaitingForPeer);
+    }
+
     void remoteCodesPairWithoutJoiningRoomsAndRecoverAfterDisconnect()
     {
         zjdesk::RoomServer server;

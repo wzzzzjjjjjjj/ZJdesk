@@ -33,8 +33,9 @@ public:
     ~SessionCoordinator() override;
     bool join(const QUrl &url, const QString &roomId, const QString &name, RoomType type = RoomType::Assistance);
     void leave();
-    bool startRemoteAccess(const QUrl &url, const QString &name);
+    bool startRemoteAccess(const QUrl &url, const QString &name, const QString &peerAddress = {});
     bool connectRemote(const QString &code);
+    bool connectRemoteIp();
     void disconnectRemote();
     QString remoteCode() const { return remoteCode_; }
     bool remoteAccess() const { return remoteAccess_; }
@@ -240,6 +241,7 @@ private:
     QString roomId_;
     RoomType roomType_ = RoomType::Assistance;
     QString name_;
+    QString remotePeerAddress_;
     QString peerId_;
     QString peerName_;
     quint64 sent_ = 0;

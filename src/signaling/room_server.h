@@ -40,6 +40,7 @@ private:
         QString remoteCode;
         QString remoteIdentity;
         QString remotePolicy;
+        QString remotePeerAddress;
     };
     void acceptConnection();
     void receive(QWebSocket *socket, const QString &text);

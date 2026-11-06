@@ -212,21 +212,46 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
         if (!protocol::isPeerNameValid(name)) return reject(socket, "invalid_name");
         const auto policy = message->payload.value("codePolicy").toString("startup");
         const auto identity = message->payload.value("identity").toString();
+        const auto peerAddress = message->payload.value("peerAddress").toString();
+        if (!peerAddress.isEmpty() && QHostAddress(peerAddress).protocol() != QAbstractSocket::IPv4Protocol)
+            return reject(socket, "invalid_remote_address");
         if (policy != "startup" && policy != "three_days" && policy != "never")
             return reject(socket, "invalid_remote_policy");
         if (policy != "startup" && !protocol::isRemoteIdentityValid(identity))
             return reject(socket, "invalid_remote_identity");
         peer.name = name;
+        peer.remotePeerAddress = peerAddress;
         assignRemoteCode(socket, policy == "startup" ? QString()
             : QString::fromLatin1(QCryptographicHash::hash(identity.toUtf8(), QCryptographicHash::Sha256).toHex()), policy);
         return;
     }
-    if (message->type == "connect_remote")
+    if (message->type == "connect_remote" || message->type == "connect_remote_ip")
     {
-        const auto code = message->payload.value("code").toString();
-        if (!protocol::isRemoteCodeValid(code)) return reject(socket, "invalid_remote_code");
         if (peers_[socket].remoteCode.isEmpty()) return reject(socket, "not_registered");
-        auto *target = remoteCodes_.value(code, nullptr);
+        QWebSocket *target = nullptr;
+        if (message->type == "connect_remote")
+        {
+            const auto code = message->payload.value("code").toString();
+            if (!protocol::isRemoteCodeValid(code)) return reject(socket, "invalid_remote_code");
+            target = remoteCodes_.value(code, nullptr);
+        }
+        else
+        {
+            const QHostAddress address(message->payload.value("address").toString());
+            if (address.protocol() != QAbstractSocket::IPv4Protocol
+                || address != QHostAddress(peers_[socket].remotePeerAddress))
+                return reject(socket, "invalid_remote_address");
+            const auto source = socket->peerAddress().toIPv4Address();
+            for (auto it = peers_.cbegin(); it != peers_.cend(); ++it)
+            {
+                auto *candidate = it.key();
+                if (candidate == socket || it->remoteCode.isEmpty()
+                    || candidate->peerAddress().toIPv4Address() != address.toIPv4Address()
+                    || QHostAddress(it->remotePeerAddress).toIPv4Address() != source) continue;
+                if (target) return reject(socket, "remote_ambiguous");
+                target = candidate;
+            }
+        }
         if (!target || target == socket) return reject(socket, "remote_unavailable");
         if (!peers_[socket].room.isEmpty() || !peers_[target].room.isEmpty()) return reject(socket, "remote_busy");
         const auto room = QUuid::createUuid().toString(QUuid::Id128);

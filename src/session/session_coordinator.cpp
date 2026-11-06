@@ -5,6 +5,7 @@
 #include <QUuid>
 #include <QBuffer>
 #include <QImageReader>
+#include <QHostAddress>
 #include <cmath>
 
 namespace zjdesk
@@ -327,8 +328,9 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
             return;
         if (remoteAccess_)
         {
-            changeState(State::Joining, QStringLiteral("正在获取本机校验码"));
+            changeState(State::Joining, remotePeerAddress_.isEmpty() ? QStringLiteral("正在获取本机校验码") : QStringLiteral("正在注册远程控制服务"));
             QJsonObject registration{{"name", name_}};
+            if (!remotePeerAddress_.isEmpty()) registration.insert("peerAddress", remotePeerAddress_);
             registeredRemoteCodePolicy_ = remoteCodePolicy_;
             if (remoteCodePolicy_ != "startup")
             {
@@ -402,16 +404,18 @@ bool SessionCoordinator::setRemoteCodePolicy(const QString &policy, const QStrin
     return true;
 }
 
-bool SessionCoordinator::startRemoteAccess(const QUrl &url, const QString &name)
+bool SessionCoordinator::startRemoteAccess(const QUrl &url, const QString &name, const QString &peerAddress)
 {
     if (state_ != State::Idle && state_ != State::Failed) return false;
     if (!url.isValid() || (url.scheme() != "ws" && url.scheme() != "wss")
-        || url.host().isEmpty() || !url.userInfo().isEmpty() || !protocol::isPeerNameValid(name))
+        || url.host().isEmpty() || !url.userInfo().isEmpty() || !protocol::isPeerNameValid(name)
+        || (!peerAddress.isEmpty() && QHostAddress(peerAddress).protocol() != QAbstractSocket::IPv4Protocol))
     {
         fail(QStringLiteral("请填写有效的服务地址和昵称"));
         return false;
     }
     remoteAccess_ = true;
+    remotePeerAddress_ = peerAddress;
     roomType_ = RoomType::Assistance;
     remoteCode_.clear();
     name_ = name.trimmed();
@@ -433,6 +437,18 @@ bool SessionCoordinator::connectRemote(const QString &code)
     return true;
 }
 
+bool SessionCoordinator::connectRemoteIp()
+{
+    if (!remoteAccess_ || remoteCode_.isEmpty() || state_ != State::WaitingForPeer
+        || remoteConnecting_ || remotePeerAddress_.isEmpty()) return false;
+    if (!signaling_.send({"connect_remote_ip", {{"address", remotePeerAddress_}}})) return false;
+    remoteConnecting_ = true;
+    deadline_.start(8000);
+    detail_ = QStringLiteral("正在连接对方电脑");
+    emit stateChanged(state_);
+    return true;
+}
+
 void SessionCoordinator::disconnectRemote()
 {
     if (!remoteAccess_ || remoteCode_.isEmpty()) return;
@@ -443,7 +459,7 @@ void SessionCoordinator::disconnectRemote()
     clearMembership();
     if (!signaling_.send({"disconnect_remote", {}}))
         return fail(QStringLiteral("断开请求发送失败，信令连接已关闭"));
-    changeState(State::WaitingForPeer, QStringLiteral("已在线，可输入对方校验码连接"));
+    changeState(State::WaitingForPeer, remotePeerAddress_.isEmpty() ? QStringLiteral("已在线，可输入对方校验码连接") : QStringLiteral("已在线，可连接已验证的对端 IP"));
     emit membersChanged();
 }
 
@@ -1406,7 +1422,7 @@ void SessionCoordinator::receive(const protocol::Message &message)
         remoteCode_ = code;
         if (state_ == State::WaitingForPeer) { emit stateChanged(state_); return; }
         deadline_.stop();
-        changeState(State::WaitingForPeer, QStringLiteral("已在线，可输入对方校验码连接"));
+        changeState(State::WaitingForPeer, remotePeerAddress_.isEmpty() ? QStringLiteral("已在线，可输入对方校验码连接") : QStringLiteral("已在线，可连接已验证的对端 IP"));
         return;
     }
     if (remoteAccess_ && message.type == "remote_paired" && state_ == State::WaitingForPeer)
@@ -1431,7 +1447,7 @@ void SessionCoordinator::receive(const protocol::Message &message)
         clearScreenShare(false);
         clearMembership();
         remoteDialPending_ = false;
-        changeState(State::WaitingForPeer, QStringLiteral("已在线，可输入对方校验码连接"));
+        changeState(State::WaitingForPeer, remotePeerAddress_.isEmpty() ? QStringLiteral("已在线，可输入对方校验码连接") : QStringLiteral("已在线，可连接已验证的对端 IP"));
         emit membersChanged();
         return;
     }
@@ -1443,11 +1459,12 @@ void SessionCoordinator::receive(const protocol::Message &message)
         if (remoteAccess_ && code == "remote_registry_unavailable")
             return fail(QStringLiteral("信令服务无法保存校验码，请检查服务端配置目录的读写权限"));
         if (remoteAccess_ && state_ == State::WaitingForPeer && code == "not_joined") return;
-        if (remoteAccess_ && (code == "remote_unavailable" || code == "remote_busy" || code == "invalid_remote_code"))
+        if (remoteAccess_ && (code == "remote_unavailable" || code == "remote_busy" || code == "invalid_remote_code" || code == "invalid_remote_address" || code == "remote_ambiguous"))
         {
             deadline_.stop();
             remoteConnecting_ = false;
             detail_ = code == "remote_busy" ? QStringLiteral("对方正在连接其他电脑，请稍后重试")
+                : !remotePeerAddress_.isEmpty() ? QStringLiteral("对端未在线、未验证本机 IP 或地址不唯一，请检查后重试")
                 : QStringLiteral("校验码无效或对方不在线，请检查后重试");
             emit stateChanged(state_);
             return;
