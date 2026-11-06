@@ -5,7 +5,6 @@
 #include <QFile>
 #include <QHostInfo>
 #include <QIcon>
-#include <QTimer>
 
 int main(int argc, char **argv)
 {
@@ -30,9 +29,8 @@ int main(int argc, char **argv)
     parser.addOption({"room", "Room code", "room"});
     parser.addOption({{"display-name", "name"}, "Display name", "name", QHostInfo::localHostName()});
     parser.process(app);
-    MainWindow window(parser.value("server"), parser.value("room"), parser.value("display-name"));
+    MainWindow window(parser.isSet("server") ? parser.value("server") : QString(), parser.value("room"), parser.value("display-name"));
+    window.enableNetworkSetup();
     window.show();
-    QTimer::singleShot(0, &window, &MainWindow::startRemoteAccess);
-    QTimer::singleShot(0, &window, &MainWindow::requestCameraPermission);
     return app.exec();
 }

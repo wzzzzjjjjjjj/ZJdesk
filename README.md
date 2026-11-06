@@ -3,6 +3,12 @@
 C++ / Qt 跨平台协作工作台，目标平台为 Windows 11 x64 与 Ubuntu 22.04 x64。
 本项目沿用 MeetScope 的产品方向，以 ZJdesk 为工程名，按可验证的小版本持续开发。
 
+## 启动后在主界面验证对端 IP
+
+客户端直接显示主界面，在顶部填写对端 IPv4：Windows 填 Linux IP，Linux 填 Windows IP，本机地址自动选择。输入框旁提供 `ipconfig`、`ip -4 addr show up` 查询方法，空输入或验证失败会标红；验证成功后才生成远控校验码、开放会议。修改地址会断开当前会话并要求重新验证；上次输入会保留，每次启动仍需验证，不弹出单独的 IP 窗口。Linux 客户端自动提供双方共用的信令服务，默认端口 `8765`。
+
+Windows 可双击 `直接启动.bat` 打开已部署的客户端，或用 `构建启动.bat` 在本机构建部署后打开；这两个入口都不询问 SSH 地址。Linux 端在对应电脑打开程序。新用户的完整操作及失败处理见 [启动网络验证](docs/startup-network.md)。`start-both.ps1` 单独保留为开发用 SSH 双端启动器。
+
 ## 当前版本：校验码远控与四人会议
 
 已实现：
@@ -157,8 +163,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run.ps1
 
 1. 打开根目录 `CMakeLists.txt`。
 2. 选择 **Qt 6.8.3 MSVC2022 64bit** 套件，使用 Ninja。
-3. 构建后选 `zjdesk` 作为运行目标；先另外启动 `zjdesk-server`。
-4. 默认服务地址为 `ws://127.0.0.1:8765`，房间码默认留空，需在两端输入相同的房间码。
+3. 构建后选 `zjdesk` 作为运行目标；Linux 客户端自动提供共用服务。
+4. 主界面顶部只填写对端 IPv4 并验证；会议需在两端输入相同房间码，远控使用对方校验码。
 
 ### Windows EXE / Linux AppImage 发布包
 
@@ -166,7 +172,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run.ps1
 
 - Windows：双击 `ZJdesk-0.4.5-windows-x64.exe`，首次解压到当前用户目录后启动；也可以解压 `ZJdesk-0.4.5-windows-x64-portable.zip`，运行 `bin/zjdesk.exe`，保留全部 DLL 和子目录。
 - Linux：给 `ZJdesk-0.4.5-linux-x86_64.AppImage` 添加执行权限后运行。包内包含 Qt / GStreamer，验证基线为 Ubuntu 22.04 x64 X11，尚未完成 Ubuntu 24.04 或干净系统验收。
-- 客户端不自动启动信令服务。选一台电脑运行服务，两端填写该电脑的服务地址和相同房间码；[发布包使用、构建与验证说明](docs/packaging.md)。
+- 上述既有发布包尚未包含本轮顶部 IP 验证更新；需要重新打包后才有新界面。当前 Windows 部署目录已更新，Linux 新版本尚未构建；[发布包使用、构建与验证说明](docs/packaging.md)。
 
 ### 可直接双击的本地部署
 
@@ -175,18 +181,18 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run.ps1
 ```
 
 输出到 `dist/windows-release/bin/`，包含客户端、信令服务和 Qt 运行依赖。
-客户端启动并不自动创建服务；本机演示可先启动同目录的 `zjdesk-server.exe`。
+直接运行客户端即可：Linux 客户端自动创建共用服务，Windows 客户端通过顶部填写的 Linux IP 连接。构建和部署不要求输入 IP，实际运行时再验证。
 这只是本机部署目录，还没有生成正式安装包。
 
 ### 局域网
 
-服务默认只监听本机；在服务机器显式运行：
+两端直接运行新版客户端，Linux 自动提供共用服务。Windows 顶部填 Linux IP，Linux 顶部填 Windows IP，分别验证后使用。开发者若需单独运行服务，可执行：
 
 ```powershell
 .\dist\windows-release\bin\zjdesk-server.exe --listen 0.0.0.0 --port 8765
 ```
 
-两端填写 `ws://服务机器局域网IP:8765`，远控使用对方校验码，会议仍加入相同会议房间。
+显式使用其他服务时，两端启动参数传入相同 `--server ws://服务机器局域网IP:8765`；服务机器须是这两台电脑之一。远控使用对方校验码，会议仍加入相同会议房间。
 2026-10-10 两端回到公司网络：Linux 为 `10.11.47.137`，Windows 为 `10.11.48.48`；
 已验证这两个子网可以互通，SSH 使用 `orbbec@10.11.47.137`。
 仅修改信令地址不会限制媒体网卡。需要明确验证纯局域网时，在各自启动进程前设置
@@ -226,18 +232,18 @@ bash ./run.sh
 连接已有服务时执行 `bash ./run.sh ws://服务机器IP:8765`，远控在线后输入对方校验码，会议使用会议页面的房间码。旧脚本第二个房间参数不再用于远控；第三个参数仍可指定昵称。
 仅构建服务端时配置 `-DZJDESK_BUILD_CLIENT=OFF`；服务不需要桌面会话。
 
-### 双端启动快捷方式
+### 启动快捷方式与双端开发启动器
 
-双击 `构建启动.bat` 默认在两端增量构建、部署，然后启动两端；源码未变时 Ninja 不重新编译，此入口跳过测试。需要回归验证时请分别运行两端的 `build.ps1` / `build.sh`。构建期间请勿修改源码。
+双击 `构建启动.bat` 仅在本机执行 `build.ps1 -Preset windows-release -Deploy -SkipTests`，成功后打开已部署的 Windows 客户端，失败则停止；不连接 SSH，不要求在终端填写 IP。源码未变时 Ninja 不重新编译，此入口跳过测试。双击 `直接启动.bat` 则跳过构建、测试和部署，直接打开本机已部署的客户端。两者均在主界面顶部验证对端 IP，Linux 端由用户另行启动。构建前请关闭本机旧客户端，避免 EXE / DLL 被占用；构建期间请勿修改源码。需要回归验证时请运行不带 `-SkipTests` 的 `build.ps1`。
+
+需要通过 SSH 构建启动两端时，显式执行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start-both.ps1 -ForceRestart`，以下缓存、选网卡和重启行为仅属于这个开发入口。
 
 Windows 继续复用 `build/windows-release`；Linux 按 Windows 机器和工作树路径复用 `build/start-both-cache.<hash>` 独立目录。同步包括未提交源码，按内容校验，仅更新变更文件并清理已删除的源码，保留编译缓存和部署目录，Linux 原项目源码保持原样。首次使用新缓存需要完整编译，后续仅编译变化及其依赖；Linux 需要 `rsync`。已有的旧快照目录保留。
-双击 `直接启动.bat` 会跳过构建、测试和部署，直接使用两端已有的 Release 构建；代码更新后请先重新构建两端。
-这两个入口使用 `start-both.ps1` 中配置的机器地址、SSH 和 Linux 桌面环境。
 `start-both.ps1` 启动时通过 SSH 查询 Linux 当前地址，优先选择可达的有线接口，没有可达有线地址时回退 Wi-Fi；Windows 同样优先选择当前可用的物理有线接口，不能到达所选 Linux 地址时回退 Wi-Fi。逐对检查源地址、网卡路由及绑定源地址的 TCP 连通性，随后信令和两端媒体使用同一组地址，不再固定旧 IP。Docker / VPN 等虚拟接口不参与自动选择，仍可手动指定。两端的选择不依赖谁是控制方；只在启动时选择，切换网络后需要重新启动连接。
 
-默认 SSH 候选为 `orbbec@10.11.42.4` 和 `orbbec@10.11.47.137`，需预先配置免密登录并核对主机密钥；如果两端 DHCP 地址均变化或换电脑，传入 `-LinuxSsh '用户名@当前可达地址'`。有一个候选可登录时，会查询到其他网卡的新地址。需要固定网卡时传入 `-LinuxAddress 'Linux当前IPv4地址'` / `-WindowsAddress 'Windows当前IPv4地址'`；显式地址失效时报错，避免静默改用其他接口。验证范围见 [有线 / 无线启动验证](docs/validation-network-startup-20261105.md)。
+未传 SSH 地址时，启动器先提示查询方法并要求输入 `用户名@Linux当前IPv4地址`，也可传入 `-LinuxSsh '用户名@当前可达地址'`，不再内置固定候选。需预先配置免密登录、核对主机密钥，并按实际机器指定 `-LinuxRoot` 和 Linux 桌面环境。有一个候选可登录时，会查询到其他网卡的新地址。需要固定网卡时传入 `-LinuxAddress 'Linux当前IPv4地址'` / `-WindowsAddress 'Windows当前IPv4地址'`；显式地址失效时报错。两端客户端随后仍需完成 [启动网络验证](docs/startup-network.md)。原选网卡验证见 [有线 / 无线启动验证](docs/validation-network-startup-20261105.md)。
 
-`构建启动.bat` 自动传入 `-ForceRestart`，先强制结束 Windows 上的 `zjdesk.exe` / `zjdesk-server.exe`，以及 Linux SSH 用户名下的 `zjdesk` / `zjdesk-server` 旧实例，再检查 8765 端口并继续构建启动。无法结束进程或端口仍被其他程序占用时停止并报错。`直接启动.bat` 保持原行为，需先关闭旧实例。
+`start-both.ps1 -ForceRestart` 先强制结束 Windows 上的 `zjdesk.exe` / `zjdesk-server.exe`，以及 Linux SSH 用户名下的 `zjdesk` / `zjdesk-server` 旧实例，再检查 8765 端口并继续构建启动。无法结束进程或端口仍被其他程序占用时停止并报错。本机批处理入口不执行这个双端重启流程。
 
 ### Windows 与 Linux 双向远程控制
 
@@ -248,7 +254,7 @@ Remove-Item Env:ZJDESK_WEBRTC_LOCAL_ADDRESS -ErrorAction SilentlyContinue
 .\run.ps1 -Preset windows-release -ServerUrl 'ws://Linux当前可达IP:8765' -Name Windows
 ```
 
-手动启动 Linux 可用 `env -u ZJDESK_WEBRTC_LOCAL_ADDRESS bash ./run.sh`，让 ICE 自动收集当前地址；不要沿用上次网络的固定媒体地址。有线优先的自动探测由上面的双端启动器完成。
+手动启动 Linux 可用 `bash ./run.sh`，在主界面顶部填写并验证 Windows IP；成功后会用自动识别的本机地址覆盖旧的媒体绑定。两端默认共用 Linux 信令服务。有线优先的自动探测由上面的双端启动器完成。
 不同网络经 Tailscale 的验证按用户要求暂停，当前局域网结果见 [validation.md](docs/validation.md)。
 
 两端均更新客户端和信令服务后启动。协作空间在线时显示“本机校验码”，控制方输入对方 9 位数字码并点击“连接对方”，自动发起请求。

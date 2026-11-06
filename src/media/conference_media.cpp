@@ -3,6 +3,7 @@
 #include "share_quality.h"
 #include <QElapsedTimer>
 #include <QMutexLocker>
+#include <QNetworkInterface>
 #include <QTimer>
 #include <memory>
 #include <cmath>
@@ -13,6 +14,10 @@
 #include <gst/app/gstappsrc.h>
 #include <gst/video/video.h>
 #include <gst/webrtc/webrtc.h>
+#pragma push_macro("signals")
+#undef signals
+#include <agent.h>
+#pragma pop_macro("signals")
 #endif
 
 namespace zjdesk
@@ -91,6 +96,23 @@ public:
         remote_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "remote"));
         audio_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "audioframes"));
         bus_ = gst_element_get_bus(pipeline_);
+        const auto localAddress = qEnvironmentVariable("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+        if (!localAddress.isEmpty())
+        {
+            GObject *ice = nullptr;
+            NiceAgent *agent = nullptr;
+            g_object_get(rtc_, "ice-agent", &ice, nullptr);
+            if (ice && g_object_class_find_property(G_OBJECT_GET_CLASS(ice), "agent"))
+                g_object_get(ice, "agent", &agent, nullptr);
+            NiceAddress address;
+            nice_address_init(&address);
+            const bool bound = agent && QNetworkInterface::allAddresses().contains(QHostAddress(localAddress))
+                && nice_address_set_from_string(&address, localAddress.toUtf8().constData())
+                && nice_agent_add_local_address(agent, &address);
+            if (agent) g_object_unref(agent);
+            if (ice) g_object_unref(ice);
+            if (!bound) return fail(QStringLiteral("指定的会议本地地址不可用，请重新启动并验证网络地址"));
+        }
         QString deviceError;
         nativeMode_ = mode;
         auto *camera = shared ? gst_element_factory_make("appsrc", "sharedvideo")

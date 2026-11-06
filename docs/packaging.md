@@ -1,5 +1,7 @@
 # 发布包使用与构建
 
+2026-11-06 源码与 Windows 部署目录已增加主界面顶部的对端 IP 验证，Linux 客户端自动提供共用服务；构建不要求输入 IP。当前既有 EXE / ZIP / AppImage 尚未重新打包，以下既有发布文件的使用及验证记录不代表包含该功能。新版交互见 [启动网络验证](startup-network.md)。
+
 ## 应用图标（2026-11-05）
 
 `packaging/zjdesk.png` 是以用户提供的 `D:\edgedown\ZJ创意图标设计.png` 为参考生成的圆形透明图标；`packaging/zjdesk.ico` 为 16 / 24 / 32 / 48 / 64 / 128 / 256 像素格式转换。Qt 资源用于窗口及左上角品牌图标，Windows RC 与自解压编译器嵌入 ICO，AppImage 的桌面入口及 `.DirIcon` 使用 PNG。

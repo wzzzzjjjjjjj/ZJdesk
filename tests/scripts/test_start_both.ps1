@@ -3,8 +3,10 @@ $projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 if ((Get-Content -Raw -LiteralPath (Join-Path $projectRoot '构建启动.bat')) -notmatch '-ForceRestart') {
     throw 'The build launcher must request a force restart.'
 }
-if ((Get-Content -Raw -LiteralPath (Join-Path $projectRoot '直接启动.bat')) -match '-ForceRestart') {
-    throw 'Direct startup must retain its existing behavior.'
+$directLauncher = Get-Content -Raw -LiteralPath (Join-Path $projectRoot '直接启动.bat')
+if ($directLauncher -match 'start-both|run\.ps1|Read-Host|-ForceRestart' -or
+    -not $directLauncher.Contains('start "" /D "%~dp0dist\windows-release\bin" "%~dp0dist\windows-release\bin\zjdesk.exe"')) {
+    throw 'Direct startup must open the deployed client without SSH, builds or IP prompts.'
 }
 $testRoot = Join-Path $projectRoot ('build\launcher-tests.' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path (Join-Path $testRoot 'build\windows-release\bin') | Out-Null
@@ -182,7 +184,16 @@ if ($Scenario -eq 'RestartLegacyLock') {
 if ($Scenario -eq 'RestartActiveBuild') {
     $heldBuildLock = [IO.File]::Open((Join-Path $PSScriptRoot 'build\start-both\launcher.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
 }
-$parameters = @{ SkipBuild = $true }
+$parameters = @{ SkipBuild = $true; LinuxSsh = @('orbbec@10.11.42.4', 'orbbec@10.11.47.137') }
+if ($Scenario -in @('PromptAddress', 'PromptEmpty')) {
+    $parameters.Remove('LinuxSsh')
+    function Read-Host {
+        param($Prompt)
+        Write-Host 'ADDRESS_PROMPTED'
+        if ($Scenario -eq 'PromptAddress') { return 'orbbec@10.11.42.4' }
+        return ''
+    }
+}
 if ($Scenario -like 'Restart*') { $parameters.ForceRestart = $true }
 if ($Scenario -in @('BuildSuccess', 'LinuxFail', 'WindowsFail', 'RestartBuild', 'SyncFail')) { $parameters.SkipBuild = $false }
 if ($Scenario -eq 'Explicit') { $parameters.WindowsAddress = '10.11.42.99' }
@@ -201,6 +212,8 @@ exit $LASTEXITCODE
 '@ | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $testRoot 'driver.ps1')
 
 $cases = @(
+    @{ Name = 'PromptAddress'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'PromptEmpty'; ExitCode = 1; Expected = 'Linux SSH target is required.'; BeforeSsh = $true },
     @{ Name = 'Automatic'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
     @{ Name = 'DhcpChanged'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.58;SERVER=ws://10.11.42.4:8765' },
     @{ Name = 'Explicit'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.99;SERVER=ws://10.11.42.4:8765' },

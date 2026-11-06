@@ -185,6 +185,109 @@ class WindowTests : public QObject
     Q_OBJECT
     QTemporaryDir preferenceDirectory_;
 private slots:
+    void startupNetworkServerRemainsVerified()
+    {
+        const QString url = "ws://192.0.2.10:8765";
+        MainWindow window(url, {}, "Network test");
+        auto *server = window.findChild<QLineEdit *>("serverAddress");
+        QVERIFY(server->isReadOnly());
+        server->selectAll();
+        QTest::keyClicks(server, "ws://192.0.2.11:8765");
+        QCOMPARE(server->text(), url);
+        QCOMPARE(window.findChild<QLineEdit *>("meetingServerAddress")->text(), url);
+    }
+
+    void startupNetworkCannotSkipVerification()
+    {
+        QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+        settings.clear();
+        MainWindow window({}, {}, "Network test");
+        window.enableNetworkSetup();
+        window.setAttribute(Qt::WA_ShowWithoutActivating);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto *peer = window.findChild<QLineEdit *>("networkPeerAddress");
+        QVERIFY(peer->text().isEmpty());
+        QVERIFY(peer->property("networkInvalid").toBool());
+        QVERIFY(peer->styleSheet().contains("#dc3545"));
+        QVERIFY(!window.joinButton_->isEnabled());
+        QVERIFY(!window.meetingJoinButton_->isEnabled());
+        window.startRemoteAccess();
+        QCOMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
+        peer->setText("invalid");
+        auto *verify = window.findChild<QPushButton *>("verifyNetwork");
+        verify->click();
+        QVERIFY(!window.networkSetup_.verified());
+        QVERIFY(peer->property("networkInvalid").toBool());
+        QVERIFY(verify->isEnabled());
+        QVERIFY(window.findChild<QLabel *>("networkStatus")->text().contains(QStringLiteral("对端")));
+        const auto *panel = window.findChild<QWidget *>("startupNetworkPanel");
+        QVERIFY(panel->mapTo(&window, QPoint()).y() < window.statusLabel_->mapTo(&window, QPoint()).y());
+        for (auto *widget : QApplication::topLevelWidgets())
+            if (qobject_cast<QDialog *>(widget)) QVERIFY(!widget->isVisible());
+        QVERIFY(QDir().mkpath("output"));
+        QVERIFY(window.grab().save("output/ui-startup-network.png"));
+        peer->clear();
+        QVERIFY(peer->property("networkInvalid").toBool());
+    }
+
+    void startupNetworkPersistsInputsButRequiresNewVerification()
+    {
+        const auto addresses = zjdesk::NetworkSetup::localAddresses();
+        if (addresses.isEmpty()) QSKIP("No active IPv4 interface");
+        const auto originalPath = qgetenv("PATH");
+        const auto originalBinding = qgetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+        const auto originalPing = qgetenv("ZJDESK_TEST_PING");
+        const auto restore = qScopeGuard([=] {
+            qputenv("PATH", originalPath);
+            if (originalBinding.isNull()) qunsetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+            else qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", originalBinding);
+            if (originalPing.isNull()) qunsetenv("ZJDESK_TEST_PING");
+            else qputenv("ZJDESK_TEST_PING", originalPing);
+        });
+        QTemporaryDir pingDirectory;
+#ifdef Q_OS_WIN
+        const auto suffix = QStringLiteral(".exe");
+#else
+        const auto suffix = QString();
+#endif
+        const auto destination = pingDirectory.filePath("ping" + suffix);
+        QVERIFY(QFile::copy(QCoreApplication::applicationDirPath() + "/zjdesk-network-ping-stub" + suffix, destination));
+        QFile::setPermissions(destination, QFile::permissions(destination) | QFile::ExeOwner);
+        qputenv("PATH", pingDirectory.path().toUtf8() + QDir::listSeparator().toLatin1() + originalPath);
+        qputenv("ZJDESK_TEST_PING", "ok");
+        zjdesk::RoomServer server(nullptr, pingDirectory.filePath("codes.ini"));
+        QVERIFY(server.listen(QHostAddress(addresses.first()), 0));
+        QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+        settings.clear();
+        const auto url = QString("ws://%1:%2").arg(addresses.first()).arg(server.port());
+        MainWindow window(url, {}, "Network test");
+        window.enableNetworkSetup();
+#ifdef Q_OS_WIN
+        const QString peerKey = "linuxAddress";
+#else
+        const QString peerKey = "windowsAddress";
+#endif
+        auto *peer = window.findChild<QLineEdit *>("networkPeerAddress");
+        peer->setText("203.0.113.9");
+        window.findChild<QPushButton *>("verifyNetwork")->click();
+        QTRY_VERIFY(window.networkSetup_.verified());
+        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        QCOMPARE(window.serverEdit_->text(), url);
+        QVERIFY(window.meetingJoinButton_->isEnabled());
+        settings.sync();
+        QCOMPARE(settings.value("networkSetup/" + peerKey).toString(), QString("203.0.113.9"));
+        peer->setText("203.0.113.10");
+        QVERIFY(!window.networkSetup_.verified());
+        QCOMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
+        QVERIFY(!window.meetingJoinButton_->isEnabled());
+        MainWindow restarted(url, {}, "Network test");
+        restarted.enableNetworkSetup();
+        QCOMPARE(restarted.networkPeer_->text(), QString("203.0.113.9"));
+        QVERIFY(!restarted.networkSetup_.verified());
+        QVERIFY(!restarted.meetingJoinButton_->isEnabled());
+    }
+
     void remoteCodeWaitsForPreviousStreamsToStop_data()
     {
         QTest::addColumn<bool>("controllerFirst");

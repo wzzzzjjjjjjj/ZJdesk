@@ -30,6 +30,7 @@ target_link_libraries(zjdesk_signaling PUBLIC zjdesk_protocol Qt6::Network Qt6::
 add_library(zjdesk_client_core STATIC
     src/signaling/signaling_client.cpp src/signaling/signaling_client.h
     src/session/session_coordinator.cpp src/session/session_coordinator.h
+    src/session/network_setup.cpp src/session/network_setup.h
     src/remote-control/control_session.cpp src/remote-control/control_session.h
     src/remote-control/file_clipboard.cpp src/remote-control/file_clipboard.h
     src/remote-control/input_injector.cpp src/remote-control/input_injector.h
@@ -45,7 +46,7 @@ add_library(zjdesk_client_core STATIC
     src/media/congestion_budget.h
     src/platform/platform_info.cpp src/platform/platform_info.h
     src/platform/camera_permission.cpp src/platform/camera_permission.h src/platform/camera_permission_p.h)
-target_link_libraries(zjdesk_client_core PUBLIC zjdesk_protocol Qt6::Gui Qt6::Network Qt6::WebSockets)
+target_link_libraries(zjdesk_client_core PUBLIC zjdesk_protocol zjdesk_signaling Qt6::Gui Qt6::Network Qt6::WebSockets)
 if(WIN32)
     target_link_libraries(zjdesk_client_core PRIVATE windowsapp user32 gdi32)
 endif()
@@ -105,11 +106,17 @@ if(BUILD_TESTING)
     target_link_libraries(zjdesk-file-tests PRIVATE zjdesk_client_core Qt6::Test)
     target_link_libraries(zjdesk-unit-tests PRIVATE zjdesk_client_core Qt6::Test)
     qt_add_executable(zjdesk-integration-tests tests/integration/tst_signaling.cpp)
+    add_executable(zjdesk-network-ping-stub tests/unit/network_ping_stub.cpp)
+    qt_add_executable(zjdesk-network-tests tests/unit/tst_network_setup.cpp)
+    target_link_libraries(zjdesk-network-tests PRIVATE zjdesk_client_core Qt6::Test)
+    add_dependencies(zjdesk-network-tests zjdesk-network-ping-stub)
     target_link_libraries(zjdesk-integration-tests PRIVATE zjdesk_client_core zjdesk_signaling Qt6::Test)
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/test-results")
     add_test(NAME core COMMAND zjdesk-unit-tests -o "${CMAKE_BINARY_DIR}/test-results/core.xml,junitxml")
     add_test(NAME file-clipboard COMMAND zjdesk-file-tests -o "${CMAKE_BINARY_DIR}/test-results/file-clipboard.xml,junitxml")
     add_test(NAME signaling COMMAND zjdesk-integration-tests -o "${CMAKE_BINARY_DIR}/test-results/signaling.xml,junitxml")
+    add_test(NAME network-setup COMMAND zjdesk-network-tests -o "${CMAKE_BINARY_DIR}/test-results/network-setup.xml,junitxml")
+    set_tests_properties(network-setup PROPERTIES TIMEOUT 30)
     set_tests_properties(core signaling file-clipboard PROPERTIES TIMEOUT 30)
     if(ZJDESK_ENABLE_GSTREAMER)
         qt_add_executable(zjdesk-media-tests tests/integration/tst_media.cpp)
@@ -126,6 +133,7 @@ if(BUILD_TESTING)
         target_include_directories(zjdesk-ui-tests PRIVATE apps/client)
         target_link_libraries(zjdesk-ui-tests PRIVATE zjdesk_client_core zjdesk_signaling
             Qt6::Widgets Qt6::OpenGLWidgets Qt6::Test)
+        add_dependencies(zjdesk-ui-tests zjdesk-network-ping-stub)
         qt_add_resources(zjdesk-ui-tests test_styles PREFIX "/" FILES resources/styles.qss)
         qt_add_resources(zjdesk-ui-tests test_branding PREFIX "/icons" BASE packaging FILES packaging/zjdesk.png)
         add_test(NAME desktop COMMAND zjdesk-ui-tests -o "${CMAKE_BINARY_DIR}/test-results/desktop.xml,junitxml")
@@ -137,7 +145,7 @@ endif()
 # at low integrity, where Windows denies camera access despite enabled consent.
 if(WIN32)
     find_program(ZJDESK_POWERSHELL NAMES powershell REQUIRED)
-    foreach(runtime_target zjdesk zjdesk-unit-tests zjdesk-file-tests zjdesk-integration-tests zjdesk-media-tests zjdesk-ui-tests zjdesk-meeting-probe)
+    foreach(runtime_target zjdesk zjdesk-unit-tests zjdesk-file-tests zjdesk-integration-tests zjdesk-network-tests zjdesk-network-ping-stub zjdesk-media-tests zjdesk-ui-tests zjdesk-meeting-probe)
         if(TARGET ${runtime_target})
             add_custom_command(TARGET ${runtime_target} POST_BUILD
                 COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath
