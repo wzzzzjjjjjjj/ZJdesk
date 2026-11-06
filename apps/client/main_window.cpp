@@ -28,6 +28,7 @@
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QApplication>
+#include <QAction>
 #include <QKeyEvent>
 #include <QVBoxLayout>
 #include <QUuid>
@@ -99,6 +100,26 @@ QIcon memberStackIcon(const QStringList &names)
         painter.drawText(circle, Qt::AlignCenter, i < 4
             ? names.at(i).trimmed().left(1).toUpper() : QStringLiteral("+%1").arg(names.size() - 4));
     }
+    painter.end();
+    pixmap.setDevicePixelRatio(2);
+    return QIcon(pixmap);
+}
+
+QIcon remotePeerIcon(const QString &name)
+{
+    QPixmap pixmap(64, 64);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor("#d9efeb"));
+    painter.drawEllipse(pixmap.rect());
+    auto font = painter.font();
+    font.setPixelSize(28);
+    font.setBold(true);
+    painter.setFont(font);
+    painter.setPen(QColor("#237c77"));
+    painter.drawText(pixmap.rect(), Qt::AlignCenter, name.trimmed().left(1).toUpper());
     painter.end();
     pixmap.setDevicePixelRatio(2);
     return QIcon(pixmap);
@@ -373,6 +394,23 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     nameEdit_->setPlaceholderText(QStringLiteral("输入你的昵称"));
     roomEdit_->setMaxLength(9);
     nameEdit_->setMaxLength(40);
+    remoteHistory_ = new QComboBox;
+    remoteHistory_->setObjectName("recentRemoteCodes");
+    remoteHistory_->setEditable(true);
+    remoteHistory_->setLineEdit(roomEdit_);
+    remoteHistory_->setCompleter(nullptr);
+    remoteHistory_->setInsertPolicy(QComboBox::NoInsert);
+    remoteHistory_->setIconSize(QSize(28, 28));
+    remoteHistory_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    remoteHistory_->setAccessibleName(QStringLiteral("对方校验码与最近连接"));
+    remoteHistory_->setToolTip(QStringLiteral("输入对方校验码，或选择最近连接的电脑后点击连接"));
+    auto *recentAction = roomEdit_->addAction(style()->standardIcon(QStyle::SP_ArrowDown), QLineEdit::TrailingPosition);
+    recentAction->setToolTip(QStringLiteral("最近连接"));
+    connect(recentAction, &QAction::triggered, remoteHistory_, &QComboBox::showPopup);
+    refreshRemoteHistory();
+    connect(remoteHistory_, &QComboBox::activated, this, [this](int index) {
+        roomEdit_->setText(remoteHistory_->itemData(index).toString());
+    });
     const QList<QPair<QString, QLineEdit *>> fields = {
         {QStringLiteral("服务地址"), serverEdit_}, {QStringLiteral("对方校验码"), roomEdit_},
         {QStringLiteral("你的昵称"), nameEdit_}};
@@ -384,7 +422,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         label->setBuddy(field.second);
         field.second->setAccessibleName(field.first);
         column->addWidget(label);
-        column->addWidget(field.second);
+        column->addWidget(field.second == roomEdit_ ? static_cast<QWidget *>(remoteHistory_) : field.second);
         connectionLayout->addLayout(column, field.second == serverEdit_ ? 3 : 2);
     }
     joinButton_ = new QPushButton(QStringLiteral("连接对方"));
@@ -473,7 +511,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     controlButton_->setObjectName("controlButton");
     allowControlButton_ = new QPushButton(QStringLiteral("允许控制"));
     allowControlButton_->setObjectName("allowControlButton");
-    stopControlButton_ = new QPushButton(QStringLiteral("停止控制"));
+    stopControlButton_ = new QPushButton(QStringLiteral("结束控制"));
     stopControlButton_->setObjectName("stopControlButton");
     controlLabel_ = text(session_.remoteDetail(), "controlStatus");
     controlLabel_->setWordWrap(true);
@@ -969,6 +1007,8 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
             session_.leave();
     });
     connect(roomEdit_, &QLineEdit::textChanged, this, &MainWindow::refreshSession);
+    connect(serverEdit_, &QLineEdit::textChanged, this, &MainWindow::refreshRemoteHistory);
+    connect(&session_, &zjdesk::SessionCoordinator::remotePeerConnected, this, &MainWindow::rememberRemotePeer);
     connect(serverEdit_, &QLineEdit::textEdited, this, [this] {
         if (session_.remoteAccess() && session_.state() == zjdesk::SessionCoordinator::State::WaitingForPeer)
             session_.leave();
@@ -1399,7 +1439,7 @@ void MainWindow::refreshControl()
     controlButton_->setEnabled(session_.canRequestControl());
     allowControlButton_->setVisible(!expandButton_->isChecked() && state == Remote::Pending);
     stopControlButton_->setEnabled(state != Remote::Idle);
-    stopControlButton_->setText(state == Remote::Pending ? QStringLiteral("拒绝控制") : QStringLiteral("停止控制"));
+    stopControlButton_->setText(state == Remote::Pending ? QStringLiteral("拒绝控制") : QStringLiteral("结束控制"));
     controlLabel_->setText(session_.remoteDetail());
     video_->setControlEnabled(state == Remote::Controlling);
 }
@@ -1414,7 +1454,13 @@ void MainWindow::refreshSession()
     remoteCodeLabel_->setText(session_.remoteCode().isEmpty() ? QStringLiteral("本机校验码：未在线")
         : QStringLiteral("本机校验码：%1").arg(session_.remoteCode()));
     serverEdit_->setEnabled(idle || ready);
-    roomEdit_->setEnabled(idle || ready);
+    remoteHistory_->setEnabled(idle || ready);
+    if (remote && state == State::PeerAvailable && !roomEdit_->text().isEmpty())
+    {
+        const QSignalBlocker blocker(roomEdit_);
+        remoteHistory_->setCurrentIndex(-1);
+        roomEdit_->clear();
+    }
     nameEdit_->setEnabled(idle);
     meetingServerEdit_->setEnabled(idle);
     meetingRoomEdit_->setEnabled(idle || ready);
@@ -1456,6 +1502,43 @@ void MainWindow::refreshSession()
 void MainWindow::startRemoteAccess()
 {
     session_.startRemoteAccess(QUrl(serverEdit_->text().trimmed()), nameEdit_->text().trimmed());
+}
+
+void MainWindow::refreshRemoteHistory()
+{
+    const auto entered = roomEdit_->text();
+    const QSignalBlocker comboBlocker(remoteHistory_);
+    const QSignalBlocker editBlocker(roomEdit_);
+    remoteHistory_->clear();
+    const auto server = QUrl(serverEdit_->text().trimmed()).toString();
+    QSettings preferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "remote-control");
+    for (const auto &value : preferences.value("recentConnections").toList())
+    {
+        const auto entry = value.toMap();
+        const auto code = entry.value("code").toString();
+        if (entry.value("server").toString() != server || !zjdesk::protocol::isRemoteCodeValid(code)) continue;
+        const auto name = entry.value("name").toString();
+        remoteHistory_->addItem(remotePeerIcon(name), code + "  " + name, code);
+    }
+    remoteHistory_->setCurrentIndex(-1);
+    roomEdit_->setText(entered);
+}
+
+void MainWindow::rememberRemotePeer(const QString &code, const QString &name)
+{
+    const auto server = QUrl(serverEdit_->text().trimmed()).toString();
+    QSettings preferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "remote-control");
+    auto entries = preferences.value("recentConnections").toList();
+    for (qsizetype i = entries.size(); i-- > 0;)
+    {
+        const auto entry = entries.at(i).toMap();
+        if (entry.value("server").toString() == server && entry.value("code").toString() == code)
+            entries.removeAt(i);
+    }
+    entries.prepend(QVariantMap{{"server", server}, {"code", code}, {"name", name}});
+    while (entries.size() > 10) entries.removeLast();
+    preferences.setValue("recentConnections", entries);
+    refreshRemoteHistory();
 }
 
 void MainWindow::exportEvents()

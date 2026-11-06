@@ -7,6 +7,7 @@
 
 class QLabel;
 class QLineEdit;
+class QComboBox;
 class QPlainTextEdit;
 class QPushButton;
 class QVBoxLayout;
@@ -38,6 +39,8 @@ private:
     void refreshDevices();
     void refreshShare();
     void refreshControl();
+    void refreshRemoteHistory();
+    void rememberRemotePeer(const QString &code, const QString &name);
     void refreshMeetingParticipants();
     void setMeetingRoster(const QStringList &names);
     void expandVideo(bool expanded);
@@ -65,6 +68,7 @@ private:
     zjdesk::SessionCoordinator session_;
     QLineEdit *serverEdit_ = nullptr;
     QLineEdit *roomEdit_ = nullptr;
+    QComboBox *remoteHistory_ = nullptr;
     QLabel *remoteCodeLabel_ = nullptr;
     QLineEdit *nameEdit_ = nullptr;
     QPushButton *joinButton_ = nullptr;

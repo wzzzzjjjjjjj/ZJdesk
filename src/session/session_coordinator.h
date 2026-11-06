@@ -121,6 +121,7 @@ signals:
     void shareFrame(const QImage &image);
     void shareStatisticsChanged(const zjdesk::ShareStats &stats);
     void remoteChanged();
+    void remotePeerConnected(const QString &code, const QString &name);
     void inputProbeInjected(quint64 sequence, qint64 injectUs, bool accepted);
     void inputProbeAcknowledged(quint64 sequence, qint64 roundTripUs, qint64 injectUs, bool accepted);
     void remoteCursorChanged(const zjdesk::RemoteCursor &cursor);

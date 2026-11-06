@@ -398,8 +398,15 @@ bool SessionCoordinator::connectRemote(const QString &code)
 void SessionCoordinator::disconnectRemote()
 {
     if (!remoteAccess_ || remoteCode_.isEmpty()) return;
-    stopControl();
-    signaling_.send({"disconnect_remote", {}});
+    deadline_.stop();
+    remoteConnecting_ = false;
+    remoteDialPending_ = false;
+    clearScreenShare(false);
+    clearMembership();
+    if (!signaling_.send({"disconnect_remote", {}}))
+        return fail(QStringLiteral("断开请求发送失败，信令连接已关闭"));
+    changeState(State::WaitingForPeer, QStringLiteral("已在线，可输入对方校验码连接"));
+    emit membersChanged();
 }
 
 void SessionCoordinator::clearMembership()
@@ -684,7 +691,7 @@ bool SessionCoordinator::grantControl()
 void SessionCoordinator::sendControlGrant()
 {
     controlDeadline_.stop();
-    remoteDetail_ = QStringLiteral("对方正在控制本机，点击停止控制可立即收回");
+    remoteDetail_ = QStringLiteral("对方正在控制本机，点击结束控制可立即收回");
     screen_.sendControl({{"action", "grant"}, {"epoch", QString::number(control_.epoch())},
         {"requestId", controlRequestId_}, {"cursorSync", true}, {"fileClipboard", true}, {"fileClipboardReverse", true}}, shareEpoch_);
     emit remoteChanged();
@@ -810,6 +817,8 @@ void SessionCoordinator::sendCursor()
 
 void SessionCoordinator::stopControl()
 {
+    if (remoteAccess_ && state_ == State::PeerAvailable)
+        return disconnectRemote();
     const bool stopDesktop = controlStartedShare_;
     if (state_ == State::PeerAvailable && remoteState_ != RemoteState::Idle)
         sendNegotiation("control", {{"action", "revoke"}, {"requestId", controlRequestId_}});
@@ -1375,6 +1384,12 @@ void SessionCoordinator::receive(const protocol::Message &message)
         remoteDialPending_ = message.payload.value("controller").toBool();
         state_ = State::Joining;
         receive({"joined", message.payload});
+        if (state_ == State::PeerAvailable)
+        {
+            const auto peers = message.payload.value("peers").toArray();
+            const auto code = peers.isEmpty() ? QString() : peers.first().toObject().value("code").toString();
+            if (protocol::isRemoteCodeValid(code)) emit remotePeerConnected(code, peerName_);
+        }
         return;
     }
     if (remoteAccess_ && message.type == "remote_ready")

@@ -153,6 +153,52 @@ private slots:
         QCOMPARE(server.roomCount(), 0);
     }
 
+    void endingRemoteControlDisconnectsBothPeers_data()
+    {
+        QTest::addColumn<bool>("hostEnds");
+        QTest::newRow("controller-ends") << false;
+        QTest::newRow("host-ends") << true;
+    }
+
+    void endingRemoteControlDisconnectsBothPeers()
+    {
+        QFETCH(bool, hostEnds);
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator controller, host;
+        QSignalSpy controllerHistory(&controller, &zjdesk::SessionCoordinator::remotePeerConnected);
+        QSignalSpy hostHistory(&host, &zjdesk::SessionCoordinator::remotePeerConnected);
+        QVERIFY(controller.startRemoteAccess(url, "Controller"));
+        QVERIFY(host.startRemoteAccess(url, "Host"));
+        QTRY_VERIFY(!controller.remoteCode().isEmpty() && !host.remoteCode().isEmpty());
+        const auto hostCode = host.remoteCode();
+        const auto controllerCode = controller.remoteCode();
+        QVERIFY(controller.connectRemote(hostCode));
+        QTRY_COMPARE(host.state(), State::PeerAvailable);
+        QTRY_COMPARE(controllerHistory.count(), 1);
+        QCOMPARE(controllerHistory.first(), QVariantList({hostCode, QString("Host")}));
+        QCOMPARE(hostHistory.first(), QVariantList({controllerCode, QString("Controller")}));
+        (hostEnds ? host : controller).stopControl();
+        QTRY_COMPARE(controller.state(), State::WaitingForPeer);
+        QTRY_COMPARE(host.state(), State::WaitingForPeer);
+        QCOMPARE(controller.remoteState(), zjdesk::SessionCoordinator::RemoteState::Idle);
+        QCOMPARE(host.remoteState(), zjdesk::SessionCoordinator::RemoteState::Idle);
+        QVERIFY(controller.peerId().isEmpty() && host.peerId().isEmpty());
+        QVERIFY(!controller.canRequestControl() && !host.canRequestControl());
+        QCOMPARE(server.roomCount(), 0);
+        QCOMPARE(controller.remoteCode(), controllerCode);
+        QCOMPARE(host.remoteCode(), hostCode);
+        QTest::qWait(100);
+        QCOMPARE(controllerHistory.count(), 1); // No automatic redial after ending control.
+        QVERIFY(!controller.connectRemote({}));
+        QVERIFY(controller.connectRemote(hostCode)); // A new explicit code submission is required.
+        QTRY_COMPARE(controllerHistory.count(), 2);
+        QTRY_COMPARE(hostHistory.count(), 2);
+        controller.disconnectRemote();
+        QTRY_COMPARE(host.state(), State::WaitingForPeer);
+    }
+
     void meetingRejectsLateScreenShare()
     {
         zjdesk::RoomServer server;

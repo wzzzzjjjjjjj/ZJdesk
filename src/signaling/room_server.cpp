@@ -238,7 +238,8 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
             auto *other = member == socket ? target : socket;
             send(member, {"remote_paired", {{"roomId", room}, {"roomType", "assistance"},
                 {"peerId", peers_[member].id}, {"controller", member == socket},
-                {"peers", QJsonArray{QJsonObject{{"peerId", peers_[other].id}, {"name", peers_[other].name}}}}}});
+                {"peers", QJsonArray{QJsonObject{{"peerId", peers_[other].id}, {"name", peers_[other].name},
+                    {"code", peers_[other].remoteCode}}}}}});
         }
         return;
     }
