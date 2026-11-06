@@ -53,6 +53,7 @@ flowchart TD
 | diagnostics / EventLog | 有界事件记录、原子文件导出 | 不记录 SDP 内容或实际输入文本 |
 | remote-control / ControlSession | 本地授权、控制代次、序号校验 | 由协调层处理请求、授权与撤销 |
 | remote-control / InputInjector | Windows SendInput / Linux X11 XTest 键鼠输入、释放与真实光标读取 | 仅授权后调用；不依赖 UI Widgets |
+| remote-control / InputReceiver | 独立输入线程、授权代次与序号门禁、执行结果回传 | 授权和撤销仍由协调层发起；输入与回执不等待 UI 事件循环 |
 | media / MediaEnvironment | 可选 SDK 初始化、插件检查与部署环境选择 | 不推断通话连接成功 |
 | media / MediaEngine | 设备枚举、内部采集回归、音频测试与有界帧交接 | Gst 指针只在媒体模块，当前不发送媒体 |
 | media / ScreenShare | 桌面采集、WebRTC 协商、VP9 编解码与有界帧交接 | 独立工作线程，不直接修改会话业务状态 |

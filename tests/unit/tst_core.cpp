@@ -3,6 +3,7 @@
 #include "platform/camera_permission_p.h"
 #include "protocol/message.h"
 #include "remote-control/control_session.h"
+#include "remote-control/input_receiver.h"
 #include "session/session_coordinator.h"
 #include "media/share_quality.h"
 #include "media/congestion_budget.h"
@@ -20,6 +21,42 @@ class CoreTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void inputReceiverRejectsStaleDuplicateAndRevokedInput()
+    {
+        zjdesk::InputReceiver receiver;
+        QSignalSpy processed(&receiver, &zjdesk::InputReceiver::processed);
+        const auto receive = [&](quint64 sequence, quint64 controlEpoch = 42, quint64 shareEpoch = 7) {
+            receiver.receive(shareEpoch, {{"action", "input"}, {"epoch", QString::number(controlEpoch)},
+                {"sequence", QString::number(sequence)}, {"kind", "unsupported-test-event"}, {"probe", true}});
+        };
+        receive(1); // Before local permission.
+        receiver.authorize(7, 42);
+        receive(1, 41);
+        receive(1, 42, 6);
+        receive(0);
+        receive(1);
+        QTRY_COMPARE(processed.size(), 1);
+        receive(1); // A duplicate must not execute again.
+        receiver.authorize(7, 42); // A retransmitted grant must not reset ordering.
+        receive(1);
+        receiver.revoke(6); // Closing a stale share must not revoke the new one.
+        receive(2);
+        QTRY_COMPARE(processed.size(), 2);
+        receiver.receive(7, {{"action", "revoke"}});
+        receive(3);
+        receiver.authorize(8, 43);
+        receive(4);
+        receive(1, 43, 8);
+        QTRY_COMPARE(processed.size(), 3);
+        QCOMPARE(processed.last().at(1).toJsonObject().value("sequence").toString(), QString("1"));
+        receiver.revoke();
+        receive(2, 43, 8);
+        // A fresh grant and valid event act as an ordering barrier for the rejection above.
+        receiver.authorize(9, 44);
+        receive(1, 44, 9);
+        QTRY_COMPARE(processed.size(), 4);
+    }
+
     void shareQualityUsesBothDisplayLimits()
     {
         using Quality = zjdesk::ShareQuality;

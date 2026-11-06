@@ -22,6 +22,7 @@
 #include <QPlainTextEdit>
 #include <QSaveFile>
 #include <QScopeGuard>
+#include <QSemaphore>
 #include <QVBoxLayout>
 #include <QFocusEvent>
 #include <QSpinBox>
@@ -1331,6 +1332,113 @@ sys.stdout.buffer.write(data)
         QVERIFY(!controller.fileClipboard_.active());
         acknowledge(5);
         QCOMPARE(acknowledgements.size(), 3);
+    }
+
+    void motionInputReportsRejectionTimeoutAndRecovery()
+    {
+        zjdesk::SessionCoordinator controller;
+        using Remote = zjdesk::SessionCoordinator::RemoteState;
+        controller.remoteState_ = Remote::Requesting;
+        controller.controlChannelReady_ = controller.receivingScreen_ = true;
+        controller.controlRequestId_ = "current";
+        controller.receiveControl({{"action", "grant"}, {"epoch", "42"}, {"requestId", "current"}});
+        VideoSurface surface;
+        surface.resize(640, 480);
+        QImage frame(640, 480, QImage::Format_RGB32);
+        frame.fill(Qt::blue);
+        surface.setFrame(frame);
+        surface.setControlEnabled(true);
+        connect(&surface, &VideoSurface::remoteInput, &controller, &zjdesk::SessionCoordinator::sendRemoteInput);
+        QSignalSpy acknowledgements(&controller, &zjdesk::SessionCoordinator::inputProbeAcknowledged);
+        const auto move = [&](int x) {
+            QMouseEvent event(QEvent::MouseMove, QPointF(x, 240), QPointF(x, 240),
+                Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(&surface, &event);
+        };
+        move(100);
+        QTRY_COMPARE(controller.inputSequence_, quint64(1));
+        // Movement must be checked even when the user never clicks.
+        QCOMPARE(controller.inputProbeClocks_.size(), 1);
+        const auto acknowledge = [&](quint64 sequence, bool accepted, const QString &error = {}, int epoch = 42) {
+            controller.receiveControl({{"action", "probe_ack"}, {"epoch", QString::number(epoch)},
+                {"sequence", QString::number(sequence)}, {"accepted", accepted}, {"error", error}});
+        };
+        acknowledge(1, false, "SendInput 0/1 Win32=5", 41);
+        QVERIFY(!controller.remoteDetail().contains("SendInput"));
+        acknowledge(1, false, "SendInput 0/1 Win32=5");
+        QCOMPARE(acknowledgements.size(), 1);
+        QVERIFY(controller.remoteDetail().contains("SendInput 0/1 Win32=5"));
+        move(110);
+        QTRY_COMPARE(controller.inputSequence_, quint64(2));
+        QCOMPARE(controller.inputProbeClocks_.size(), 0); // Do not probe every movement.
+        controller.sendRemoteInput({{"kind", "move"}, {"x", 0.5}, {"y", 0.5}, {"probe", true}});
+        acknowledge(3, true);
+        QVERIFY(!controller.remoteDetail().contains("SendInput"));
+        controller.sendRemoteInput({{"kind", "move"}, {"x", 0.6}, {"y", 0.5}, {"probe", true}});
+        QTRY_VERIFY_WITH_TIMEOUT(controller.remoteDetail().contains(QStringLiteral("未收到输入回执")), 3500);
+        QCOMPARE(controller.remoteState(), Remote::Controlling);
+        controller.sendRemoteInput({{"kind", "move"}, {"x", 0.7}, {"y", 0.5}, {"probe", true}});
+        acknowledge(5, true);
+        QVERIFY(!controller.remoteDetail().contains(QStringLiteral("未收到输入回执")));
+        controller.stopControl();
+        QVERIFY(controller.inputProbeClocks_.isEmpty());
+    }
+
+    void inputExecutionDoesNotWaitForHostUiEvents()
+    {
+        QSemaphore executed;
+        zjdesk::SessionCoordinator host;
+        host.peerId_ = "controller";
+        QVERIFY(host.control_.request(host.peerId_));
+        QVERIFY(host.control_.grant());
+        host.remoteState_ = zjdesk::SessionCoordinator::RemoteState::Controlled;
+        host.sendControlGrant();
+        connect(&host.inputReceiver_, &zjdesk::InputReceiver::processed, &host,
+            [&](quint64, const QJsonObject &) { executed.release(); }, Qt::DirectConnection);
+        std::thread incoming([&] {
+            host.screen_.controlReceived(host.shareEpoch_, {{"action", "input"},
+                {"epoch", QString::number(host.control_.epoch())}, {"sequence", "1"},
+                {"kind", "unsupported-test-event"}, {"probe", true}});
+        });
+        // No Qt event processing on the host UI thread, as in a native modal loop.
+        const bool completed = executed.tryAcquire(1, 2000);
+        incoming.join();
+        QVERIFY(completed);
+        QTRY_VERIFY(host.remoteDetail().contains(QStringLiteral("输入未执行")));
+    }
+
+    void inputReceiverReleasesEmptyStateWithoutUiEvents()
+    {
+        zjdesk::InputInjector capability;
+        if (!capability.available()) QSKIP("Native input is unavailable on this desktop");
+        QJsonObject result;
+        QSemaphore executed;
+        zjdesk::InputReceiver receiver;
+        receiver.authorize(7, 42);
+        connect(&receiver, &zjdesk::InputReceiver::processed, this,
+            [&](quint64, const QJsonObject &message) { result = message; executed.release(); }, Qt::DirectConnection);
+        // No keys or buttons were pressed; release performs no native key/mouse injection.
+        receiver.receive(7, {{"action", "input"}, {"epoch", "42"}, {"sequence", "1"},
+            {"kind", "release"}, {"probe", true}});
+        QVERIFY(executed.tryAcquire(1, 2000));
+        QVERIFY(result.value("accepted").toBool());
+    }
+
+    void rejectedHostInputExplainsFailureWithoutNativeInput()
+    {
+        zjdesk::SessionCoordinator host;
+        host.peerId_ = "controller";
+        QVERIFY(host.control_.request(host.peerId_));
+        QVERIFY(host.control_.grant());
+        host.remoteState_ = zjdesk::SessionCoordinator::RemoteState::Controlled;
+        host.sendControlGrant();
+        host.receiveControl({{"action", "input"}, {"epoch", QString::number(host.control_.epoch())},
+            {"sequence", "1"}, {"kind", "unsupported-test-event"}, {"probe", true}});
+        QTRY_VERIFY(host.remoteDetail().contains(QStringLiteral("输入未执行")));
+        QVERIFY(std::any_of(host.events()->entries().cbegin(), host.events()->entries().cend(),
+            [](const auto &event) { return event.category == "control-input" && event.message.contains("accepted=0"); }));
+        host.clearControl();
+        QVERIFY(!host.remoteDetail().contains(QStringLiteral("输入未执行")));
     }
 
     void windowsControlHostWithoutDesktopInput()

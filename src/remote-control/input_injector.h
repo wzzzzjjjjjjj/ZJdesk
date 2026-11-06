@@ -24,10 +24,12 @@ public:
     ~InputInjector();
     bool available();
     bool inject(const QJsonObject &input);
+    QString lastError() const { return lastError_; }
     void releaseAll();
     RemoteCursor cursor();
 private:
     void *display_ = nullptr;
+    QString lastError_;
     QRect bounds_;
     bool cursorAvailable_ = false;
     QSet<unsigned int> keys_;
