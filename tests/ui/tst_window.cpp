@@ -33,6 +33,7 @@
 #include <QSettings>
 #include <QCheckBox>
 #include <QTemporaryDir>
+#include <QUdpSocket>
 #include <QClipboard>
 #include <ctime>
 #include <algorithm>
@@ -215,14 +216,21 @@ private slots:
         window.startRemoteAccess();
         QCOMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
         peer->setText("invalid");
-        auto *verify = window.findChild<QPushButton *>("verifyNetwork");
-        verify->click();
+        window.joinButton_->click();
         QVERIFY(!window.networkSetup_.verified());
         QVERIFY(peer->property("networkInvalid").toBool());
-        QVERIFY(verify->isEnabled());
+        QVERIFY(window.joinButton_->isEnabled());
         QVERIFY(window.findChild<QLabel *>("networkStatus")->toolTip().contains(QStringLiteral("对端")));
         const auto *panel = window.findChild<QWidget *>("startupNetworkPanel");
-        QCOMPARE(panel->parentWidget(), window.remoteHistory_->parentWidget());
+        QCOMPARE(panel->parentWidget(), window.connectionLayout_->parentWidget());
+        QVERIFY(panel->isAncestorOf(window.joinButton_));
+        QCOMPARE(panel->findChildren<QPushButton *>().size(), 1);
+        QVERIFY(!window.networkColumn_->isVisible());
+        QVERIFY(window.remoteHistory_->isHidden());
+        QVERIFY(!window.serverEdit_->isVisible());
+        QVERIFY(!window.findChild<QLineEdit *>("displayName"));
+        for (auto *label : panel->parentWidget()->findChildren<QLabel *>())
+            QVERIFY(!label->isVisible() || label->text() != QStringLiteral("服务地址"));
         QVERIFY(!window.findChild<QFrame *>("sidebar")->isAncestorOf(panel));
         for (auto *widget : QApplication::topLevelWidgets())
             if (qobject_cast<QDialog *>(widget)) QVERIFY(!widget->isVisible());
@@ -236,6 +244,12 @@ private slots:
     {
         const auto addresses = zjdesk::NetworkSetup::localAddresses();
         if (addresses.isEmpty()) QSKIP("No active IPv4 interface");
+        // 与产品逻辑一致：按到对端的路由选择本机地址，避免多网卡 / VPN 机器上
+        // 服务器地址与自动选出的本机地址不一致导致验证被拒。
+        QUdpSocket route;
+        route.connectToHost(QHostAddress("203.0.113.9"), 9);
+        const auto routed = route.localAddress().toString();
+        const auto serverAddress = addresses.contains(routed) ? routed : addresses.first();
         const auto originalPath = qgetenv("PATH");
         const auto originalBinding = qgetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
         const auto originalPing = qgetenv("ZJDESK_TEST_PING");
@@ -258,10 +272,10 @@ private slots:
         qputenv("PATH", pingDirectory.path().toUtf8() + QDir::listSeparator().toLatin1() + originalPath);
         qputenv("ZJDESK_TEST_PING", "ok");
         zjdesk::RoomServer server(nullptr, pingDirectory.filePath("codes.ini"));
-        QVERIFY(server.listen(QHostAddress(addresses.first()), 0));
+        QVERIFY(server.listen(QHostAddress(serverAddress), 0));
         QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
         settings.clear();
-        const auto url = QString("ws://%1:%2").arg(addresses.first()).arg(server.port());
+        const auto url = QString("ws://%1:%2").arg(serverAddress).arg(server.port());
         MainWindow window(url, {}, "Network test");
         window.enableNetworkSetup();
 #ifdef Q_OS_WIN
@@ -271,11 +285,16 @@ private slots:
 #endif
         auto *peer = window.findChild<QLineEdit *>("networkPeerAddress");
         peer->setText("203.0.113.9");
-        window.findChild<QPushButton *>("verifyNetwork")->click();
-        QTRY_VERIFY(window.networkSetup_.verified());
+        window.joinButton_->click();
+        QTRY_VERIFY2(window.networkSetup_.verified(),
+            qPrintable(window.findChild<QLabel *>("networkStatus")->toolTip()));
         QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
         QVERIFY(window.remoteCodeLabel_->isHidden());
         QVERIFY(window.remoteHistory_->isHidden());
+        // 验证通过后应自动发起远控；假对端 203.0.113.9 不在线，服务端回
+        // remote_unavailable，说明自动配对请求确实发出去了。
+        QTRY_VERIFY2(window.session_.detail().contains(QStringLiteral("对端未在线")),
+            qPrintable(window.session_.detail()));
         QVERIFY(window.joinButton_->isEnabled());
         QCOMPARE(window.serverEdit_->text(), url);
         QVERIFY(window.meetingJoinButton_->isEnabled());
@@ -3081,11 +3100,11 @@ sys.stdout.buffer.write(data)
         QVERIFY(profile->mapTo(&window, QPoint()).x() > window.width() / 2);
         QVERIFY(window.rect().contains(QRect(profile->mapTo(&window, QPoint()), profile->size())));
         profileName->setText("Zoe");
-        QCOMPARE(window.nameEdit_->text(), QString("Zoe"));
         QCOMPARE(profileAvatar->text(), QString("Z"));
-        window.nameEdit_->setText(longName);
-        QCOMPARE(profileName->text(), longName);
+        QCOMPARE(window.findChild<QLabel *>("localName")->text(), QString("Zoe"));
+        profileName->setText(longName);
         QCOMPARE(profileAvatar->text(), longName.left(1));
+        QCOMPARE(window.findChild<QLabel *>("localName")->text(), longName);
         auto *settingsButton = window.findChild<QPushButton *>("settingsButton");
         QVERIFY(settingsButton && settingsButton->isVisible());
         QVERIFY(!window.findChild<QPushButton *>("meetingSettingsButton"));
@@ -3270,7 +3289,7 @@ sys.stdout.buffer.write(data)
         QCOMPARE(count->text(), QStringLiteral("2 人参与"));
         window.session_.leave();
         peer.leave();
-        window.findChild<QLineEdit *>("displayName")->setText(QStringLiteral("本机用户"));
+        window.findChild<QLineEdit *>("meetingDisplayName")->setText(QStringLiteral("本机用户"));
         window.findChild<QLineEdit *>("serverAddress")->setText("ws://127.0.0.1:8765");
         QTest::mouseClick(nav.at(0), Qt::LeftButton);
         panel->verticalScrollBar()->setValue(0);

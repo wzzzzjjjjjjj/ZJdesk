@@ -1,5 +1,11 @@
 # ZJdesk 项目交接
 
+## 2026-11-07 启动卡片收敛为「对端 IP + 连接服务」
+
+协作空间启动卡片去掉“服务地址”和“你的昵称”两个输入：服务地址仍由验证自动设置，但改为隐藏控件（保留内部同步与测试驱动），昵称只在页头 `meetingDisplayName` 填写；对方校验码整列在启动验证时被 Linux/Windows IP 面板替换，唯一的 `primaryButton` 移入 IP 行内，文案固定为「连接服务」。点击该按钮先做 IP 验证，通过后自动配对远控（`pendingPeerConnect_` 在状态到达 `WaitingForPeer` 时调用 `connectRemoteIp()`），不再需要第二次点击。改动涉及 `apps/client/main_window.h/.cpp`、`tests/ui/tst_window.cpp`、`README.md`、`docs/startup-network.md`。
+
+Windows 11 / Qt 6.8.3 debug 构建通过，全量 GUI 套件 50 通过 / 5 失败（回退 HEAD 重跑同样失败，属本机环境：文件剪贴板、屏幕共享帧率、OpenGL 画面、会议加入）；Ubuntu 22.04 实机（`orbbec@100.87.60.58`，真实 X `:1`）Release 构建、ctest 5/5、GUI 53 通过 / 2 失败（同上两项环境问题），启动三用例在两端均通过并各有卡片截图。验证通过后的自动配对只用同机模拟对端离线覆盖，双机真实互验与远控、音视频仍需人工验收。详见 [启动卡片验证](validation-startup-card-20261107.md)。
+
 ## 2026-11-06 IP 配对与双端开发启动
 
 协作空间原校验码输入位置改为对端 IP 验证，输入为空或失败标红，两端验证后控制方点击“连接对方”。服务端通过 socket 实际 IPv4 和双方登记的对端 IPv4 配对，拒绝未互相匹配或多个候选；沿用现有控制请求与被控端二次确认设置。IP 不是身份认证，旧校验码协议保留给旧调用者，双方客户端及信令服务需一起更新。会议仍使用房间码。`构建启动.bat` 当前通过 `orbbec@10.11.42.4` 调用 `start-both.ps1 -ForceRestart` 同步、构建和启动双端；启动不等于 IP 已验证。
