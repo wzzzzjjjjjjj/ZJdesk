@@ -1,4 +1,5 @@
 #include "video_surface.h"
+#include "annotation_layer.h"
 #include <QPainter>
 #include <QPainterPath>
 #include <QMouseEvent>
@@ -64,6 +65,7 @@ void VideoSurface::setExpanded(bool expanded)
 void VideoSurface::resizeEvent(QResizeEvent *event)
 {
     QOpenGLWidget::resizeEvent(event);
+    updateAnnotationGeometry();
     if (expandButton_)
         expandButton_->move(width() - expandButton_->width() - 8, 8);
 }
@@ -260,8 +262,28 @@ void VideoSurface::setFrame(const QImage &frame)
         updatePointerCursor(mapFromGlobal(QCursor::pos()));
     else if (sizeChanged)
         updatePointerCursor(pointerPosition_);
+    updateAnnotationGeometry();
     if (hadFrame != !frame.isNull()) emit frameAvailabilityChanged();
     update();
+}
+
+AnnotationLayer *VideoSurface::annotationLayer()
+{
+    if (!annotationLayer_)
+    {
+        annotationLayer_ = new AnnotationLayer(this);
+        updateAnnotationGeometry();
+    }
+    return annotationLayer_;
+}
+
+void VideoSurface::updateAnnotationGeometry()
+{
+    if (!annotationLayer_) return;
+    const auto size = frame_.size().scaled(this->size(), Qt::KeepAspectRatio);
+    annotationLayer_->setGeometry((width() - size.width()) / 2, (height() - size.height()) / 2, size.width(), size.height());
+    annotationLayer_->setVisible(!frame_.isNull());
+    if (expandButton_) expandButton_->raise();
 }
 
 void VideoSurface::setControlEnabled(bool enabled)

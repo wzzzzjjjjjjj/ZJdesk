@@ -1,5 +1,6 @@
 #include "main_window.h"
 #include "video_surface.h"
+#include "annotation_layer.h"
 #include "signaling/room_server.h"
 #include "platform/platform_info.h"
 #include <QDir>
@@ -14,6 +15,7 @@
 #include <QOpenGLWidget>
 #include <QPushButton>
 #include <QScreen>
+#include <QWindow>
 #include <QPainter>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -186,6 +188,302 @@ class WindowTests : public QObject
     Q_OBJECT
     QTemporaryDir preferenceDirectory_;
 private slots:
+    void windowsSharedDesktopExcludesOwnPreview()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("Windows capture exclusion uses native display affinity");
+#else
+        using Session = zjdesk::SessionCoordinator;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        MainWindow window(url.toString(), {}, "Owner"), viewer(url.toString(), {}, "Viewer");
+        auto &owner = window.session_;
+        owner.setConferenceAutoConnect(false);
+        viewer.session_.setConferenceAutoConnect(false);
+        if (!owner.mediaEnvironment().ready) QSKIP("GStreamer is not enabled");
+        window.resize(1280, 840);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        for (auto *button : window.findChildren<QPushButton *>())
+            if (button->text() == QStringLiteral("视频会议")) { button->click(); break; }
+        const auto affinity = [](MainWindow &target) {
+            DWORD value = DWORD(-1);
+            if (!GetWindowDisplayAffinity(reinterpret_cast<HWND>(target.winId()), &value)) return DWORD(-1);
+            return value;
+        };
+        QCOMPARE(affinity(window), DWORD(WDA_NONE));
+        QVERIFY(owner.join(url, "capture-exclusion", "Owner", Session::RoomType::Meeting));
+        QVERIFY(viewer.session_.join(url, "capture-exclusion", "Viewer", Session::RoomType::Meeting));
+        QTRY_COMPARE(owner.memberCount(), 2);
+        QVERIFY(owner.startScreenShare("test", 15));
+        QTRY_VERIFY_WITH_TIMEOUT(window.meetingShareVideo_->hasFrame(), 30000);
+        QCOMPARE(affinity(window), DWORD(WDA_NONE)); // Synthetic sources remain capturable.
+        owner.stopScreenShare();
+        QTRY_VERIFY(!owner.screenActive());
+        QVERIFY(owner.startScreenShare("desktop", 15));
+        QTRY_VERIFY(owner.isDesktopShare());
+        QCOMPARE(affinity(window), DWORD(0x00000011)); // WDA_EXCLUDEFROMCAPTURE, not black-window WDA_MONITOR.
+        QTRY_VERIFY_WITH_TIMEOUT(window.meetingShareVideo_->hasFrame(), 30000);
+        QTRY_VERIFY_WITH_TIMEOUT(viewer.meetingShareVideo_->hasFrame(), 30000);
+        QCOMPARE(affinity(viewer), DWORD(WDA_NONE));
+        for (int cycle = 0; cycle < 2; ++cycle)
+        {
+            window.expandMeetingVideo(window.meetingShareVideo_);
+            QTRY_VERIFY(window.isFullScreen());
+            QCOMPARE(affinity(window), DWORD(0x00000011));
+            // The viewer is hidden, so count received rather than painted frames.
+            QSignalSpy received(&viewer.session_, &Session::shareFrame);
+            QTRY_VERIFY_WITH_TIMEOUT(received.size() >= 3, 10000);
+            if (cycle == 0) QTest::keyClick(window.meetingShareVideo_, Qt::Key_Escape);
+            else owner.stopScreenShare(); // Ending an expanded share restores capture too.
+            QTRY_VERIFY(!window.isFullScreen());
+            QCOMPARE(affinity(window), DWORD(cycle == 0 ? 0x00000011 : WDA_NONE));
+        }
+        QVERIFY(owner.startScreenShare("desktop", 15));
+        QTRY_VERIFY(owner.isDesktopShare());
+        QCOMPARE(affinity(window), DWORD(0x00000011));
+        owner.leave();
+        QCOMPARE(affinity(window), DWORD(WDA_NONE));
+#endif
+    }
+
+    void annotationToolsStayAlignedWithSharedFrame()
+    {
+        VideoSurface surface;
+        surface.resize(800, 600);
+        QImage frame(1600, 900, QImage::Format_RGB32);
+        frame.fill(Qt::black);
+        surface.setFrame(frame);
+        surface.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&surface));
+        QVERIFY(surface.isValid());
+        auto *layer = surface.annotationLayer();
+        QCOMPARE(layer->geometry(), QRect(0, 75, 800, 450));
+        const QJsonObject author{{"authorId", "a"}, {"name", "Alice"}, {"color", "#e5484d"}};
+        layer->setAnnotations({}, author);
+        QSignalSpy strokes(layer, &AnnotationLayer::strokeReady);
+        QSignalSpy input(&surface, &VideoSurface::remoteInput);
+        for (const QString &tool : {QString("circle"), QString("arrow"), QString("pen")})
+        {
+            layer->setTool(tool);
+            QTest::mousePress(layer, Qt::LeftButton, Qt::NoModifier, QPoint(160, 90));
+            QTest::mouseMove(layer, QPoint(400, 225));
+            QTest::mouseRelease(layer, Qt::LeftButton, Qt::NoModifier, QPoint(640, 360));
+            QVERIFY(!strokes.isEmpty());
+            const auto stroke = strokes.takeLast().first().toJsonObject();
+            QCOMPARE(stroke.value("tool").toString(), tool);
+            const auto points = stroke.value("points").toArray();
+            QCOMPARE(points.first().toArray(), (QJsonArray{0.2, 0.2}));
+            QCOMPARE(points.last().toArray(), (QJsonArray{0.8, 0.8}));
+            layer->setAnnotations({stroke}, author);
+        }
+        QCOMPARE(input.size(), 0); // Drawing does not grant or inject remote input.
+        surface.resize(640, 640);
+        QTRY_COMPARE(layer->geometry(), QRect(0, 140, 640, 360));
+        layer->setTool({});
+        QVERIFY(layer->testAttribute(Qt::WA_TransparentForMouseEvents));
+        surface.setFrame({});
+        QVERIFY(!layer->isVisible());
+    }
+
+    void annotationLegendListsEachAuthorOnce()
+    {
+        AnnotationLayer layer;
+        layer.resize(800, 400);
+        layer.setAnnotations({}, {{"authorId", "author"}, {"name", "Author"}, {"color", "#e5484d"}});
+        layer.setTool("pen");
+        layer.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&layer));
+        QSignalSpy strokes(&layer, &AnnotationLayer::strokeReady);
+        QTest::mousePress(&layer, Qt::LeftButton, Qt::NoModifier, QPoint(20, 200));
+        for (int x = 21; x < 620; ++x)
+        {
+            QMouseEvent event(QEvent::MouseMove, QPointF(x, 200), QPointF(layer.mapToGlobal(QPoint(x, 200))),
+                Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(&layer, &event);
+        }
+        QTest::mouseRelease(&layer, Qt::LeftButton, Qt::NoModifier, QPoint(620, 200));
+        QCOMPARE(strokes.size(), 3);
+        QJsonArray canvas;
+        for (int i = 0; i < strokes.size(); ++i)
+        {
+            const auto stroke = strokes.at(i).first().toJsonObject();
+            canvas.append(stroke);
+        }
+        layer.setAnnotations(canvas);
+        QImage image(layer.size(), QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        layer.render(&painter, {}, {}, QWidget::DrawChildren);
+        painter.end();
+        QCOMPARE(image.pixelColor(30, 182).alpha(), 0);
+        QCOMPARE(image.pixelColor(285, 182).alpha(), 0);
+        QCOMPARE(image.pixelColor(540, 182).alpha(), 0);
+        QVERIFY(image.pixelColor(780, 54).alpha() > 0);
+        QCOMPARE(image.pixelColor(780, 80).alpha(), 0); // Three segments, one author row.
+        auto other = canvas.first().toObject();
+        other.insert("strokeId", "other");
+        other.insert("authorId", "other-author");
+        other.insert("name", "Other");
+        other.insert("color", "#2474e5");
+        canvas.append(other);
+        layer.setAnnotations(canvas);
+        image.fill(Qt::transparent);
+        painter.begin(&image);
+        layer.render(&painter, {}, {}, QWidget::DrawChildren);
+        painter.end();
+        QVERIFY(image.pixelColor(780, 80).alpha() > 0);
+        QCOMPARE(image.pixelColor(780, 106).alpha(), 0);
+        layer.setAnnotationsInVideo(true);
+        image.fill(Qt::transparent);
+        painter.begin(&image);
+        layer.render(&painter, {}, {}, QWidget::DrawChildren);
+        painter.end();
+        QCOMPARE(image.pixelColor(780, 54).alpha(), 0); // Embedded X11 legend is not painted twice.
+        strokes.clear();
+        QTest::mousePress(&layer, Qt::LeftButton, Qt::NoModifier, QPoint(20, 300));
+        QTest::mouseRelease(&layer, Qt::LeftButton, Qt::NoModifier, QPoint(50, 300));
+        QCOMPARE(strokes.size(), 1);
+    }
+
+    void meetingAnnotationsReachEveryViewerAndLateJoiner()
+    {
+        using Session = zjdesk::SessionCoordinator;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        MainWindow window(url.toString(), {}, "Owner");
+        auto &owner = window.session_;
+        owner.setConferenceAutoConnect(false);
+        Session first, second, late;
+        if (!owner.mediaEnvironment().ready) QSKIP("GStreamer is not enabled");
+        int frames[3] = {};
+        const QList<Session *> viewers{&first, &second, &late};
+        for (int i = 0; i < viewers.size(); ++i)
+            connect(viewers[i], &Session::shareFrame, this, [&, i](const QImage &frame) { if (!frame.isNull()) ++frames[i]; });
+        QVERIFY(owner.join(url, "annotations", "Owner", Session::RoomType::Meeting));
+        QVERIFY(first.join(url, "annotations", "First", Session::RoomType::Meeting));
+        QVERIFY(second.join(url, "annotations", "Second", Session::RoomType::Meeting));
+        QTRY_COMPARE(owner.memberCount(), 3);
+        QVERIFY(owner.startScreenShare("test", 15));
+        QTRY_VERIFY_WITH_TIMEOUT(frames[0] >= 3 && frames[1] >= 3, 30000);
+        QVERIFY(owner.canAnnotate() && first.canAnnotate() && second.canAnnotate());
+        const QJsonObject circle{{"strokeId", "owner-circle"}, {"tool", "circle"},
+            {"points", QJsonArray{QJsonArray{0.2, 0.2}, QJsonArray{0.8, 0.8}}}};
+        auto arrow = circle;
+        arrow.insert("strokeId", "viewer-arrow");
+        arrow.insert("tool", "arrow");
+        QVERIFY(owner.submitAnnotation(circle));
+        QVERIFY(second.submitAnnotation(arrow));
+        QTRY_COMPARE(first.annotations().size(), 2);
+        QTRY_COMPARE(owner.annotations(), first.annotations());
+        QTRY_COMPARE(second.annotations(), first.annotations());
+        QVERIFY(!second.clearAnnotations(true));
+        QVERIFY(late.join(url, "annotations", "Late", Session::RoomType::Meeting));
+        QTRY_COMPARE(late.annotations(), first.annotations());
+        QTRY_VERIFY_WITH_TIMEOUT(frames[2] >= 3, 30000);
+        // Losing the first/primary viewer must not stop another member's sharing.
+        first.leave();
+        QTRY_COMPARE(owner.memberCount(), 3);
+        const int before = frames[1];
+        QTRY_VERIFY_WITH_TIMEOUT(frames[1] >= before + 3, 10000);
+        QVERIFY(second.clearAnnotations());
+        QTRY_COMPARE(owner.annotations().size(), 1);
+        QTRY_COMPARE(late.annotations(), owner.annotations());
+        QCOMPARE(owner.annotations().first().toObject().value("strokeId").toString(), "owner-circle");
+        QVERIFY(!window.clearAllAnnotations_->isHidden());
+        QVERIFY(window.annotationTool_->isEnabled());
+        // The native desktop window paints the same model and remains click-through.
+        owner.desktopSource_ = true;
+        window.refreshAnnotations();
+        QVERIFY(window.desktopAnnotations_->isVisible());
+        QVERIFY(window.desktopAnnotations_->windowFlags().testFlag(Qt::WindowTransparentForInput));
+        QVERIFY(window.desktopAnnotations_->testAttribute(Qt::WA_ShowWithoutActivating));
+        const auto rendered = window.desktopAnnotations_->grab().toImage();
+        const auto mark = rendered.pixelColor(qRound(rendered.width() * 0.2), qRound(rendered.height() * 0.5));
+        const QColor expected(owner.annotations().first().toObject().value("color").toString());
+        QVERIFY(mark.alpha() > 100);
+        QVERIFY(qAbs(mark.red() - expected.red()) < 20 && qAbs(mark.blue() - expected.blue()) < 20);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.showMinimized();
+        QTest::qWait(250);
+        QVERIFY(window.desktopAnnotations_->windowHandle()->isExposed());
+        QVERIFY(owner.clearAnnotations(true));
+        QTRY_VERIFY(late.annotations().isEmpty() && owner.annotations().isEmpty());
+        QVERIFY(!window.desktopAnnotations_->isVisible());
+        owner.leave();
+        QTRY_VERIFY(!late.canAnnotate() && !second.canAnnotate());
+        QVERIFY(!window.annotationTool_->isEnabled());
+    }
+
+    void meetingAnnotationWanPeer()
+    {
+        if (!qEnvironmentVariableIsSet("ZJDESK_ANNOTATION_WAN_URL")) QSKIP("Requires a coordinated cross-network peer");
+        using Session = zjdesk::SessionCoordinator;
+        const bool owner = qEnvironmentVariable("ZJDESK_ANNOTATION_WAN_ROLE") == "owner";
+        const auto output = qEnvironmentVariable("ZJDESK_ANNOTATION_WAN_OUTPUT");
+        QVERIFY(QDir().mkpath(output));
+        const QUrl url(qEnvironmentVariable("ZJDESK_ANNOTATION_WAN_URL"));
+        MainWindow window(url.toString(), {}, owner ? "WAN owner" : "WAN viewer");
+        window.resize(1280, 840);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        for (auto *button : window.findChildren<QPushButton *>())
+            if (button->text() == QStringLiteral("视频会议")) { button->click(); break; }
+        auto &session = window.session_;
+        session.setConferenceAutoConnect(false);
+        int frames = 0;
+        QImage latest;
+        connect(&session, &Session::shareFrame, this, [&](const QImage &frame) {
+            if (!frame.isNull()) { ++frames; latest = frame; }
+        });
+        QVERIFY(session.join(url, qEnvironmentVariable("ZJDESK_ANNOTATION_WAN_ROOM"),
+            owner ? "WAN owner" : "WAN viewer", Session::RoomType::Meeting));
+        QTRY_COMPARE_WITH_TIMEOUT(session.memberCount(), 2, 45000);
+        if (owner) QVERIFY(session.startScreenShare("desktop", 15));
+        QTRY_VERIFY_WITH_TIMEOUT(session.canAnnotate() && frames >= 5, 45000);
+        auto *layer = window.meetingShareVideo_->annotationLayer();
+        window.annotationTool_->setCurrentIndex(owner ? 2 : 3);
+        const auto start = QPoint(layer->width() / 5, layer->height() / 5);
+        const auto end = QPoint(layer->width() * 4 / 5, layer->height() * 4 / 5);
+        QTest::mousePress(layer, Qt::LeftButton, Qt::NoModifier, start);
+        QTest::mouseMove(layer, end);
+        QTest::mouseRelease(layer, Qt::LeftButton, Qt::NoModifier, end);
+        QTRY_COMPARE_WITH_TIMEOUT(session.annotations().size(), 2, 15000);
+        const auto strokes = session.annotations();
+        QVERIFY(strokes[0].toObject().value("authorId") != strokes[1].toObject().value("authorId"));
+        QVERIFY(strokes[0].toObject().value("color") != strokes[1].toObject().value("color"));
+        QTest::qWait(1200); // Include the X11 desktop markings in the captured video.
+        QVERIFY(latest.save(output + "/shared-frame.png"));
+        QVERIFY(window.grab().save(output + "/meeting.png"));
+        QFile model(output + "/annotations.json");
+        QVERIFY(model.open(QIODevice::WriteOnly));
+        model.write(QJsonDocument(strokes).toJson());
+        model.close();
+        if (owner)
+        {
+            QVERIFY(window.desktopAnnotations_->isVisible());
+            QVERIFY(window.desktopAnnotations_->grab().save(output + "/desktop-layer.png"));
+            QTRY_COMPARE_WITH_TIMEOUT(session.annotations().size(), 1, 20000);
+            QVERIFY(session.clearAnnotations(true));
+            QTRY_VERIFY_WITH_TIMEOUT(session.annotations().isEmpty(), 10000);
+            QTest::qWait(2000);
+            session.stopScreenShare();
+        }
+        else
+        {
+            QVERIFY(session.clearAnnotations());
+            QTRY_VERIFY_WITH_TIMEOUT(session.annotations().isEmpty(), 20000);
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(!session.canAnnotate(), 15000);
+        QVERIFY(!window.desktopAnnotations_->isVisible());
+        qInfo() << "WAN native desktop and annotations passed; role" << (owner ? "owner" : "viewer")
+            << "frames" << frames << "size" << latest.size();
+        session.leave();
+    }
+
     void startupNetworkServerRemainsVerified()
     {
         const QString url = "ws://192.0.2.10:8765";
@@ -224,7 +522,7 @@ private slots:
         const auto *panel = window.findChild<QWidget *>("startupNetworkPanel");
         QCOMPARE(panel->parentWidget(), window.connectionLayout_->parentWidget());
         QVERIFY(panel->isAncestorOf(window.joinButton_));
-        QCOMPARE(panel->findChildren<QPushButton *>().size(), 1);
+        QCOMPARE(panel->findChildren<QPushButton *>().size(), 2);
         QVERIFY(!window.networkColumn_->isVisible());
         QVERIFY(window.remoteHistory_->isHidden());
         QVERIFY(!window.serverEdit_->isVisible());
@@ -291,11 +589,44 @@ private slots:
         QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
         QVERIFY(window.remoteCodeLabel_->isHidden());
         QVERIFY(window.remoteHistory_->isHidden());
-        // 验证通过后应自动发起远控；假对端 203.0.113.9 不在线，服务端回
-        // remote_unavailable，说明自动配对请求确实发出去了。
+        QTest::qWait(300);
+        QVERIFY(!window.session_.detail().contains(QStringLiteral("对端未在线")));
+        QVERIFY(!window.session_.remoteConnecting());
+        QCOMPARE(window.session_.remoteState(), zjdesk::SessionCoordinator::RemoteState::Idle);
+        QVERIFY(!window.session_.screenActive());
+        QVERIFY(!window.joinButton_->isEnabled());
+        auto *remote = window.findChild<QPushButton *>("remoteConnectButton");
+        QVERIFY(remote && remote->isEnabled());
+        QCOMPARE(remote->text(), QStringLiteral("远程控制"));
+        remote->click();
+        // Only the explicit control action attempts to pair with the offline fixture.
         QTRY_VERIFY2(window.session_.detail().contains(QStringLiteral("对端未在线")),
             qPrintable(window.session_.detail()));
-        QVERIFY(window.joinButton_->isEnabled());
+        QVERIFY(remote->isEnabled());
+        zjdesk::SessionCoordinator host;
+        QVERIFY(host.setRemoteCodePolicy("startup", {}));
+        QVERIFY(host.startRemoteAccess(QUrl(url), "Host", serverAddress));
+        QTRY_COMPARE(host.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        // Re-register the fixture with one real interface for both endpoints, then use the actual button.
+        window.session_.leave();
+        QVERIFY(window.session_.startRemoteAccess(QUrl(url), "Network test", serverAddress));
+        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        QTest::qWait(100);
+        QCOMPARE(host.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        remote->click();
+        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::PeerAvailable);
+        QTRY_COMPARE(host.state(), zjdesk::SessionCoordinator::State::PeerAvailable);
+        QVERIFY(!remote->isEnabled());
+        if (host.input_.available() && host.mediaEnvironment().ready)
+        {
+            QTRY_COMPARE(host.remoteState(), zjdesk::SessionCoordinator::RemoteState::Pending);
+            QCOMPARE(window.session_.remoteState(), zjdesk::SessionCoordinator::RemoteState::Requesting);
+            QVERIFY(!host.screenActive());
+        }
+        window.session_.disconnectRemote();
+        QTRY_COMPARE(host.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        QVERIFY(remote->isEnabled());
         QCOMPARE(window.serverEdit_->text(), url);
         QVERIFY(window.meetingJoinButton_->isEnabled());
         settings.sync();
@@ -304,6 +635,7 @@ private slots:
         QVERIFY(!window.networkSetup_.verified());
         QCOMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
         QVERIFY(!window.meetingJoinButton_->isEnabled());
+        QVERIFY(!remote->isEnabled());
         MainWindow restarted(url, {}, "Network test");
         restarted.enableNetworkSetup();
         QCOMPARE(restarted.networkPeer_->text(), QString("203.0.113.9"));
@@ -686,7 +1018,7 @@ private slots:
         }
         QTRY_COMPARE_WITH_TIMEOUT(window.session_.conferencePeerStatus().values().count("running"), 3, 15000);
         QCOMPARE(window.findChild<QLabel *>("meetingMemberCount")->text(), QStringLiteral("4 人参与"));
-        QVERIFY(!window.findChild<QPushButton *>("shareButton")->isEnabled());
+        QVERIFY(window.findChild<QPushButton *>("shareButton")->isEnabled());
         for (auto *surface : QList<VideoSurface *>{window.meetingLocalVideo_} + window.meetingRemoteVideos_)
         {
             QTRY_VERIFY(surface->isVisible() && surface->hasFrame());
@@ -720,8 +1052,9 @@ private slots:
             QTRY_VERIFY(window.isFullScreen());
             QCOMPARE(surface->parentWidget(), parent);
             QTRY_VERIFY(surface->width() > normalSize.width() && surface->height() > normalSize.height());
-            QVERIFY(surface->width() >= window.width() - 40);
-            QVERIFY(surface->height() >= window.height() - 40);
+            QTRY_VERIFY(surface->width() >= window.width() - 40);
+            QTRY_VERIFY2(surface->height() >= window.height() - 40,
+                qPrintable(QString("%1 height %2 of %3").arg(surface->objectName()).arg(surface->height()).arg(window.height())));
             QVERIFY(button->isVisible());
             QCOMPARE(button->text(), QStringLiteral("缩小"));
             window.refreshMeetingParticipants();

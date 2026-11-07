@@ -1,7 +1,7 @@
 ﻿$ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-if ((Get-Content -Raw -LiteralPath (Join-Path $projectRoot '构建启动.bat')) -notmatch 'start-both\.ps1.*-LinuxSsh orbbec@10\.11\.42\.4 -ForceRestart') {
-    throw 'The build launcher must use the current Linux SSH target and request a force restart.'
+if ((Get-Content -Raw -LiteralPath (Join-Path $projectRoot '构建启动.bat')) -notmatch 'start-both\.ps1.*-LinuxSsh orbbec@100\.87\.60\.58 -LinuxAddress 100\.87\.60\.58 -WindowsAddress 100\.122\.3\.99 -ForceRestart') {
+    throw 'The build launcher must use the Tailscale SSH target, bind both Tailscale media addresses and request a force restart.'
 }
 $directLauncher = Get-Content -Raw -LiteralPath (Join-Path $projectRoot '直接启动.bat')
 if ($directLauncher -match 'start-both|run\.ps1|Read-Host|-ForceRestart' -or
@@ -54,7 +54,7 @@ try {
 $expectedCacheRoot = '/home/orbbec/ZJdesk/zjdesk/build/start-both-cache.' + $key.Substring(0, 16)
 function Find-NetRoute {
     param($RemoteIPAddress, $LocalIPAddress, $InterfaceIndex, $ErrorAction)
-    if ($RemoteIPAddress -notin @('10.11.42.4', '10.11.47.137', '10.11.42.8')) { throw 'Route lookup used the wrong Linux address.' }
+    if ($RemoteIPAddress -notin @('10.11.42.4', '10.11.47.137', '10.11.42.8', '100.87.60.58')) { throw 'Route lookup used the wrong Linux address.' }
     [pscustomobject]@{ DestinationPrefix = '10.11.42.0/24'; NextHop = '0.0.0.0' }
     if ($Scenario -ne 'NoRoute' -and -not ($Scenario -eq 'WindowsWiredNoRoute' -and $LocalIPAddress -eq '10.11.42.57')) {
         $address = '10.11.42.57'
@@ -68,6 +68,9 @@ function Find-NetRoute {
 }
 function Get-NetIPAddress {
     param($AddressFamily, $ErrorAction)
+    if ($Scenario -eq 'CrossNetwork') {
+        [pscustomobject]@{ IPAddress = '100.122.3.99'; InterfaceIndex = 30; InterfaceAlias = 'Tailscale'; AddressState = 'Preferred'; SkipAsSource = $false }
+    }
     [pscustomobject]@{ IPAddress = '100.100.100.100'; InterfaceIndex = 30; AddressState = 'Preferred'; SkipAsSource = $false }
     $address = if ($Scenario -eq 'DhcpChanged') { '10.11.42.58' } else { '10.11.42.57' }
     if ($Scenario -notin @('WindowsWirelessOnly', 'BothWirelessOnly')) {
@@ -115,6 +118,9 @@ function ssh {
     $global:LASTEXITCODE = 0
     Write-Host 'SSH_CALLED'
     $command = $args[-1]
+    if ($Scenario -eq 'CrossNetwork' -and $args[-2] -ne 'orbbec@100.87.60.58') { throw 'Cross-network SSH must use Tailscale.' }
+    if ($Scenario -eq 'CrossNetwork' -and $command -like '*nohup env*' -and
+        -not $command.Contains("ZJDESK_WEBRTC_LOCAL_ADDRESS='100.87.60.58'")) { throw 'Linux media must bind to Tailscale.' }
     if ($command -like 'ip -4 -o addr*') {
         if ($Scenario -eq 'SshUnavailable' -or ($Scenario -in @('WirelessOnly', 'BothWirelessOnly') -and $args[-2] -eq 'orbbec@10.11.42.4')) {
             $global:LASTEXITCODE = 255
@@ -124,7 +130,7 @@ function ssh {
         if ($Scenario -in @('WirelessOnly', 'BothWirelessOnly', 'WiredBlocked', 'WiredPreferred', 'ExplicitWireless', 'StaleLinux')) {
             "wireless`twlp0s20f3`t10.11.47.137"
         }
-        if ($Scenario -eq 'VirtualOnly') { "other`ttailscale0`t100.87.60.58" }
+        if ($Scenario -in @('VirtualOnly', 'CrossNetwork')) { "other`ttailscale0`t100.87.60.58" }
         if ($Scenario -notin @('WirelessOnly', 'BothWirelessOnly', 'VirtualOnly')) {
             $address = if ($Scenario -eq 'LinuxDhcpChanged') { '10.11.42.8' } else { '10.11.42.4' }
             "wired`tenp0s31f6`t$address"
@@ -201,6 +207,13 @@ if ($Scenario -eq 'StaleExplicit') { $parameters.WindowsAddress = '10.11.42.3' }
 if ($Scenario -eq 'ExplicitWireless') { $parameters.LinuxAddress = '10.11.47.137' }
 if ($Scenario -eq 'WindowsExplicitWireless') { $parameters.WindowsAddress = '10.11.48.95' }
 if ($Scenario -eq 'StaleLinux') { $parameters.LinuxAddress = '10.11.42.3' }
+if ($Scenario -eq 'CrossNetwork') {
+    $parameters.LinuxSsh = @('orbbec@100.87.60.58')
+    $parameters.LinuxAddress = '100.87.60.58'
+    $parameters.WindowsAddress = '100.122.3.99'
+    $parameters.ForceRestart = $true
+    $parameters.SkipBuild = $false
+}
 & (Join-Path $PSScriptRoot 'start-both.ps1') @parameters
 if ($Scenario -eq 'RestartLegacyLock') {
     $holder.EndInvoke($holderResult)
@@ -212,6 +225,7 @@ exit $LASTEXITCODE
 '@ | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $testRoot 'driver.ps1')
 
 $cases = @(
+    @{ Name = 'CrossNetwork'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=100.122.3.99;SERVER=ws://100.87.60.58:8765' },
     @{ Name = 'PromptAddress'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
     @{ Name = 'PromptEmpty'; ExitCode = 1; Expected = 'Linux SSH target is required.'; BeforeSsh = $true },
     @{ Name = 'Automatic'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
@@ -264,7 +278,7 @@ foreach ($case in $cases) {
     $output = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $testRoot 'driver.ps1') $case.Name 2>&1) -join "`n"
     $exitCode = $LASTEXITCODE
     $unexpectedSsh = $case.BeforeSsh -and $output.Contains('SSH_CALLED')
-    $invalidBuildFlow = ($case.Name -in @('BuildSuccess', 'RestartBuild') -and (-not $output.Contains('SOURCE_SYNC_OK') -or -not $output.Contains('LINUX_BUILD_OK') -or -not $output.Contains('WINDOWS_BUILD_OK'))) -or
+    $invalidBuildFlow = ($case.Name -in @('BuildSuccess', 'RestartBuild', 'CrossNetwork') -and (-not $output.Contains('SOURCE_SYNC_OK') -or -not $output.Contains('LINUX_BUILD_OK') -or -not $output.Contains('WINDOWS_BUILD_OK'))) -or
         ($case.Name -in @('LinuxFail', 'WindowsFail', 'SyncFail') -and $output.Contains('LAUNCH_ADDRESS='))
     if ($case.Name -in @('LinuxFail', 'WindowsFail', 'SyncFail') -and
         -not (Test-Path -LiteralPath (Join-Path $testRoot 'build/start-both/build-incomplete'))) { $invalidBuildFlow = $true }

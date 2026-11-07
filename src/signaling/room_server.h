@@ -7,6 +7,7 @@
 #include <QTimer>
 #include <QSettings>
 #include <QWebSocketServer>
+#include <QJsonArray>
 
 class QWebSocket;
 
@@ -41,18 +42,31 @@ private:
         QString remoteIdentity;
         QString remotePolicy;
         QString remotePeerAddress;
+        QString annotationColor;
+    };
+    struct SharedScreen
+    {
+        QString streamId, ownerId;
+        QJsonArray strokes;
+        bool annotationsInVideo = false;
     };
     void acceptConnection();
     void receive(QWebSocket *socket, const QString &text);
     void leave(QWebSocket *socket);
     void send(QWebSocket *socket, const protocol::Message &message);
     void reject(QWebSocket *socket, const QString &code);
+    void receiveAnnotation(QWebSocket *socket, const QJsonObject &payload);
+    void broadcastAnnotation(const QString &room, const QJsonObject &payload);
+    void stopSharedScreen(const QString &room);
+    void replayAnnotations(QWebSocket *socket, const QString &room, const QString &streamId,
+        const QStringList &strokeIds, int next = 0);
     QWebSocket *otherPeer(QWebSocket *socket) const;
     bool assignRemoteCode(QWebSocket *socket, const QString &identity, const QString &policy);
 
     QWebSocketServer server_;
     QHash<QWebSocket *, Peer> peers_;
     QHash<QString, QList<QWebSocket *>> rooms_;
+    QHash<QString, SharedScreen> sharedScreens_;
     QHash<QString, QWebSocket *> remoteCodes_;
     QSettings remoteRegistry_;
     QHash<QString, QString> reservedCodes_;

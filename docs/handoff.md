@@ -1,5 +1,25 @@
 # ZJdesk 项目交接
 
+## 2026-11-08 标注作者图例与明确发起远控
+
+共享预览与共享者桌面层改为右上角颜色 / 昵称图例，同一作者只列一次，笔画起点不再署名。启动卡片增加「远程控制」：连接服务只验证并注册在线，之后明确点击才发起 IP 配对与授权；停止后仍在线，可再次点击。此项取代下方 2026-11-07 交接中的自动配对行为，`pendingPeerConnect_` 已移除。
+
+Windows 原生 Release 相关回归 12 通过 / 0 失败；Ubuntu 同组 11 通过 / 0 失败 / 1 Windows 专项跳过。两端构建与部署通过，记录见[专项验证](validation-annotation-legend-remote-button-20261108.md)。两端使用独立构建 / 隔离源树，现有用户客户端未重启。
+
+## 2026-11-08 Windows 共享预览递归修复
+
+Windows 本机会议共享桌面时，使用原生 `WDA_EXCLUDEFROMCAPTURE` 排除整个主窗口，防止桌面采集再次录入自己的实时预览；全屏 / Esc 切换保持排除，停止共享或离会恢复。观看端和合成测试源保持可采集，标注继续单独同步。Windows Release 构建部署通过，原生专项 8 通过 / 0 失败；Ubuntu Release 构建及相关原生 GUI 7 通过 / 0 失败 / 1 Windows 专项跳过。现有客户端未重启，Windows 活动主桌面仍需人工确认实际显示效果。见 [递归预览验证](validation-share-preview-recursion-20261108.md)。
+
+## 2026-11-08 会议多人标注与一对多屏幕共享
+
+会议中一人可向其余最多三位成员共享屏幕，所有人可在共享画面上用画笔、圆圈、箭头同步标注，带作者颜色与昵称；共享者真实桌面同步显示透明、鼠标穿透的标注层。每人清除自己的标注，共享者可清除全部；晚入会回放，停止共享 / 共享者退出清空。绘制入口仍在会议共享预览，不注入远控输入。共享者为每位观看者建立独立桌面采集 / 编码链路，三路持续负载待实机评估。
+
+服务端维护唯一共享代次和有界规范画布，校验成员、坐标及清除权限；UI 通过 `SessionCoordinator` 提交意图，协作远控路径保留。X11 桌面层会采入视频，通过 `annotationsInVideo` 避免观看端重复叠加。修复单点 JSON 数组初始化错误，以及 Windows 主窗口最小化导致桌面层隐藏的问题；原生回归覆盖后者。
+
+Windows / Ubuntu Release 构建与部署通过，现有客户端未重启。两端原生 GUI 专项均 9 通过 / 0 失败（含初始化 / 清理），覆盖多人标注、四人画面 / 全屏、离会与原远控生命周期。Windows Debug 六组非 GUI 回归、Ubuntu Release 五组均通过，包含完整合成媒体套件。
+
+两台实际电脑在不同物理局域网，通过已有 Tailscale 与独立 `100.87.60.58:8767` 信令完成 Ubuntu → Windows、Windows → Ubuntu 两轮真实 1920×1080 桌面传输、双方鼠标标注、清除和停止共享。Windows GUI 位于原生隔离桌面，Ubuntu 位于真实 X11 `:1`；未用 offscreen。尚未验收四台实体机、长期负载、真实会议音视频同时跨网运行或 Windows 活动主桌面人工显示效果；无 STUN / TURN，不代表任意公网穿透。具体命令、日志、截图现象和边界见 [多人标注验证](validation-meeting-annotations-20261108.md)。
+
 ## 2026-11-07 启动卡片收敛为「对端 IP + 连接服务」
 
 协作空间启动卡片去掉“服务地址”和“你的昵称”两个输入：服务地址仍由验证自动设置，但改为隐藏控件（保留内部同步与测试驱动），昵称只在页头 `meetingDisplayName` 填写；对方校验码整列在启动验证时被 Linux/Windows IP 面板替换，唯一的 `primaryButton` 移入 IP 行内，文案固定为「连接服务」。点击该按钮先做 IP 验证，通过后自动配对远控（`pendingPeerConnect_` 在状态到达 `WaitingForPeer` 时调用 `connectRemoteIp()`），不再需要第二次点击。改动涉及 `apps/client/main_window.h/.cpp`、`tests/ui/tst_window.cpp`、`README.md`、`docs/startup-network.md`。

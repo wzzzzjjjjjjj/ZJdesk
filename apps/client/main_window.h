@@ -18,6 +18,7 @@ class QDialog;
 class QGridLayout;
 class QPropertyAnimation;
 class VideoSurface;
+class AnnotationLayer;
 
 class MainWindow final : public QMainWindow
 {
@@ -40,6 +41,8 @@ private:
     void refreshDeviceControls();
     void refreshDevices();
     void refreshShare();
+    void refreshCaptureExclusion();
+    void refreshAnnotations();
     void refreshControl();
     void refreshRemoteHistory();
     void rememberRemotePeer(const QString &code, const QString &name);
@@ -77,13 +80,13 @@ private:
     QLineEdit *networkPeer_ = nullptr;
     QString networkPeerKey_;
     bool networkVerifying_ = false;
-    bool pendingPeerConnect_ = false;
     QLabel *networkStatus_ = nullptr;
     QLineEdit *serverEdit_ = nullptr;
     QLineEdit *roomEdit_ = nullptr;
     QComboBox *remoteHistory_ = nullptr;
     QLabel *remoteCodeLabel_ = nullptr;
     QPushButton *joinButton_ = nullptr;
+    QPushButton *remoteConnectButton_ = nullptr;
     QLineEdit *meetingServerEdit_ = nullptr;
     QLineEdit *meetingRoomEdit_ = nullptr;
     QLineEdit *meetingNameEdit_ = nullptr;
@@ -100,6 +103,10 @@ private:
     VideoSurface *meetingRemoteVideo_ = nullptr;
     QList<VideoSurface *> meetingRemoteVideos_;
     VideoSurface *meetingShareVideo_ = nullptr;
+    AnnotationLayer *desktopAnnotations_ = nullptr;
+    QComboBox *annotationTool_ = nullptr;
+    QPushButton *clearAnnotations_ = nullptr;
+    QPushButton *clearAllAnnotations_ = nullptr;
     QVBoxLayout *meetingParticipantLayout_ = nullptr;
     QLabel *meetingMemberCount_ = nullptr;
     QWidget *meetingLocalMember_ = nullptr;

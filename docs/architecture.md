@@ -1,6 +1,6 @@
 # 架构与扩展约定
 
-客户端入口直接显示 `MainWindow`，在协作空间原校验码位置验证对端 IP：Windows 填 Linux IPv4，Linux 填 Windows IPv4。`session/network_setup.*` 用 UDP connect 选择访问对端的本机源地址（不发送数据），检查活动网卡、异步对端 ping 及信令 WebSocket，10 秒总超时，退出或编辑地址取消探测。Linux 客户端通过 `NetworkSetup` 持有的 `RoomServer` 自动监听 IPv4 端口（默认 8765），已有服务时通过后续握手验证；两端默认连接 Linux 地址，显式非回环 `--server` 参数保留。验证成功才注册远控服务、请求摄像头权限、启用远控及入会；编辑地址通过 `SessionCoordinator::leave()` 断开并撤销放行。成功的对端输入保存在独立 `network.ini`，不能代替下次验证。成功后将本机地址写入进程的 `ZJDESK_WEBRTC_LOCAL_ADDRESS`，屏幕共享和会议均绑定该地址。验证只证明地址和基础连通性，不能证明动态媒体端口、设备或实际远控可用。见 [启动网络验证](startup-network.md)。
+客户端入口直接显示 `MainWindow`，在协作空间原校验码位置验证对端 IP：Windows 填 Linux IPv4，Linux 填 Windows IPv4。`session/network_setup.*` 用 UDP connect 选择访问对端的本机源地址（不发送数据），检查活动网卡、异步对端 ping 及信令 WebSocket，10 秒总超时，退出或编辑地址取消探测。Linux 客户端通过 `NetworkSetup` 持有的 `RoomServer` 自动监听 IPv4 端口（默认 8765），已有服务时通过后续握手验证；两端默认连接 Linux 地址，显式非回环 `--server` 参数保留。验证成功才注册远控服务、请求摄像头权限、启用远控及入会；此时仅保持在线，用户点击独立的「远程控制」按钮才调用协调层发起 IP 配对与控制请求；编辑地址通过 `SessionCoordinator::leave()` 断开并撤销放行。成功的对端输入保存在独立 `network.ini`，不能代替下次验证。成功后将本机地址写入进程的 `ZJDESK_WEBRTC_LOCAL_ADDRESS`，屏幕共享和会议均绑定该地址。验证只证明地址和基础连通性，不能证明动态媒体端口、设备或实际远控可用。见 [启动网络验证](startup-network.md)。
 
 `start-both.ps1` 未传 `-LinuxSsh` 时提示查询方法并要求输入 Linux 用户名和 IPv4，不再内置开发机器的 SSH 地址；显式参数及原有网卡自动选择流程保留。
 
@@ -18,7 +18,9 @@
 
 单画面全屏只修改 UI：保留原 OpenGL 控件及父级关系，临时隐藏兄弟控件、解除尺寸约束并调整布局伸展，退出时恢复窗口位置、状态和布局；不修改媒体会话。成员身份更换或画面清空时退出全屏，避免显示错人。协作画布全屏继续使用原输入坐标映射，隐藏本机校验码且不提供缩小按钮，按 Esc 恢复；会议画面的放大 / 缩小按钮保持原有行为。
 
-屏幕共享暂限两人，第三人加入会停止原来的双人共享；一对多屏幕共享未实现。会议禁用远控。使用与验证边界见 [视频会议](video-conference.md)。
+会议屏幕共享由服务端按房间维护唯一 `streamId` / `ownerId`，首个共享请求获得共享权；同一时刻一人向其余最多三人发送。`session/meeting_share.cpp` 为每位观看者建立独立 `ScreenShare` 管线，沿用 VP9 / WebRTC 和定向协商；一人离开只移除对应链路，晚入会补建链路，共享者离开广播结束。桌面采集和编码当前按观看者各做一次，三路成本需要实机评估；摄像头的一次采集策略不变。协作远控保留原双人 `screen_` 路径，会议仍禁用远控。
+
+`annotation` 信令由 `RoomServer` 校验当前会议、共享代次、归一化坐标、工具与画布容量，并覆盖作者 ID / 昵称 / 颜色；同房间广播，晚入会逐条节流回放当前画布。画布最多 128 条、每条 256 点，更新只能修改本人的笔画，清除全部仅共享者可执行。`SessionCoordinator` 持有客户端标注模型，UI 只提交绘制 / 清除意图。`AnnotationLayer` 在共享画面的实际显示区域叠加笔画，在右上角按作者 ID 去重显示颜色与昵称图例，笔画不单独署名；共享者桌面显示相同图例与笔画的透明、鼠标穿透原生窗口。Windows 请求将桌面标注层排除出采集；X11 会将桌面层采入视频，因此协商 `annotationsInVideo`，观看端只绘制本地草稿，避免再次叠加。画布不写入共享文件。使用与验证边界见 [视频会议](video-conference.md) 和 [多人标注验证](validation-meeting-annotations-20261108.md)。
 界面从本机 `QSettings(IniFormat, UserScope, "ZJdesk", "meeting")` 读取三个入会默认开关，初始均开启，
 通过 `setConferenceJoinDefaults` 交给协调层；每次新建媒体连接时取用，不改变当前通话。
 媒体工作线程在管线进入 PLAYING 前应用静音和画面隐藏，远端通过当前会话的 `camera` 消息同步默认隐藏状态。

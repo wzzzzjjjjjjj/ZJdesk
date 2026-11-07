@@ -360,6 +360,7 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
 
 SessionCoordinator::~SessionCoordinator()
 {
+    if (roomType_ == RoomType::Meeting) clearMeetingShare(true);
     clearConference(true);
     clearControl();
     signaling_.close();
@@ -631,6 +632,7 @@ bool SessionCoordinator::startScreenShare(const QString &source, int targetFps)
 {
     if (targetFps != 0 && targetFps != 15 && targetFps != 30 && targetFps != 60)
         return false;
+    if (roomType_ == RoomType::Meeting) return startMeetingShare(source, targetFps);
     if (state_ != State::PeerAvailable || memberCount() > 2 || screenActive() || shareState_ == PreviewState::Stopping)
         return false;
     failedStreamId_.clear();
@@ -665,12 +667,19 @@ void SessionCoordinator::stopScreenShare()
 void SessionCoordinator::reportSharePresentation(quint64 frames, bool active, double gapMaxMs,
     const VideoPresentationStats &presentation)
 {
+    if (roomType_ == RoomType::Meeting)
+    {
+        if (receivingScreen_ && meetingSharePeers_.contains(shareOwnerId_))
+            meetingSharePeers_[shareOwnerId_]->reportPresentation(frames, shareEpoch_, active, gapMaxMs, presentation);
+        return;
+    }
     if (screenActive())
         screen_.reportPresentation(frames, shareEpoch_, active, gapMaxMs, presentation);
 }
 
 void SessionCoordinator::clearScreenShare(bool notifyPeer)
 {
+    if (roomType_ == RoomType::Meeting) return clearMeetingShare(notifyPeer);
     if (!screenActive())
         return;
     controlStartedShare_ = false;
@@ -1083,6 +1092,13 @@ void SessionCoordinator::receiveControlRequest(const QJsonObject &message)
 
 void SessionCoordinator::receiveShare(const protocol::Message &message)
 {
+    if (roomType_ == RoomType::Meeting)
+    {
+        const auto id = message.payload.value("fromPeerId").toString();
+        if (message.payload.value("streamId").toString() == streamId_ && meetingSharePeers_.contains(id))
+            meetingSharePeers_[id]->negotiate(message.type, message.payload, shareEpoch_);
+        return;
+    }
     const auto id = message.payload.value("streamId").toString();
     if (!protocol::isRoomIdValid(id))
         return;
@@ -1411,6 +1427,12 @@ void SessionCoordinator::receiveMeshConference(const QJsonObject &payload)
 
 void SessionCoordinator::receive(const protocol::Message &message)
 {
+    if (message.type == "annotation")
+    {
+        if (roomType_ == RoomType::Meeting && (state_ == State::PeerAvailable || state_ == State::WaitingForPeer))
+            receiveAnnotation(message.payload);
+        return;
+    }
     if (remoteAccess_ && message.type == "remote_registered"
         && (state_ == State::Joining || state_ == State::WaitingForPeer))
     {
@@ -1487,6 +1509,7 @@ void SessionCoordinator::receive(const protocol::Message &message)
             return fail(QStringLiteral("信令服务不支持所选房间类型，请更新服务端"));
         deadline_.stop();
         ownPeerId_ = message.payload.value("peerId").toString();
+        annotationColor_ = message.payload.value("annotationColor").toString();
         const auto peers = message.payload.value("peers").toArray();
         for (const auto &value : peers)
         {
@@ -1510,7 +1533,7 @@ void SessionCoordinator::receive(const protocol::Message &message)
     {
         const auto id = message.payload.value("peerId").toString();
         conferencePeers_.insert(id, message.payload.value("name").toString());
-        if (memberCount() > 2 && screenActive()) stopScreenShare();
+        if (roomType_ == RoomType::Meeting && ownsSharedScreen()) addMeetingSharePeer(id);
         if (peerId_.isEmpty()) { peerId_ = id; peerName_ = conferencePeers_.value(id); }
         if (state_ == State::WaitingForPeer)
             changeState(State::PeerAvailable, QStringLiteral("成员已入会"));
@@ -1530,7 +1553,8 @@ void SessionCoordinator::receive(const protocol::Message &message)
                 if (meshPending_.at(i).value("fromPeerId").toString() == id) meshPending_.removeAt(i);
         }
         else if (id == peerId_) clearConference(false);
-        if (id == peerId_) { clearScreenShare(false); clearControl(); }
+        if (roomType_ == RoomType::Meeting) removeMeetingSharePeer(id);
+        else if (id == peerId_) { clearScreenShare(false); clearControl(); }
         if (!conferencePeers_.isEmpty())
         {
             if (id == peerId_)
@@ -1563,7 +1587,7 @@ void SessionCoordinator::receive(const protocol::Message &message)
                 receiveConference(message.payload);
             else
             {
-                if (message.payload.value("fromPeerId").toString() == peerId_) receiveShare(message);
+                if (roomType_ == RoomType::Meeting || message.payload.value("fromPeerId").toString() == peerId_) receiveShare(message);
                 emit negotiationReceived(message);
             }
         }

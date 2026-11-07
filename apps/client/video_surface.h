@@ -9,6 +9,7 @@
 #include "media/frame_timing.h"
 
 class QPushButton;
+class AnnotationLayer;
 
 class VideoSurface final : public QOpenGLWidget
 {
@@ -30,6 +31,7 @@ public:
     void setControlEnabled(bool enabled);
     void setRemoteCursor(const zjdesk::RemoteCursor &cursor);
     bool hasRemoteCursor() const { return remoteCursor_.visible && !remoteCursor_.image.isNull(); }
+    AnnotationLayer *annotationLayer();
 
 signals:
     void remoteInput(const QJsonObject &input);
@@ -49,6 +51,8 @@ protected:
     void focusOutEvent(QFocusEvent *event) override;
 
 private:
+    AnnotationLayer *annotationLayer_ = nullptr;
+    void updateAnnotationGeometry();
     QString name_ = QStringLiteral("等待另一位成员");
     QString caption_ = QStringLiteral("加入同一个房间，即可建立连接");
     QImage frame_;
