@@ -8,10 +8,19 @@ int ShareQuality::compatibleMaximumFps(int sourceFps, int receiverFps)
     return receiverFps >= 5 && receiverFps <= 240 ? qMin(source, receiverFps) : source;
 }
 
-ShareQuality::ShareQuality(const QSize &nativeSize, int maximumFps, int minimumFps)
+ShareQuality::ShareQuality(const QSize &nativeSize, int maximumFps, int minimumFps, bool lowBandwidth)
 {
-    const auto native = nativeSize.isEmpty() ? QSize(1920, 1080) : nativeSize;
+    auto native = nativeSize.isEmpty() ? QSize(1920, 1080) : nativeSize;
     maximumFps = maximumFps > 0 ? qBound(5, maximumFps, 240) : 60;
+    if (lowBandwidth)
+    {
+        native = native.scaled(QSize(960, 540), Qt::KeepAspectRatio).boundedTo(native);
+        native = {qMax(2, native.width() / 2 * 2), qMax(2, native.height() / 2 * 2)};
+        maximumFps = qMin(maximumFps, 15);
+        minimumFps = 5;
+        minimumBitrate_ = 128000;
+        maximumBitrate_ = 800000;
+    }
     minimumFps = qBound(5, minimumFps, maximumFps);
     QList<int> frameRates;
     frameRates.append(maximumFps);
@@ -88,9 +97,9 @@ bool ShareQuality::observeNetwork(qint64 receivedPackets, qint64 lostPackets, do
     const int current = profile().bitrate();
     int next = current;
     if (congestedWindows_ >= 2 || delayedWindows_ >= 2)
-        next = qMax(2000000, current * 85 / 100);
+        next = qMax(minimumBitrate_, current * 85 / 100);
     else if (healthyNetworkWindows_ >= 15 && bitrateLimit_ > 0)
-        next = qMin(profiles_.at(index_).bitrate(), current + qMax(100000, current / 20));
+        next = qMin(qMin(profiles_.at(index_).bitrate(), maximumBitrate_), current + qMax(100000, current / 20));
     else
         return false;
     congestedWindows_ = delayedWindows_ = healthyNetworkWindows_ = 0;

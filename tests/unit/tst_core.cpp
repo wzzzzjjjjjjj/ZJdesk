@@ -364,6 +364,27 @@ private slots:
         QCOMPARE(timing.summary().meanMs, 1.01);
     }
 
+    void lowBandwidthQualityCapsAndRecoversWithinBudget()
+    {
+        zjdesk::ShareQuality quality(QSize(3840, 2160), 144, 24, true);
+        QCOMPARE(quality.profile().size, QSize(960, 540));
+        QCOMPARE(quality.profile().fps, 15);
+        QCOMPARE(quality.profile().bitrate(), 800000);
+        for (int i = 0; i < 60; ++i) quality.observeNetwork(-1, -1, 100);
+        QCOMPARE(quality.profile().bitrate(), 128000);
+        for (int i = 0; i < 300; ++i) quality.observeNetwork(-1, -1, 0);
+        QCOMPARE(quality.profile().bitrate(), 800000);
+        for (int i = 0; i < 60; ++i) quality.observe(0, 0);
+        QCOMPARE(quality.profile().size, QSize(640, 360));
+        QCOMPARE(quality.profile().fps, 5);
+        for (int i = 0; i < 300; ++i) quality.observe(60, 60);
+        QVERIFY(quality.profile().size.width() <= 960);
+        QVERIFY(quality.profile().fps <= 15);
+        QVERIFY(quality.profile().bitrate() <= 800000);
+        zjdesk::ShareQuality small(QSize(320, 240), 60, 24, true);
+        QCOMPARE(small.profile().size, QSize(320, 240));
+    }
+
     void shareQualityPreservesResolutionAndAvoidsOscillation()
     {
         zjdesk::ShareQuality quality(QSize(3840, 2160));

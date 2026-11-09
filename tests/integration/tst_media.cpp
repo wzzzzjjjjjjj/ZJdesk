@@ -534,6 +534,45 @@ private slots:
         QVERIFY(!alice.conferenceActive());
     }
 
+    void lowBandwidthShareDeliversFramesAndControl()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        const auto previous = qgetenv("ZJDESK_SHARE_LOW_BANDWIDTH");
+        const auto restore = qScopeGuard([&] {
+            if (previous.isNull()) qunsetenv("ZJDESK_SHARE_LOW_BANDWIDTH");
+            else qputenv("ZJDESK_SHARE_LOW_BANDWIDTH", previous);
+        });
+        qputenv("ZJDESK_SHARE_LOW_BANDWIDTH", "1");
+        zjdesk::ScreenShare sender, receiver;
+        zjdesk::ShareStats sent;
+        QSignalSpy frames(&receiver, &zjdesk::ScreenShare::frameReady);
+        QSignalSpy controls(&sender, &zjdesk::ScreenShare::controlReceived);
+        bool ready = false;
+        QObject callbacks;
+        connect(&receiver, &zjdesk::ScreenShare::controlChannelChanged, &callbacks,
+            [&](quint64, bool open) { ready = open; });
+        connect(&sender, &zjdesk::ScreenShare::statisticsReady, &callbacks,
+            [&](quint64, const zjdesk::ShareStats &stats) { sent = stats; });
+        connect(&sender, &zjdesk::ScreenShare::negotiationReady, &receiver,
+            [&](quint64, const QString &type, const QJsonObject &message) { receiver.negotiate(type, message, 9); });
+        connect(&receiver, &zjdesk::ScreenShare::negotiationReady, &sender,
+            [&](quint64, const QString &type, const QJsonObject &message) { sender.negotiate(type, message, 7); });
+        receiver.start(false, {}, 9);
+        sender.start(true, "test", 7, 60);
+        QTRY_VERIFY_WITH_TIMEOUT(frames.size() >= 10 && ready && sent.congestionBitrate > 0, 15000);
+        QCOMPARE(sent.targetFps, 15);
+        QVERIFY(sent.size.width() <= 960 && sent.size.height() <= 540);
+        QCOMPARE(sent.congestionMaximumBitrate, 800000);
+        QVERIFY(sent.encoderBitrate > 0 && sent.encoderBitrate <= 640000);
+        QVERIFY(sent.codec.contains("profile 0"));
+        const QJsonObject probe{{"action", "input"}, {"kind", "unsupported-probe"}, {"seq", 77}};
+        receiver.sendControl(probe, 9);
+        QTRY_VERIFY(!controls.isEmpty());
+        QCOMPARE(controls.last().at(1).toJsonObject(), probe);
+        sender.stop(8);
+        receiver.stop(10);
+    }
+
     void gccCapConstrainsNegotiatedPacerAndEncoder()
     {
         QVERIFY(zjdesk::MediaEnvironment::inspect().ready);

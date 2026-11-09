@@ -96,9 +96,13 @@ public:
         }
         sender_ = sender;
         automatic_ = targetFps == 0;
-        quality_ = ShareQuality(nativeSize, automatic_ ? maximumFps : targetFps);
+        lowBandwidth_ = qEnvironmentVariable("ZJDESK_SHARE_LOW_BANDWIDTH") == "1"
+            || QHostAddress(qEnvironmentVariable("ZJDESK_WEBRTC_LOCAL_ADDRESS"))
+                .isInSubnet(QHostAddress("100.64.0.0"), 10);
+        quality_ = ShareQuality(nativeSize, automatic_ ? maximumFps : targetFps,
+            ShareQuality::MinimumFps, lowBandwidth_);
         profile_ = quality_.profile();
-        if (!automatic_)
+        if (!automatic_ && !lowBandwidth_)
             profile_.fps = targetFps;
         revision_ = 1;
         peerFps_ = -1;
@@ -124,8 +128,9 @@ public:
         controlRttMs_ = transportExcessMs_ = -1;
         probeSamples_.clear();
         const auto gccMode = qEnvironmentVariable("ZJDESK_WEBRTC_GCC");
-        gccEnabled_ = sender && (gccMode == "1" || gccMode == "tcp");
-        const auto maximumBitrate = sender ? qEnvironmentVariable("ZJDESK_WEBRTC_MAX_BITRATE") : QString();
+        gccEnabled_ = sender && (lowBandwidth_ || gccMode == "1" || gccMode == "tcp");
+        auto maximumBitrate = sender ? qEnvironmentVariable("ZJDESK_WEBRTC_MAX_BITRATE") : QString();
+        if (sender && lowBandwidth_ && maximumBitrate.isEmpty()) maximumBitrate = "800000";
         const auto budget = CongestionBudget::fromMaximum(maximumBitrate, profile_.bitrate());
         if (!maximumBitrate.isEmpty() && (!gccEnabled_ || !budget))
             return fail(QStringLiteral("ZJDESK_WEBRTC_MAX_BITRATE 需要启用 GCC，且必须为 128000..40000000 bit/s 的整数"));
@@ -198,7 +203,7 @@ public:
                 "videoconvert ! video/x-raw,format=RGB ! "
                 "appsink name=frames max-buffers=1 drop=true sync=false wait-on-eos=false "
                 "split. ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! " +
-                encoderPipeline() + " ! video/x-vp9,profile=(string)1 ! " +
+                encoderPipeline() + QString(" ! video/x-vp9,profile=(string)%1 ! ").arg(lowBandwidth_ ? 0 : 1) +
                 "rtpvp9pay name=pay pt=96 picture-id-mode=15-bit ! "
                 "application/x-rtp,media=video,encoding-name=VP9,payload=96 ! "
                 "webrtcbin name=rtc bundle-policy=max-bundle";
@@ -281,7 +286,7 @@ public:
 #ifdef Q_OS_LINUX
                 // The LAN desktop path avoids UDP keyframe bursts exceeding the host buffer.
                 // libnice may still reject RTP under TCP congestion; this is not a cross-network guarantee.
-                if (sender && source != "test" && (!gccEnabled_ || gccMode == "tcp"))
+                if (sender && source != "test" && ((!lowBandwidth_ && !gccEnabled_) || gccMode == "tcp"))
                     g_object_set(agent, "ice-udp", FALSE, "ice-tcp", TRUE, nullptr);
 #endif
                 g_signal_connect_data(agent, "new-selected-pair-full", G_CALLBACK(selectedPair),
@@ -955,17 +960,23 @@ private:
                 "min-force-key-unit-interval=500000000")
                 .arg(hardwareQuantizer())
                 .arg(qMin(1024, profile_.fps * 5));
-        return QString("videoconvert ! video/x-raw,format=Y444,colorimetry=1:3:5:1 ! "
+        return QString("videoconvert ! video/x-raw,format=%3,colorimetry=1:3:5:1 ! "
             "vp9enc name=encoder deadline=1 cpu-used=8 threads=4 row-mt=true tile-columns=2 lag-in-frames=0 "
-            "end-usage=cbr min-quantizer=0 max-quantizer=8 "
-            "buffer-size=300 buffer-initial-size=150 buffer-optimal-size=150 max-intra-bitrate=1000 "
+            "end-usage=cbr min-quantizer=0 max-quantizer=%4 "
+            "buffer-size=300 buffer-initial-size=150 buffer-optimal-size=150 max-intra-bitrate=%5 "
             "min-force-key-unit-interval=500000000 target-bitrate=%1 keyframe-max-dist=%2")
-            .arg(encoderBudget()).arg(profile_.fps * 5);
+            .arg(encoderBudget()).arg(profile_.fps * 5).arg(lowBandwidth_ ? "I420" : "Y444")
+            .arg(lowBandwidth_ ? 56 : 8).arg(lowBandwidth_ ? 300 : 1000);
     }
     void selectEncoder()
     {
         hardwareEncoder_ = false;
         codecFallbackReason_.clear();
+        if (lowBandwidth_)
+        {
+            codecFallbackReason_ = QStringLiteral("跨网低带宽使用 VP9 4:2:0 码率控制");
+            return;
+        }
 #ifdef Q_OS_LINUX
         auto *factory = gst_element_factory_find("vavp9lpenc");
         if (!factory)
@@ -1432,7 +1443,8 @@ private:
                 stats.rtcpFeedbackBudget = rtcpFeedbackBudget_;
                 stats.encoderQuantizer = quantizer;
                 stats.hardwareEncoder = sender_ && hardwareEncoder_;
-                stats.codec = sender_ && hardwareEncoder_ ? "vavp9lpenc / VP9 profile 1" : sender_ ? "vp9enc / VP9 profile 1" : "vp9dec";
+                stats.codec = sender_ && hardwareEncoder_ ? "vavp9lpenc / VP9 profile 1"
+                    : sender_ ? (lowBandwidth_ ? "vp9enc / VP9 profile 0" : "vp9enc / VP9 profile 1") : "vp9dec";
                 stats.codecFallbackReason = sender_ ? codecFallbackReason_ : QString();
                 stats.transport = transport_;
                 stats.localAddress = localAddress_;
@@ -1541,6 +1553,7 @@ private:
     ShareQuality quality_;
     ShareProfile profile_;
     bool automatic_ = true;
+    bool lowBandwidth_ = false;
     int revision_ = 1;
     double peerFps_ = -1;
     QElapsedTimer profileClock_;

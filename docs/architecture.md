@@ -1,5 +1,7 @@
 # 架构与扩展约定
 
+2026-11-08 跨网低带宽路径：`ScreenShareWorker` 在新流启动时检查已验证的 `ZJDESK_WEBRTC_LOCAL_ADDRESS`，源地址位于 `100.64.0.0/10` 时自动启用；其他 VPN / 路由可用 `ZJDESK_SHARE_LOW_BANDWIDTH=1` 显式启用。`ShareQuality` 将起始尺寸限制在 960×540、帧率限制在 15，最低可降到 640×360 / 5 fps（保持比例且不放大小屏），网络预算在 128～800 kbps 间调整。该路径使用软件 VP9 profile 0 / I420，放宽量化以实现低码率，同时启用 GCC（默认上限 800 kbps，编码目标留出 20% 预算），Linux 默认不再强制 ICE-TCP，保留 UDP 候选；显式 `ZJDESK_WEBRTC_GCC=tcp` 仍保留 ICE-TCP 限制。预算不等于包含重传 / FEC / 关键帧的线速硬上限；显式 GCC 上限环境变量仍按原规则校验。普通局域网沿用原 profile 1 / 4:4:4 路径，会议不变。此次使用现有 Tailscale 路由，不新增 STUN / TURN；实测与未验收项见 [跨网验证](validation-crossnet-20261108.md)。
+
 客户端入口直接显示 `MainWindow`，在协作空间原校验码位置验证对端 IP：Windows 填 Linux IPv4，Linux 填 Windows IPv4。`session/network_setup.*` 用 UDP connect 选择访问对端的本机源地址（不发送数据），检查活动网卡、异步对端 ping 及信令 WebSocket，10 秒总超时，退出或编辑地址取消探测。Linux 客户端通过 `NetworkSetup` 持有的 `RoomServer` 自动监听 IPv4 端口（默认 8765），已有服务时通过后续握手验证；两端默认连接 Linux 地址，显式非回环 `--server` 参数保留。验证成功才注册远控服务、请求摄像头权限、启用远控及入会；编辑地址通过 `SessionCoordinator::leave()` 断开并撤销放行。成功的对端输入保存在独立 `network.ini`，不能代替下次验证。成功后将本机地址写入进程的 `ZJDESK_WEBRTC_LOCAL_ADDRESS`，屏幕共享和会议均绑定该地址。验证只证明地址和基础连通性，不能证明动态媒体端口、设备或实际远控可用。见 [启动网络验证](startup-network.md)。
 
 `start-both.ps1` 未传 `-LinuxSsh` 时提示查询方法并要求输入 Linux 用户名和 IPv4，不再内置开发机器的 SSH 地址；显式参数及原有网卡自动选择流程保留。

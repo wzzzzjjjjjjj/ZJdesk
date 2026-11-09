@@ -1,5 +1,11 @@
 # ZJdesk 项目交接
 
+## 2026-11-08 不同局域网低带宽远控
+
+当前 Tailscale 两端为 Windows `100.122.3.99`、Linux `100.87.60.58`，实测为 direct 路由。屏幕共享在验证选择 Tailscale 源地址后自动限制到 960×540 / 15 fps，使用 VP9 4:2:0、GCC 800 kbps 预算并保留 UDP；显式 `ZJDESK_WEBRTC_GCC=tcp` 仍保留 Linux 的 ICE-TCP 限制，已用双机探针复核。普通局域网与会议路径不变。新增档位降速 / 恢复单测、真实 GStreamer 画面 / 控制消息回归及 `zjdesk-control-probe` 手动跨机测试工具，后者只点击自己创建的测试窗口，退出恢复光标。
+
+双向真实主屏采集、IP 互验与自动配对、授权、WebRTC 画面交付和原生移动 / 点击通过。Windows 控制 Linux 收到 586 帧、输入回执 5.269～11.102 ms；Linux 控制 Windows 收到 563 帧、回执 7.016～1054.986 ms，最后一个范围包含明显波动，不能表述为持续低延迟。真实产品窗口绘制、拖动 / 放大、长时间连接及 DERP 状态仍待验收；未替换或重启用户原检出的客户端。运行目录、复测命令及常规回归结果见 [跨网验证](validation-crossnet-20261108.md)。
+
 ## 2026-11-07 启动卡片收敛为「对端 IP + 连接服务」
 
 协作空间启动卡片去掉“服务地址”和“你的昵称”两个输入：服务地址仍由验证自动设置，但改为隐藏控件（保留内部同步与测试驱动），昵称只在页头 `meetingDisplayName` 填写；对方校验码整列在启动验证时被 Linux/Windows IP 面板替换，唯一的 `primaryButton` 移入 IP 行内，文案固定为「连接服务」。点击该按钮先做 IP 验证，通过后自动配对远控（`pendingPeerConnect_` 在状态到达 `WaitingForPeer` 时调用 `connectRemoteIp()`），不再需要第二次点击。改动涉及 `apps/client/main_window.h/.cpp`、`tests/ui/tst_window.cpp`、`README.md`、`docs/startup-network.md`。

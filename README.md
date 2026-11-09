@@ -78,6 +78,8 @@ Windows 被控后端已实现，真实键鼠和持续画质 / 帧率验收状态
 
 ## 网络要求
 
+当前不同局域网通过 Tailscale 互通时，屏幕共享自动使用低带宽模式：最高 960×540 / 15 fps、VP9 4:2:0、800 kbps 拥塞预算，拥塞时继续降档。2026-11-08 在 Windows `100.122.3.99` 与 Linux `100.87.60.58` 之间实测双向桌面传输和测试窗口原生移动 / 点击通过；Linux 控制 Windows 的点击回执曾达到约 1.05 秒，实际操作手感、放大 / 拖动及长期稳定性仍待验收。两端需运行新版，启动卡片分别填写对方 Tailscale IP 后点击「连接服务」，被控端按设置允许控制。启动命令、报告与边界见 [跨网低带宽验证](docs/validation-crossnet-20261108.md)。
+
 入房使用的信令连接与传输画面 / 音频 / 文件的 WebRTC 连接是两条路径：**校验码配对或会议入会成功，不代表媒体和远控通道已连通。**
 
 | 项目 | 要求与建议 |
@@ -172,7 +174,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run.ps1
 
 - Windows：双击 `ZJdesk-0.4.5-windows-x64.exe`，首次解压到当前用户目录后启动；也可以解压 `ZJdesk-0.4.5-windows-x64-portable.zip`，运行 `bin/zjdesk.exe`，保留全部 DLL 和子目录。
 - Linux：给 `ZJdesk-0.4.5-linux-x86_64.AppImage` 添加执行权限后运行。包内包含 Qt / GStreamer，验证基线为 Ubuntu 22.04 x64 X11，尚未完成 Ubuntu 24.04 或干净系统验收。
-- 上述既有发布包尚未包含本轮顶部 IP 验证更新；需要重新打包后才有新界面。当前 Windows 部署目录已更新，Linux 新版本尚未构建；[发布包使用、构建与验证说明](docs/packaging.md)。
+- 上述既有发布包尚未包含顶部 IP 验证与本轮跨网更新，需要重新打包。2026-11-08 已在当前 Windows 工作树和 Linux 独立目录完成构建与部署，路径见 [跨网验证](docs/validation-crossnet-20261108.md)；[发布包使用、构建与验证说明](docs/packaging.md)。
 
 ### 可直接双击的本地部署
 
@@ -203,16 +205,16 @@ ShareStats 的 `localAddress` / `remoteAddress` 记录实际选中地址。未�
 
 ### 不同局域网，通过 Tailscale 连接
 
-两端已加入同一 Tailnet 时，服务地址可直接填写 Linux 的 Tailscale 地址，
-本次为 `ws://100.87.60.58:8765`。Linux 服务需监听该地址或 `0.0.0.0`，
-恢复跨网验证时应移除两端 `ZJDESK_WEBRTC_LOCAL_ADDRESS` 的局域网绑定，Windows 启动传入
-`-ServerUrl 'ws://100.87.60.58:8765'`；两端在线后输入 Linux 的校验码，再按 Linux 的二次验证设置授权。
+两端已加入同一 Tailnet 时，Linux 新版客户端自动提供共用信令服务。
+Windows 填 Linux `100.87.60.58`，Linux 填 Windows `100.122.3.99`，两端分别点击「连接服务」，再按被控端的二次验证设置授权。
+启动验证会选择本机 Tailscale 源地址并更新 `ZJDESK_WEBRTC_LOCAL_ADDRESS`，自动启用低带宽共享。
+显式指定服务时，Windows 启动可传入 `-ServerUrl 'ws://100.87.60.58:8765'`。
 媒体 ICE host 候选不限制局域网网段，能够使用 Tailscale 虚拟网卡地址，无需把 IP 写入代码。
 本次将媒体启动等待改为 45 秒、控制请求及允许后的连接等待改为 60 秒；
 Linux 等待本地批准仍为 30 秒，拒绝、撤销和断开仍立即清理。
 Tailscale 的 direct / relay 路径独立于界面显示的媒体 TCP / UDP；DERP 中继可能增加延迟并限制实际速度。
-这不代表已实现脱离 Tailscale 的公网 NAT 穿透或 TURN；本次中继链路下画面 / 控制验收未通过，
-延长等待没有解决连接失败，实测边界见 docs/validation.md。
+2026-11-08 在当前 direct 路径完成双向桌面帧、原生移动与点击验证，详情见 [跨网验证](docs/validation-crossnet-20261108.md)。
+此前 DERP 中继链路验收未通过，记录见 [历史验证](docs/validation.md)；本轮没有复测中继，也未实现脱离 Tailscale 的公网 NAT 穿透或 TURN。
 
 ## Ubuntu 22.04
 
@@ -255,14 +257,14 @@ Remove-Item Env:ZJDESK_WEBRTC_LOCAL_ADDRESS -ErrorAction SilentlyContinue
 ```
 
 手动启动 Linux 可用 `bash ./run.sh`，在协作空间填写并验证 Windows IP；成功后会用自动识别的本机地址覆盖旧的媒体绑定。两端默认共用 Linux 信令服务。有线优先的自动探测由上面的双端启动器完成。
-不同网络经 Tailscale 的验证按用户要求暂停，当前局域网结果见 [validation.md](docs/validation.md)。
+不同网络经 Tailscale 的验证已于 2026-11-08 恢复，当前 direct 路径结果见 [跨网验证](docs/validation-crossnet-20261108.md)，历史局域网结果见 [validation.md](docs/validation.md)。
 
 两端均更新客户端和信令服务后启动，在协作空间互相填写对端 IP 并点击「连接服务」。
 设置 → 远程控制中的“需要二次验证”默认开启：被控方点击“允许控制”后连接；关闭后，匹配的对端可自动获得远控和文件复制权限。IP 地址不提供身份认证。Windows 和 Linux 两个方向使用相同流程。
 对方离线、未验证本机地址、正在连接其他电脑或同一地址存在多个匹配客户端时会提示，可检查后重试。
 控制方点击收到的画面后操作键鼠；“放大画面”进入全屏，按 Esc 返回，任一端点击“结束控制”都会断开双方配对，下次可点击连接重新发起。
 Linux 被控要求 X11；Windows 被控支持普通交互桌面，SendInput 受 Windows 权限边界限制，不能控制 UAC 安全桌面或比本程序权限更高的应用。
-Wayland 被控、文本剪贴板和中文输入法同步尚未实现。两端需要启用 GStreamer；保留共同支持的 VP9 4:4:4 软件路径，不因追求帧率自动切到 4:2:0。
+Wayland 被控、文本剪贴板和中文输入法同步尚未实现。两端需要启用 GStreamer；普通局域网保留 VP9 4:4:4 路径，跨网低带宽模式使用 VP9 4:2:0 以降低传输需求。
 自动模式结合双端处理速度和网络反馈逐步升降档；目标帧率不是实际帧率，也不保证任意两台电脑都能稳定 1080p60。
 
 ### Windows 与 Linux 双向复制文件
@@ -315,7 +317,7 @@ Windows 启动时只读检查“摄像头访问”和“允许桌面应用访问
 诊断页显示真实版本、枚举设备和音频测试状态；默认测试不打开摄像头，也不播放测试音。
 
 远控双方通过校验码连接，或两人会议加入同一会议房间后，点击“共享主屏幕”，另一端自动显示整个主屏幕及鼠标指针。
-Linux 桌面发送默认使用 WebRTC ICE-TCP，避免高画质大关键帧在当前无 UDP 发包调度时突发丢失；
+普通局域网模式下，Linux 桌面发送默认使用 WebRTC ICE-TCP，避免高画质大关键帧在当前无 UDP 发包调度时突发丢失；
 画面状态显示实际 TCP / UDP。TCP 拥塞时可能增加等待，不能据此承诺稳定 60 fps。
 共享从主屏幕原始像素尺寸及刷新率开始，在原尺寸下逐级选择可持续帧率，
 降至 24 fps 仍持续不足时才按比例缩小，仅最低尺寸继续降帧；不会放大原本较小的屏幕。
@@ -324,7 +326,8 @@ Linux 可选探测 VA-API VP9 profile 1 编码，启动及自动模式尺寸切�
 硬编使用 CQP 8～16，实际码率不受目标预算硬性限制；Windows 接收仍使用软件解码以保留 4:4:4。
 连续丢包或相对基线的持续往返延迟会保守降低编码预算，拥塞期间不自动升档；稳定后逐步恢复。
 另有 Linux 发送端 `ZJDESK_WEBRTC_GCC=tcp` 可选路径，使用实际协商的 TWCC 和单层 GCC pacing 并保留 ICE-TCP，
-需要可选 rsrtp / rtpgccbwe 插件；不设置或设为 0 保留原 ICE-TCP、不开启 GCC。
+需要可选 rsrtp / rtpgccbwe 插件；普通局域网下不设置或设为 0 保留原 ICE-TCP、不开启 GCC。
+跨网低带宽模式自动启用 GCC 并保留 UDP 候选；显式设置 `ZJDESK_WEBRTC_GCC=tcp` 仍会保留 Linux 的 ICE-TCP 限制。
 2026-10-10 的 LAN 十分钟真实 Edge 隔离桌面对照平均显示 52.73 fps、保持 1080p，
 仍有最长约 907 ms 停顿，尚未达到稳定 60 fps；完整结果和物理 GNOME 验证边界见 docs/validation.md。
 设为 1 的 UDP 候选在物理 GNOME 首帧复验失败，不用于当前日常客户端。公司 LAN 对照结果见 docs/validation.md，

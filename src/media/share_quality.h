@@ -26,11 +26,12 @@ public:
     // 远控手感下限：达到它之后改为降低尺寸，而不是继续降到个位数帧率。
     static constexpr int MinimumFps = 24;
     static int compatibleMaximumFps(int sourceFps, int receiverFps = 0);
-    explicit ShareQuality(const QSize &nativeSize = {}, int maximumFps = 60, int minimumFps = MinimumFps);
+    explicit ShareQuality(const QSize &nativeSize = {}, int maximumFps = 60, int minimumFps = MinimumFps,
+        bool lowBandwidth = false);
     ShareProfile profile() const
     {
         auto result = profiles_.at(index_);
-        result.bitrateLimit = bitrateLimit_;
+        result.bitrateLimit = bitrateLimit_ > 0 ? qMin(bitrateLimit_, maximumBitrate_) : maximumBitrate_;
         return result;
     }
     bool observe(double encodedFps, double receivedFps);
@@ -41,6 +42,8 @@ private:
     int slowWindows_ = 0;
     int stableWindows_ = 0;
     int bitrateLimit_ = 0;
+    int minimumBitrate_ = 2000000;
+    int maximumBitrate_ = 40000000;
     int congestedWindows_ = 0;
     int healthyNetworkWindows_ = 0;
     int delayedWindows_ = 0;
