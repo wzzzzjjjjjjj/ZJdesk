@@ -108,6 +108,12 @@ private:
     QComboBox *annotationTool_ = nullptr;
     QPushButton *clearAnnotations_ = nullptr;
     QPushButton *clearAllAnnotations_ = nullptr;
+    QPushButton *meetingRequestControl_ = nullptr;
+    QPushButton *meetingGrantControl_ = nullptr;
+    QPushButton *meetingStopControl_ = nullptr;
+    QComboBox *meetingControlMember_ = nullptr;
+    QLabel *meetingControlLabel_ = nullptr;
+    bool meetingWasControlling_ = false;
     QVBoxLayout *meetingParticipantLayout_ = nullptr;
     QLabel *meetingMemberCount_ = nullptr;
     QWidget *meetingLocalMember_ = nullptr;

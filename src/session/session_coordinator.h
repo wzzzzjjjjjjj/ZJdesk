@@ -94,6 +94,9 @@ public:
     bool canRequestControl() const;
     bool requestControl();
     bool grantControl();
+    bool grantMeetingControl(const QString &peerId);
+    bool canGrantMeetingControl(const QString &peerId);
+    QString meetingControlPeerId() const { return meetingControlPeerId_; }
     void stopControl();
     void sendRemoteInput(const QJsonObject &input);
     enum class ConferenceState { Idle, Calling, Incoming, Connecting, Running, Failed };
@@ -164,6 +167,9 @@ private:
     void receiveAnnotation(const QJsonObject &payload);
     void receiveControl(const QJsonObject &message);
     void receiveControlRequest(const QJsonObject &message);
+    void receiveMeetingControlRequest(const QJsonObject &message);
+    ScreenShare *controlScreen();
+    void sendControlMessage(const QJsonObject &message);
     void requestRemoteControlWhenReady();
     void sendControlGrant();
     void startFileClipboard();
@@ -214,6 +220,9 @@ private:
     ScreenShare screen_;
     QMap<QString, ScreenShare *> meetingSharePeers_;
     QSet<QString> meetingShareRunning_;
+    QSet<QString> meetingControlReady_;
+    QSet<QString> meetingEndedControlRequests_;
+    QString meetingControlPeerId_;
     QString shareOwnerId_, pendingShareId_, meetingShareSource_, annotationColor_, annotationDetail_;
     int meetingShareFps_ = 0;
     QJsonArray annotations_;

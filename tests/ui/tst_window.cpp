@@ -418,6 +418,172 @@ private slots:
         QVERIFY(!window.annotationTool_->isEnabled());
     }
 
+    void meetingControlSwitchesMembersAndKeepsAnnotations()
+    {
+        using Session = zjdesk::SessionCoordinator;
+        using Remote = Session::RemoteState;
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        MainWindow ownerWindow(url.toString(), {}, "Owner"), viewerWindow(url.toString(), {}, "First");
+        auto &owner = ownerWindow.session_;
+        auto &first = viewerWindow.session_;
+        owner.setConferenceAutoConnect(false);
+        first.setConferenceAutoConnect(false);
+        Session second, third;
+        if (!owner.mediaEnvironment().ready || !owner.input_.available()) QSKIP("Requires media and native input backend");
+        QVERIFY(owner.join(url, "meeting-control", "Owner", Session::RoomType::Meeting));
+        QVERIFY(first.join(url, "meeting-control", "First", Session::RoomType::Meeting));
+        QVERIFY(second.join(url, "meeting-control", "Second", Session::RoomType::Meeting));
+        QVERIFY(third.join(url, "meeting-control", "Third", Session::RoomType::Meeting));
+        QTRY_COMPARE(owner.memberCount(), 4);
+        QVERIFY(owner.startScreenShare("test", 15));
+        QTRY_COMPARE_WITH_TIMEOUT(owner.meetingControlReady_.size(), 3, 30000);
+        QVERIFY(!first.canRequestControl()); // Synthetic sources never advertise control.
+        owner.desktopSource_ = true; // Explicit fixture capability, without capturing or clicking the user's desktop.
+        for (auto *lane : owner.meetingSharePeers_)
+            lane->sendControl({{"action", "capabilities"}, {"control", true}}, owner.shareEpoch_);
+        QTRY_VERIFY(first.canRequestControl() && second.canRequestControl() && third.canRequestControl());
+        QVERIFY(viewerWindow.meetingRequestControl_->isEnabled());
+        viewerWindow.meetingRequestControl_->click();
+        QTRY_COMPARE(owner.remoteState(), Remote::Pending);
+        QCOMPARE(owner.meetingControlPeerId(), first.ownPeerId_);
+        ownerWindow.meetingGrantControl_->click();
+        QTRY_COMPARE(first.remoteState(), Remote::Controlling);
+        QCOMPARE(owner.remoteState(), Remote::Controlled);
+        QVERIFY(!owner.fileClipboard_.active() && !first.fileClipboard_.active());
+        QCOMPARE(viewerWindow.annotationTool_->currentData().toString(), "control");
+
+        QSignalSpy injected(&owner, &Session::inputProbeInjected);
+        QSignalSpy acknowledged(&first, &Session::inputProbeAcknowledged);
+        const auto forged = QJsonObject{{"action", "input"}, {"kind", "unsupported-test-kind"}, {"probe", true},
+            {"epoch", QString::number(owner.control_.epoch())}, {"sequence", "9000000"}};
+        third.meetingSharePeers_.value(owner.ownPeerId_)->sendControl(forged, third.shareEpoch_);
+        third.meetingSharePeers_.value(owner.ownPeerId_)->sendControl({{"action", "revoke"},
+            {"epoch", QString::number(owner.control_.epoch())}, {"requestId", owner.controlRequestId_}}, third.shareEpoch_);
+        first.sendRemoteInput({{"kind", "unsupported-test-kind"}, {"probe", true}});
+        QTRY_COMPARE(acknowledged.size(), 1);
+        QTest::qWait(100);
+        QCOMPARE(injected.size(), 1);
+        QCOMPARE(owner.remoteState(), Remote::Controlled);
+        QVERIFY(!acknowledged.first().at(3).toBool()); // Rejected by the native translator, never injected.
+
+        QSignalSpy uiInput(viewerWindow.meetingShareVideo_, &VideoSurface::remoteInput);
+        viewerWindow.annotationTool_->setCurrentIndex(1);
+        QVERIFY(!uiInput.isEmpty());
+        QCOMPARE(uiInput.last().first().toJsonObject().value("kind").toString(), "release");
+        const QJsonObject stroke{{"strokeId", "during-control"}, {"tool", "circle"},
+            {"points", QJsonArray{QJsonArray{0.2, 0.2}, QJsonArray{0.8, 0.8}}}};
+        QVERIFY(first.submitAnnotation(stroke));
+        QTRY_COMPARE(owner.annotations().size(), 1);
+        QCOMPARE(first.remoteState(), Remote::Controlling);
+        viewerWindow.annotationTool_->setCurrentIndex(viewerWindow.annotationTool_->findData("control"));
+        const auto oldEpoch = owner.control_.epoch();
+        const auto oldRequest = owner.controlRequestId_;
+        QVERIFY(second.requestControl()); // Busy requests cannot revoke the active controller.
+        QTRY_COMPARE(second.remoteState(), Remote::Idle);
+        QCOMPARE(first.remoteState(), Remote::Controlling);
+        ownerWindow.meetingControlMember_->setCurrentIndex(ownerWindow.meetingControlMember_->findData(second.ownPeerId_));
+        ownerWindow.meetingGrantControl_->click();
+        QTRY_COMPARE(second.remoteState(), Remote::Controlling);
+        QTRY_COMPARE(first.remoteState(), Remote::Idle);
+        QVERIFY(owner.control_.epoch() > oldEpoch);
+        QCOMPARE(owner.meetingControlPeerId(), second.ownPeerId_);
+        first.signaling_.send({"control", {{"action", "revoke"}, {"requestId", oldRequest},
+            {"streamId", first.streamId_}, {"targetPeerId", owner.ownPeerId_}}});
+        QTest::qWait(100);
+        QCOMPARE(owner.remoteState(), Remote::Controlled);
+        second.leave();
+        QTRY_COMPARE(owner.remoteState(), Remote::Idle);
+        QTRY_COMPARE(owner.memberCount(), 3);
+        QVERIFY(owner.screenActive() && first.screenActive() && third.screenActive());
+        QCOMPARE(owner.annotations().size(), 1);
+        QVERIFY(first.requestControl());
+        QTRY_COMPARE(owner.remoteState(), Remote::Pending);
+        owner.stopControl();
+        QTRY_COMPARE(first.remoteState(), Remote::Idle);
+        QVERIFY(first.requestControl());
+        QTRY_COMPARE(owner.remoteState(), Remote::Pending);
+        QVERIFY(QMetaObject::invokeMethod(&owner.controlDeadline_, "timeout", Qt::DirectConnection));
+        QTRY_COMPARE(first.remoteState(), Remote::Idle);
+
+        QVERIFY(first.requestControl());
+        QTRY_COMPARE(owner.remoteState(), Remote::Pending);
+        const auto cancelledRequest = first.controlRequestId_;
+        first.stopControl();
+        QTRY_COMPARE(owner.remoteState(), Remote::Idle);
+        auto *ownerLane = first.meetingSharePeers_.value(owner.ownPeerId_);
+        QVERIFY(ownerLane);
+        // Signaling cancellation can arrive before a grant on the separate data channel.
+        QJsonObject delayedGrant{{"action", "grant"}, {"requestId", cancelledRequest},
+            {"epoch", QString::number(owner.control_.epoch() + 1)}};
+        ownerLane->controlReceived(first.shareEpoch_, delayedGrant);
+        QCOMPARE(first.remoteState(), Remote::Idle);
+
+        const QString revokedAssignment = "revoked-assignment";
+        first.receiveMeetingControlRequest({{"action", "revoke"}, {"requestId", revokedAssignment},
+            {"streamId", first.streamId_}, {"fromPeerId", owner.ownPeerId_}});
+        delayedGrant.insert("requestId", revokedAssignment);
+        ownerLane->controlReceived(first.shareEpoch_, delayedGrant);
+        QCOMPARE(first.remoteState(), Remote::Idle);
+
+        const QString revokedDataAssignment = "revoked-data-assignment";
+        ownerLane->controlReceived(first.shareEpoch_, {{"action", "revoke"}, {"requestId", revokedDataAssignment},
+            {"epoch", QString::number(owner.control_.epoch() + 1)}});
+        delayedGrant.insert("requestId", revokedDataAssignment);
+        ownerLane->controlReceived(first.shareEpoch_, delayedGrant);
+        QCOMPARE(first.remoteState(), Remote::Idle);
+
+        QVERIFY(owner.grantMeetingControl(first.ownPeerId_));
+        QTRY_COMPARE(first.remoteState(), Remote::Controlling);
+        first.sendRemoteInput({{"kind", "unsupported-test-kind"}, {"probe", true}});
+        const auto sequenceBeforeDuplicate = first.inputSequence_;
+        delayedGrant.insert("requestId", owner.controlRequestId_);
+        delayedGrant.insert("epoch", QString::number(owner.control_.epoch()));
+        ownerLane->controlReceived(first.shareEpoch_, delayedGrant);
+        QCOMPARE(first.inputSequence_, sequenceBeforeDuplicate);
+        first.stopControl();
+        QTRY_COMPARE(owner.remoteState(), Remote::Idle);
+
+        QVERIFY(owner.grantMeetingControl(third.ownPeerId_));
+        QTRY_COMPARE(third.remoteState(), Remote::Controlling);
+        owner.stopScreenShare();
+        QTRY_VERIFY(!third.screenActive() && !first.screenActive());
+        QCOMPARE(owner.remoteState(), Remote::Idle);
+        QCOMPARE(third.remoteState(), Remote::Idle);
+        QVERIFY(owner.annotations().isEmpty());
+        QVERIFY(!third.requestControl());
+        QVERIFY(third.startScreenShare("test", 15));
+        QTRY_VERIFY(owner.receivingScreen());
+        QCOMPARE(owner.remoteState(), Remote::Idle);
+        QVERIFY(!owner.canRequestControl());
+    }
+
+    void inputReceiverBindsAuthorizationToMemberAndEpoch()
+    {
+        zjdesk::InputReceiver receiver;
+        QSignalSpy processed(&receiver, &zjdesk::InputReceiver::processed);
+        receiver.authorize(7, 42, "first");
+        QJsonObject message{{"action", "input"}, {"epoch", "42"}, {"sequence", "1"},
+            {"kind", "unsupported-test-kind"}, {"probe", true}};
+        receiver.receive(7, message, "other");
+        receiver.receive(7, {{"action", "revoke"}, {"epoch", "41"}}, "first");
+        receiver.receive(7, message, "first");
+        QTRY_COMPARE(processed.size(), 1);
+        QCOMPARE(processed.first().at(1).toJsonObject().value("sourcePeerId").toString(), "first");
+        receiver.revoke();
+        receiver.authorize(7, 43, "second");
+        message.insert("epoch", "43");
+        receiver.receive(7, message, "first");
+        receiver.receive(7, message, "second");
+        QTRY_COMPARE(processed.size(), 2);
+        receiver.receive(7, {{"action", "revoke"}, {"epoch", "43"}}, "second");
+        message.insert("sequence", "2");
+        receiver.receive(7, message, "second");
+        QTest::qWait(100);
+        QCOMPARE(processed.size(), 2);
+    }
+
     void meetingAnnotationWanPeer()
     {
         if (!qEnvironmentVariableIsSet("ZJDESK_ANNOTATION_WAN_URL")) QSKIP("Requires a coordinated cross-network peer");
@@ -1274,6 +1440,14 @@ private slots:
             {"id", "reverse"}, {"count", 1}});
         QVERIFY(session.remoteDetail().contains(QStringLiteral("对方 → 本机：")));
         session.clearControl();
+        QVERIFY(!session.fileClipboard_.active());
+        QVERIFY(!session.reverseFileClipboard_.active());
+        session.roomType_ = zjdesk::SessionCoordinator::RoomType::Meeting;
+        QVERIFY(session.control_.request("meeting-peer"));
+        QVERIFY(session.control_.grant());
+        session.remoteState_ = Remote::Controlled;
+        session.receivingScreen_ = false;
+        session.receiveControl({{"action", "file_ready"}, {"epoch", QString::number(session.control_.epoch())}, {"reverse", true}});
         QVERIFY(!session.fileClipboard_.active());
         QVERIFY(!session.reverseFileClipboard_.active());
     }

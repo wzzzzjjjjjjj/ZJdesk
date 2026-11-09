@@ -22,32 +22,37 @@ InputReceiver::~InputReceiver()
     thread_.wait();
 }
 
-void InputReceiver::authorize(quint64 shareEpoch, quint64 controlEpoch)
+void InputReceiver::authorize(quint64 shareEpoch, quint64 controlEpoch, const QString &peerId)
 {
     QMutexLocker lock(&mutex_);
-    if (shareEpoch_ == shareEpoch && controlEpoch_ == controlEpoch)
+    if (shareEpoch_ == shareEpoch && controlEpoch_ == controlEpoch && peerId_ == peerId)
         return;
     shareEpoch_ = shareEpoch;
     controlEpoch_ = controlEpoch;
+    peerId_ = peerId;
     sequence_ = 0;
     ++generation_;
 }
 
-void InputReceiver::revoke(quint64 shareEpoch)
+void InputReceiver::revoke(quint64 shareEpoch, const QString &peerId, quint64 controlEpoch)
 {
     QMutexLocker lock(&mutex_);
-    if (shareEpoch && shareEpoch != shareEpoch_)
+    if ((shareEpoch && shareEpoch != shareEpoch_) || (!peerId.isEmpty() && peerId != peerId_)
+        || (controlEpoch && controlEpoch != controlEpoch_))
         return;
     shareEpoch_ = controlEpoch_ = sequence_ = 0;
+    peerId_.clear();
     ++generation_;
     QMetaObject::invokeMethod(this, [this] { injector_.releaseAll(); }, Qt::QueuedConnection);
 }
 
-void InputReceiver::receive(quint64 shareEpoch, const QJsonObject &message)
+void InputReceiver::receive(quint64 shareEpoch, const QJsonObject &message, const QString &peerId)
 {
     if (message.value("action") == "revoke")
     {
-        revoke(shareEpoch);
+        const auto epoch = message.value("epoch").toString().toULongLong();
+        if (!peerId.isEmpty() && !epoch) return;
+        revoke(shareEpoch, peerId, epoch);
         return;
     }
     if (message.value("action") != "input")
@@ -59,11 +64,11 @@ void InputReceiver::receive(quint64 shareEpoch, const QJsonObject &message)
     {
         QMutexLocker lock(&mutex_);
         if (!epochValid || !sequenceValid || !controlEpoch_ || epoch != controlEpoch_
-            || shareEpoch != shareEpoch_ || !sequence)
+            || shareEpoch != shareEpoch_ || peerId != peerId_ || !sequence)
             return;
         generation = generation_;
     }
-    QMetaObject::invokeMethod(this, [this, shareEpoch, sequence, generation, message] {
+    QMetaObject::invokeMethod(this, [this, shareEpoch, sequence, generation, message, peerId] {
         QMutexLocker lock(&mutex_);
         if (generation != generation_ || sequence <= sequence_)
             return;
@@ -81,6 +86,7 @@ void InputReceiver::receive(quint64 shareEpoch, const QJsonObject &message)
             result.insert("accepted", accepted);
             result.insert("injectUs", injectUs);
             result.insert("error", error);
+            result.insert("sourcePeerId", peerId);
             emit processed(shareEpoch, result);
         }
     });
