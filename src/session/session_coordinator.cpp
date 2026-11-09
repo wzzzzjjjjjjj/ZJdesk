@@ -154,12 +154,14 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
         if (message.value("action") != "input" && epoch == shareEpoch_ && screenActive() && controlChannelReady_)
             receiveControl(message);
     });
-    connect(&screen_, &ScreenShare::controlReceived, &inputReceiver_, &InputReceiver::receive);
+    connect(&screen_, &ScreenShare::controlReceived, &inputReceiver_, [this](quint64 epoch, const QJsonObject &message) {
+        inputReceiver_.receive(epoch, message);
+    });
     connect(&screen_, &ScreenShare::controlChannelChanged, &inputReceiver_, [this](quint64 epoch, bool ready) {
         if (!ready) inputReceiver_.revoke(epoch);
     });
     connect(&inputReceiver_, &InputReceiver::processed, &screen_, [this](quint64 epoch, const QJsonObject &result) {
-        if (result.value("probe").toBool()) screen_.sendControl(result, epoch);
+        if (result.value("probe").toBool() && result.value("sourcePeerId").toString().isEmpty()) screen_.sendControl(result, epoch);
     }, Qt::DirectConnection);
     connect(&inputReceiver_, &InputReceiver::processed, this, [this](quint64 epoch, const QJsonObject &result) {
         if (epoch != shareEpoch_ || remoteState_ != RemoteState::Controlled
@@ -696,8 +698,21 @@ void SessionCoordinator::clearScreenShare(bool notifyPeer)
     emit shareChanged();
 }
 
+ScreenShare *SessionCoordinator::controlScreen()
+{
+    return roomType_ == RoomType::Meeting ? meetingSharePeers_.value(meetingControlPeerId_) : &screen_;
+}
+
+void SessionCoordinator::sendControlMessage(const QJsonObject &message)
+{
+    if (auto *lane = controlScreen()) lane->sendControl(message, shareEpoch_);
+}
+
 bool SessionCoordinator::canRequestControl() const
 {
+    if (roomType_ == RoomType::Meeting)
+        return receivingScreen_ && screenActive() && peerControllable_ && controlChannelReady_
+            && shareState_ == PreviewState::Running && remoteState_ == RemoteState::Idle;
     return roomType_ == RoomType::Assistance && state_ == State::PeerAvailable && media_.environment().ready
         && peerControllable_ && remoteState_ == RemoteState::Idle
         && ((!screenActive() && shareState_ != PreviewState::Stopping)
@@ -715,7 +730,14 @@ bool SessionCoordinator::requestControl()
     if (!canRequestControl())
         return false;
     controlRequestId_ = QUuid::createUuid().toString(QUuid::Id128);
-    if (!sendNegotiation("control", {{"action", "request"}, {"requestId", controlRequestId_}}))
+    QJsonObject request{{"action", "request"}, {"requestId", controlRequestId_}};
+    if (roomType_ == RoomType::Meeting)
+    {
+        meetingControlPeerId_ = shareOwnerId_;
+        request.insert("targetPeerId", shareOwnerId_);
+        request.insert("streamId", streamId_);
+    }
+    if (!sendNegotiation("control", request))
     {
         controlRequestId_.clear();
         return false;
@@ -729,6 +751,8 @@ bool SessionCoordinator::requestControl()
 
 bool SessionCoordinator::grantControl()
 {
+    if (roomType_ == RoomType::Meeting)
+        return remoteState_ == RemoteState::Pending && grantMeetingControl(meetingControlPeerId_);
     if (remoteState_ != RemoteState::Pending
         || !input_.available() || !control_.grant())
         return false;
@@ -753,17 +777,18 @@ bool SessionCoordinator::grantControl()
 
 void SessionCoordinator::sendControlGrant()
 {
-    inputReceiver_.authorize(shareEpoch_, control_.epoch());
+    inputReceiver_.authorize(shareEpoch_, control_.epoch(), roomType_ == RoomType::Meeting ? meetingControlPeerId_ : QString());
     controlDeadline_.stop();
     remoteDetail_ = QStringLiteral("对方正在控制本机，点击结束控制可立即收回");
-    screen_.sendControl({{"action", "grant"}, {"epoch", QString::number(control_.epoch())},
-        {"requestId", controlRequestId_}, {"cursorSync", true}, {"fileClipboard", true}, {"fileClipboardReverse", true}}, shareEpoch_);
+    sendControlMessage({{"action", "grant"}, {"epoch", QString::number(control_.epoch())},
+        {"requestId", controlRequestId_}, {"cursorSync", true},
+        {"fileClipboard", roomType_ == RoomType::Assistance}, {"fileClipboardReverse", roomType_ == RoomType::Assistance}});
     emit remoteChanged();
 }
 
 void SessionCoordinator::startFileClipboard()
 {
-    if (!controlChannelReady_) return;
+    if (roomType_ != RoomType::Assistance || !controlChannelReady_) return;
     if (remoteState_ == RemoteState::Controlling && receivingScreen_ && peerFileClipboard_)
     {
         if (!fileClipboard_.active())
@@ -803,7 +828,7 @@ void SessionCoordinator::clearControl()
     controlDeadline_.stop();
     cursorTimer_.stop();
     if (cursorSyncActive_)
-        screen_.setCursorEmbedded(true, shareEpoch_);
+        if (auto *lane = controlScreen()) lane->setCursorEmbedded(true, shareEpoch_);
     cursorSyncActive_ = false;
     sentCursor_ = remoteCursor_ = {};
     cursorSequence_ = remoteCursorSequence_ = 0;
@@ -817,6 +842,7 @@ void SessionCoordinator::clearControl()
     motionProbeClock_.invalidate();
     inputWarning_.clear();
     controlRequestId_.clear();
+    meetingControlPeerId_.clear();
     controlStartedShare_ = false;
     remoteDetail_ = QStringLiteral("远程控制未开启");
     emit remoteChanged();
@@ -841,9 +867,9 @@ void SessionCoordinator::sendCursor()
     {
         if (cursorSyncActive_)
         {
-            screen_.setCursorEmbedded(true, shareEpoch_);
+            controlScreen()->setCursorEmbedded(true, shareEpoch_);
             message.insert("visible", false);
-            screen_.sendControl(message, shareEpoch_);
+            sendControlMessage(message);
             ++cursorSequence_;
             cursorSyncActive_ = false;
             sentCursor_ = {};
@@ -854,7 +880,7 @@ void SessionCoordinator::sendCursor()
     {
         if (cursorSyncActive_ && sentCursor_.visible)
         {
-            screen_.sendControl(message, shareEpoch_);
+            sendControlMessage(message);
             ++cursorSequence_;
             sentCursor_.visible = false;
         }
@@ -865,7 +891,7 @@ void SessionCoordinator::sendCursor()
         return;
     if (!cursorSyncActive_)
     {
-        screen_.setCursorEmbedded(false, shareEpoch_);
+        controlScreen()->setCursorEmbedded(false, shareEpoch_);
         cursorSyncActive_ = true;
     }
     message.insert("serial", QString::number(cursor.serial));
@@ -879,7 +905,7 @@ void SessionCoordinator::sendCursor()
         message.insert("width", cursor.screenSize.width());
         message.insert("height", cursor.screenSize.height());
     }
-    screen_.sendControl(message, shareEpoch_);
+    sendControlMessage(message);
     ++cursorSequence_;
     sentCursor_ = cursor;
 }
@@ -889,10 +915,18 @@ void SessionCoordinator::stopControl()
     if (remoteAccess_ && state_ == State::PeerAvailable)
         return disconnectRemote();
     const bool stopDesktop = controlStartedShare_;
+    QJsonObject revoke{{"action", "revoke"}, {"requestId", controlRequestId_}};
+    if (roomType_ == RoomType::Meeting)
+    {
+        revoke.insert("targetPeerId", meetingControlPeerId_);
+        revoke.insert("streamId", streamId_);
+        revoke.insert("epoch", QString::number(remoteState_ == RemoteState::Controlled ? control_.epoch() : remoteControlEpoch_));
+        if (receivingScreen_ && !controlRequestId_.isEmpty()) meetingEndedControlRequests_.insert(controlRequestId_);
+    }
     if (state_ == State::PeerAvailable && remoteState_ != RemoteState::Idle)
-        sendNegotiation("control", {{"action", "revoke"}, {"requestId", controlRequestId_}});
+        sendNegotiation("control", revoke);
     if (controlChannelReady_ && remoteState_ != RemoteState::Idle)
-        screen_.sendControl({{"action", "revoke"}}, shareEpoch_);
+        sendControlMessage(revoke);
     clearControl();
     if (stopDesktop)
         stopScreenShare();
@@ -934,7 +968,7 @@ void SessionCoordinator::sendRemoteInput(const QJsonObject &input)
         inputProbeClocks_[inputSequence_].start();
         if (!inputProbeDeadline_.isActive()) inputProbeDeadline_.start();
     }
-    screen_.sendControl(message, shareEpoch_);
+    sendControlMessage(message);
 }
 
 void SessionCoordinator::receiveControl(const QJsonObject &message)
@@ -968,7 +1002,7 @@ void SessionCoordinator::receiveControl(const QJsonObject &message)
             ? QStringLiteral("；支持双向复制文件，传完后在目标电脑粘贴")
             : QStringLiteral("；复制对方文件后待传输完成可在本机粘贴");
         if (message.value("cursorSync").toBool())
-            screen_.sendControl({{"action", "cursor_ready"}, {"epoch", QString::number(epoch)}}, shareEpoch_);
+            sendControlMessage({{"action", "cursor_ready"}, {"epoch", QString::number(epoch)}});
         emit remoteChanged();
     }
     else if (action == "revoke")
@@ -1060,8 +1094,8 @@ void SessionCoordinator::receiveControl(const QJsonObject &message)
 
 void SessionCoordinator::receiveControlRequest(const QJsonObject &message)
 {
-    if (roomType_ != RoomType::Assistance)
-        return;
+    if (roomType_ == RoomType::Meeting)
+        return receiveMeetingControlRequest(message);
     const auto action = message.value("action").toString();
     const auto requestId = message.value("requestId").toString();
     if (action == "capabilities")

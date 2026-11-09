@@ -970,6 +970,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     annotationTool_->addItem(QStringLiteral("画笔"), "pen");
     annotationTool_->addItem(QStringLiteral("圆圈"), "circle");
     annotationTool_->addItem(QStringLiteral("箭头"), "arrow");
+    annotationTool_->addItem(QStringLiteral("远控"), "control");
     annotationTool_->setToolTip(QStringLiteral("选择工具后，在共享画面上按住鼠标左键拖动"));
     clearAnnotations_ = new QPushButton(QStringLiteral("清除我的"));
     clearAnnotations_->setObjectName("clearMyAnnotations");
@@ -979,7 +980,8 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     tileTitle->addWidget(clearAnnotations_);
     tileTitle->addWidget(clearAllAnnotations_);
     connect(annotationTool_, &QComboBox::currentIndexChanged, this, [this] {
-        if (!annotationTool_->currentData().toString().isEmpty() && !session_.canDrawAnnotation())
+        const auto tool = annotationTool_->currentData().toString();
+        if (!tool.isEmpty() && tool != "control" && !session_.canDrawAnnotation())
             session_.requestAnnotationPermission();
         refreshAnnotations();
     });
@@ -1031,7 +1033,36 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
             desktopAnnotations_->cancelDraft();
         }
     });
+    auto *meetingControlRow = new QHBoxLayout;
+    meetingControlLabel_ = new QLabel;
+    meetingControlLabel_->setWordWrap(true);
+    meetingControlLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    meetingRequestControl_ = new QPushButton(QStringLiteral("申请控制"));
+    meetingRequestControl_->setObjectName("meetingRequestControl");
+    meetingControlMember_ = new QComboBox;
+    meetingControlMember_->setObjectName("meetingControlMember");
+    meetingControlMember_->setToolTip(QStringLiteral("选择可控制当前共享桌面的会议成员"));
+    meetingGrantControl_ = new QPushButton(QStringLiteral("交给所选成员"));
+    meetingGrantControl_->setObjectName("meetingGrantControl");
+    meetingStopControl_ = new QPushButton(QStringLiteral("收回控制"));
+    meetingStopControl_->setObjectName("meetingStopControl");
+    meetingControlRow->addWidget(meetingControlLabel_, 1);
+    meetingControlRow->addWidget(meetingRequestControl_);
+    meetingControlRow->addWidget(meetingControlMember_);
+    meetingControlRow->addWidget(meetingGrantControl_);
+    meetingControlRow->addWidget(meetingStopControl_);
+    connect(meetingRequestControl_, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::requestControl);
+    connect(meetingGrantControl_, &QPushButton::clicked, this, [this] {
+        session_.grantMeetingControl(meetingControlMember_->currentData().toString());
+    });
+    connect(meetingStopControl_, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::stopControl);
+    connect(meetingControlMember_, &QComboBox::currentIndexChanged, this, [this] {
+        meetingGrantControl_->setEnabled(session_.canGrantMeetingControl(meetingControlMember_->currentData().toString()));
+    });
+    connect(meetingShareVideo_, &VideoSurface::remoteInput, &session_, &zjdesk::SessionCoordinator::sendRemoteInput);
+    connect(&session_, &zjdesk::SessionCoordinator::remoteCursorChanged, meetingShareVideo_, &VideoSurface::setRemoteCursor);
     footerColumn->addLayout(meetingControls);
+    footerColumn->addLayout(meetingControlRow);
     meetingLayout->addWidget(controlsCard);
     pages->addWidget(meeting);
     auto selectMeetingDevices = [this] {
@@ -1704,6 +1735,9 @@ void MainWindow::refreshAnnotations()
     layer->setTool(annotationTool_->isEnabled() && session_.canDrawAnnotation()
         ? annotationTool_->currentData().toString() : QString());
     if (!session_.canDrawAnnotation()) layer->cancelDraft();
+    meetingShareVideo_->setControlEnabled(session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting
+        && session_.remoteState() == zjdesk::SessionCoordinator::RemoteState::Controlling
+        && annotationTool_->currentData().toString() == "control");
     shareLabel_->setToolTip(session_.annotationDetail());
     desktopAnnotations_->setAnnotations(session_.annotations(), session_.annotationAuthor());
     const bool desktopDrawing = session_.isDesktopShare() && session_.canDrawAnnotation()
@@ -1866,7 +1900,31 @@ void MainWindow::refreshControl()
     stopControlButton_->setEnabled(state != Remote::Idle);
     stopControlButton_->setText(state == Remote::Pending ? QStringLiteral("拒绝控制") : QStringLiteral("结束控制"));
     controlLabel_->setText(session_.remoteDetail());
-    video_->setControlEnabled(state == Remote::Controlling);
+    const bool meeting = session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting;
+    video_->setControlEnabled(!meeting && state == Remote::Controlling);
+    const bool owner = meeting && session_.ownsSharedScreen();
+    const bool controlling = meeting && state == Remote::Controlling;
+    if (controlling && !meetingWasControlling_) annotationTool_->setCurrentIndex(annotationTool_->findData("control"));
+    if (!controlling && annotationTool_->currentData().toString() == "control") annotationTool_->setCurrentIndex(0);
+    meetingWasControlling_ = controlling;
+    meetingControlLabel_->setVisible(meeting && session_.screenActive());
+    meetingControlLabel_->setText(session_.remoteDetail());
+    meetingRequestControl_->setVisible(meeting && session_.receivingScreen());
+    meetingRequestControl_->setEnabled(session_.canRequestControl());
+    meetingControlMember_->setVisible(owner);
+    meetingGrantControl_->setVisible(owner);
+    const auto selected = meetingControlMember_->currentData().toString();
+    meetingControlMember_->clear();
+    const auto peers = session_.conferencePeers();
+    for (auto it = peers.cbegin(); it != peers.cend(); ++it) meetingControlMember_->addItem(it.value(), it.key());
+    const auto next = owner && state == Remote::Pending ? session_.meetingControlPeerId() : selected;
+    const int selectedIndex = meetingControlMember_->findData(next);
+    if (selectedIndex >= 0) meetingControlMember_->setCurrentIndex(selectedIndex);
+    meetingGrantControl_->setEnabled(session_.canGrantMeetingControl(meetingControlMember_->currentData().toString()));
+    meetingStopControl_->setVisible(meeting && state != Remote::Idle);
+    meetingStopControl_->setText(state == Remote::Pending ? QStringLiteral("拒绝控制")
+        : owner ? QStringLiteral("收回控制") : state == Remote::Requesting ? QStringLiteral("取消申请") : QStringLiteral("释放控制"));
+    refreshAnnotations();
 }
 
 void MainWindow::refreshSession()
