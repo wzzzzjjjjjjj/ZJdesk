@@ -67,9 +67,9 @@ QStringList NetworkSetup::localAddresses()
 QString NetworkSetup::configurationError(const NetworkConfiguration &configuration)
 {
     if (!usableAddress(configuration.windowsAddress))
-        return QStringLiteral("请填写有效的 Windows IPv4 地址，不要填写回环、链路本地、广播或组播地址。你的地址可用 ipconfig 查询。");
+        return QStringLiteral("请填写有效的 Windows IPv4 地址，不要填写回环、链路本地、广播或组播地址。在 Windows 电脑双击 tools\\ip-info.cmd 可查到地址。");
     if (!usableAddress(configuration.linuxAddress))
-        return QStringLiteral("请填写有效的 Linux IPv4 地址，可用 ip -4 addr show up 查询。");
+        return QStringLiteral("请填写有效的 Linux IPv4 地址。在 Linux 电脑运行 sh tools/ip-info.sh 可查到地址。");
     if (QHostAddress(configuration.windowsAddress) == QHostAddress(configuration.linuxAddress))
         return QStringLiteral("Windows 和 Linux 必须填写不同电脑的地址。");
     if (!localAddresses().contains(configuration.localAddress()))

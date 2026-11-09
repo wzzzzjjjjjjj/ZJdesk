@@ -1,5 +1,17 @@
 # ZJdesk 项目交接
 
+## 2026-11-09 双端启动地址自动选择
+
+`构建启动.bat` 不再固定 Windows Tailscale 地址，先后尝试当前 Linux 的局域网与 Tailscale SSH 目标。`select-network.ps1` 自动优先尝试两端物理网卡，必要时使用两端当前 Tailscale 地址；仍通过源地址路由与 TCP 22 探测验证，显式指定地址的行为保留。Linux SSH 目标仍为当前开发机的地址，更换或变更时需要调整。当前 Windows Tailscale 服务已停止，本机 `10.11.42.60` 与 Linux `10.11.42.4` 的实际选择已验证。
+
+实际运行批处理时发现 Linux 主窗口在读取会议入会默认设置前，设置布局尚未加入窗口，导致空指针崩溃。已调整布局初始化顺序。47 项启动脚本模拟回归及 Windows 原生设置、启动验证用例通过；双端 Release 已构建启动，Windows 到 Linux 信令 TCP 8765 可连接。Tailscale 自动回退仅完成模拟验证，本次未验证跨网媒体和远控。
+
+## 2026-11-08 对端 IP 改由小脚本给出
+
+随程序附带 `tools/ip-info.cmd` / `tools/ip-info.ps1` 和 `tools/ip-info.sh`。Windows 双击 CMD，Linux 在程序目录执行 `sh tools/ip-info.sh`，均只输出同局域网、不同局域网两行。局域网取活动物理网卡，优先有默认网关的网卡。跨网按本项目使用的 Tailscale 查询，无对应地址显示“无”，避免代理 VPN 或普通 100.64/10 地址误报。Windows 每类只选一个 Preferred 且非 SkipAsSource 地址，CMD 暂停提示静默。Linux 即使 VPN 接管默认路由仍取物理网卡地址。CMake 在构建后复制脚本到可执行文件旁，安装时按平台放入 `bin/tools`。界面提示及网络错误提示改为运行对端脚本。PowerShell 脚本使用带 BOM 的 UTF-8，兼容 Windows PowerShell 5.1。已有启动卡片的远控按钮显示逻辑保留。
+
+本轮验证 Windows Release 构建部署通过。三个启动用例及初始化 / 清理共 5 通过、0 失败，使用原生隔离桌面，包含脚本提示断言。`network-setup` 回归通过（5.18 秒）。新增 `tests/scripts/test_ip_info.ps1` 和 `tests/scripts/test_ip_info.sh`，两端各四种地址场景通过，覆盖代理默认路由、多地址、无默认路由和无地址，并验证严格两行输出。已部署 PS1 / CMD 本机实测均只输出「同局域网：192.168.3.6 / 不同局域网：无」，部署文件与源码哈希一致。Linux 脚本通过 Git Bash 中的 shell 语法及模拟检查。Linux 实机本轮未构建、部署或运行脚本，Windows Tailscale 无可用地址、状态 NoState，SSH 到 `orbbec@100.87.60.58` 超时。
+
 ## 2026-11-08 标注作者图例与明确发起远控
 
 共享预览与共享者桌面层改为右上角颜色 / 昵称图例，同一作者只列一次，笔画起点不再署名。启动卡片增加「远程控制」：连接服务只验证并注册在线，之后明确点击才发起 IP 配对与授权；停止后仍在线，可再次点击。此项取代下方 2026-11-07 交接中的自动配对行为，`pendingPeerConnect_` 已移除。

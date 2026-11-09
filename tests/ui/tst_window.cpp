@@ -522,7 +522,19 @@ private slots:
         const auto *panel = window.findChild<QWidget *>("startupNetworkPanel");
         QCOMPARE(panel->parentWidget(), window.connectionLayout_->parentWidget());
         QVERIFY(panel->isAncestorOf(window.joinButton_));
-        QCOMPARE(panel->findChildren<QPushButton *>().size(), 2);
+        int visibleButtons = 0;
+        for (const auto *button : panel->findChildren<QPushButton *>())
+            if (button->isVisible()) ++visibleButtons;
+        QCOMPARE(visibleButtons, 1);
+        QCOMPARE(window.joinButton_->text(), QStringLiteral("连接服务"));
+        const auto *help = window.findChild<QLabel *>("networkHelp");
+        QVERIFY(help);
+#ifdef Q_OS_WIN
+        QVERIFY(help->text().contains(QStringLiteral("sh tools/ip-info.sh")));
+#else
+        QVERIFY(help->text().contains(QStringLiteral("tools\\ip-info.cmd")));
+#endif
+        QVERIFY(!window.remoteConnectButton_->isVisible());
         QVERIFY(!window.networkColumn_->isVisible());
         QVERIFY(window.remoteHistory_->isHidden());
         QVERIFY(!window.serverEdit_->isVisible());
@@ -596,7 +608,8 @@ private slots:
         QVERIFY(!window.session_.screenActive());
         QVERIFY(!window.joinButton_->isEnabled());
         auto *remote = window.findChild<QPushButton *>("remoteConnectButton");
-        QVERIFY(remote && remote->isEnabled());
+        QVERIFY(remote && !remote->isHidden());
+        QVERIFY(remote->isEnabled());
         QCOMPARE(remote->text(), QStringLiteral("远程控制"));
         remote->click();
         // Only the explicit control action attempts to pair with the offline fixture.
@@ -633,6 +646,7 @@ private slots:
         QCOMPARE(settings.value("networkSetup/" + peerKey).toString(), QString("203.0.113.9"));
         peer->setText("203.0.113.10");
         QVERIFY(!window.networkSetup_.verified());
+        QVERIFY(remote->isHidden());
         QCOMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
         QVERIFY(!window.meetingJoinButton_->isEnabled());
         QVERIFY(!remote->isEnabled());

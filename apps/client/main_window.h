@@ -85,6 +85,7 @@ private:
     QLineEdit *roomEdit_ = nullptr;
     QComboBox *remoteHistory_ = nullptr;
     QLabel *remoteCodeLabel_ = nullptr;
+    QPushButton *copyCodeButton_ = nullptr;
     QPushButton *joinButton_ = nullptr;
     QPushButton *remoteConnectButton_ = nullptr;
     QLineEdit *meetingServerEdit_ = nullptr;

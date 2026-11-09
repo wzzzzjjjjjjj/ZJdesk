@@ -36,7 +36,7 @@ function Get-ZjdeskWindowsAddresses {
 
 function Resolve-ZjdeskNetwork {
     param([string[]]$LinuxSsh, [string]$LinuxAddress, [string]$WindowsAddress)
-    $priority = @{ wired = 0; wireless = 1 }
+    $priority = @{ wired = 0; wireless = 1; tailscale = 2 }
     if ($WindowsAddress) {
         $address = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
             Where-Object { $_.IPAddress -eq $WindowsAddress } | Select-Object -First 1
@@ -47,6 +47,15 @@ function Resolve-ZjdeskNetwork {
         })
     } else {
         $windowsCandidates = @(Get-ZjdeskWindowsAddresses | Sort-Object { $priority[$_.Kind] }, Interface, Address)
+        $windowsCandidates += @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.InterfaceAlias -eq 'Tailscale' -and $_.AddressState -eq 'Preferred' -and
+                -not $_.SkipAsSource -and $_.IPAddress -notmatch '^(169\.254\.|127\.)' } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    Address = $_.IPAddress; InterfaceIndex = $_.InterfaceIndex
+                    Interface = $_.InterfaceAlias; Kind = 'tailscale'
+                }
+            })
     }
     # Obtain addresses from the actual host, not interface names or old DHCP leases.
     $inventoryCommand = @'
@@ -68,7 +77,9 @@ done
         if ($LASTEXITCODE -ne 0) { continue }
         foreach ($line in $output) {
             if ("$line" -match '^(wired|wireless|other)\t([^\t]+)\t([0-9.]+)$') {
-                $inventory += [pscustomobject]@{ Kind = $Matches[1]; Interface = $Matches[2]; Address = $Matches[3] }
+                $kind = $Matches[1]
+                if ($Matches[2] -like 'tailscale*') { $kind = 'tailscale' }
+                $inventory += [pscustomobject]@{ Kind = $kind; Interface = $Matches[2]; Address = $Matches[3] }
             }
         }
         if ($inventory.Count) { $sshTarget = $endpoint; break }
@@ -83,6 +94,7 @@ done
     }
     foreach ($candidate in $candidates) {
         foreach ($local in $windowsCandidates) {
+            if (-not $WindowsAddress -and (($candidate.Kind -eq 'tailscale') -ne ($local.Kind -eq 'tailscale'))) { continue }
             $route = Find-NetRoute -RemoteIPAddress $candidate.Address -LocalIPAddress $local.Address `
                 -InterfaceIndex $local.InterfaceIndex -ErrorAction SilentlyContinue |
                 Where-Object { $_.IPAddress -eq $local.Address } | Select-Object -First 1
@@ -95,5 +107,5 @@ done
             }
         }
     }
-    throw 'No reachable Linux media address with a Windows route. Check Ethernet/Wi-Fi, SSH and -LinuxAddress.'
+    throw 'No reachable Linux media address with a Windows route. Check Ethernet/Wi-Fi or Tailscale, SSH and -LinuxAddress.'
 }

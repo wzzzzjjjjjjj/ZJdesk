@@ -88,6 +88,14 @@ if(ZJDESK_BUILD_CLIENT)
     endif()
     target_link_libraries(zjdesk PRIVATE zjdesk_client_core Qt6::Widgets Qt6::OpenGLWidgets)
     install(TARGETS zjdesk RUNTIME DESTINATION bin)
+    if(WIN32)
+        install(FILES tools/ip-info.ps1 tools/ip-info.cmd DESTINATION bin/tools)
+    else()
+        install(PROGRAMS tools/ip-info.sh DESTINATION bin/tools)
+    endif()
+    add_custom_command(TARGET zjdesk POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools" "$<TARGET_FILE_DIR:zjdesk>/tools")
     qt_generate_deploy_app_script(TARGET zjdesk OUTPUT_SCRIPT deploy_script
         NO_UNSUPPORTED_PLATFORM_ERROR)
     install(SCRIPT "${deploy_script}")
