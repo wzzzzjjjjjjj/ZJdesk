@@ -1,10 +1,44 @@
 # ZJdesk 项目交接
 
+
 ## 2026-11-08 不同局域网低带宽远控
 
 当前 Tailscale 两端为 Windows `100.122.3.99`、Linux `100.87.60.58`，实测为 direct 路由。屏幕共享在验证选择 Tailscale 源地址后自动限制到 960×540 / 15 fps，使用 VP9 4:2:0、GCC 800 kbps 预算并保留 UDP；显式 `ZJDESK_WEBRTC_GCC=tcp` 仍保留 Linux 的 ICE-TCP 限制，已用双机探针复核。普通局域网与会议路径不变。新增档位降速 / 恢复单测、真实 GStreamer 画面 / 控制消息回归及 `zjdesk-control-probe` 手动跨机测试工具，后者只点击自己创建的测试窗口，退出恢复光标。
 
 双向真实主屏采集、IP 互验与自动配对、授权、WebRTC 画面交付和原生移动 / 点击通过。Windows 控制 Linux 收到 586 帧、输入回执 5.269～11.102 ms；Linux 控制 Windows 收到 563 帧、回执 7.016～1054.986 ms，最后一个范围包含明显波动，不能表述为持续低延迟。真实产品窗口绘制、拖动 / 放大、长时间连接及 DERP 状态仍待验收；未替换或重启用户原检出的客户端。运行目录、复测命令及常规回归结果见 [跨网验证](validation-crossnet-20261108.md)。
+
+
+## 2026-11-09 双端启动地址自动选择
+
+`构建启动.bat` 不再固定 Windows Tailscale 地址，先后尝试当前 Linux 的局域网与 Tailscale SSH 目标。`select-network.ps1` 自动优先尝试两端物理网卡，必要时使用两端当前 Tailscale 地址；仍通过源地址路由与 TCP 22 探测验证，显式指定地址的行为保留。Linux SSH 目标仍为当前开发机的地址，更换或变更时需要调整。当前 Windows Tailscale 服务已停止，本机 `10.11.42.60` 与 Linux `10.11.42.4` 的实际选择已验证。
+
+实际运行批处理时发现 Linux 主窗口在读取会议入会默认设置前，设置布局尚未加入窗口，导致空指针崩溃。已调整布局初始化顺序。47 项启动脚本模拟回归及 Windows 原生设置、启动验证用例通过；双端 Release 已构建启动，Windows 到 Linux 信令 TCP 8765 可连接。Tailscale 自动回退仅完成模拟验证，本次未验证跨网媒体和远控。
+
+## 2026-11-08 对端 IP 改由小脚本给出
+
+随程序附带 `tools/ip-info.cmd` / `tools/ip-info.ps1` 和 `tools/ip-info.sh`。Windows 双击 CMD，Linux 在程序目录执行 `sh tools/ip-info.sh`，均只输出同局域网、不同局域网两行。局域网取活动物理网卡，优先有默认网关的网卡。跨网按本项目使用的 Tailscale 查询，无对应地址显示“无”，避免代理 VPN 或普通 100.64/10 地址误报。Windows 每类只选一个 Preferred 且非 SkipAsSource 地址，CMD 暂停提示静默。Linux 即使 VPN 接管默认路由仍取物理网卡地址。CMake 在构建后复制脚本到可执行文件旁，安装时按平台放入 `bin/tools`。界面提示及网络错误提示改为运行对端脚本。PowerShell 脚本使用带 BOM 的 UTF-8，兼容 Windows PowerShell 5.1。已有启动卡片的远控按钮显示逻辑保留。
+
+本轮验证 Windows Release 构建部署通过。三个启动用例及初始化 / 清理共 5 通过、0 失败，使用原生隔离桌面，包含脚本提示断言。`network-setup` 回归通过（5.18 秒）。新增 `tests/scripts/test_ip_info.ps1` 和 `tests/scripts/test_ip_info.sh`，两端各四种地址场景通过，覆盖代理默认路由、多地址、无默认路由和无地址，并验证严格两行输出。已部署 PS1 / CMD 本机实测均只输出「同局域网：192.168.3.6 / 不同局域网：无」，部署文件与源码哈希一致。Linux 脚本通过 Git Bash 中的 shell 语法及模拟检查。Linux 实机本轮未构建、部署或运行脚本，Windows Tailscale 无可用地址、状态 NoState，SSH 到 `orbbec@100.87.60.58` 超时。
+
+## 2026-11-08 标注作者图例与明确发起远控
+
+共享预览与共享者桌面层改为右上角颜色 / 昵称图例，同一作者只列一次，笔画起点不再署名。启动卡片增加「远程控制」：连接服务只验证并注册在线，之后明确点击才发起 IP 配对与授权；停止后仍在线，可再次点击。此项取代下方 2026-11-07 交接中的自动配对行为，`pendingPeerConnect_` 已移除。
+
+Windows 原生 Release 相关回归 12 通过 / 0 失败；Ubuntu 同组 11 通过 / 0 失败 / 1 Windows 专项跳过。两端构建与部署通过，记录见[专项验证](validation-annotation-legend-remote-button-20261108.md)。两端使用独立构建 / 隔离源树，现有用户客户端未重启。
+
+## 2026-11-08 Windows 共享预览递归修复
+
+Windows 本机会议共享桌面时，使用原生 `WDA_EXCLUDEFROMCAPTURE` 排除整个主窗口，防止桌面采集再次录入自己的实时预览；全屏 / Esc 切换保持排除，停止共享或离会恢复。观看端和合成测试源保持可采集，标注继续单独同步。Windows Release 构建部署通过，原生专项 8 通过 / 0 失败；Ubuntu Release 构建及相关原生 GUI 7 通过 / 0 失败 / 1 Windows 专项跳过。现有客户端未重启，Windows 活动主桌面仍需人工确认实际显示效果。见 [递归预览验证](validation-share-preview-recursion-20261108.md)。
+
+## 2026-11-08 会议多人标注与一对多屏幕共享
+
+会议中一人可向其余最多三位成员共享屏幕，所有人可在共享画面上用画笔、圆圈、箭头同步标注，带作者颜色与昵称；共享者真实桌面同步显示透明、鼠标穿透的标注层。每人清除自己的标注，共享者可清除全部；晚入会回放，停止共享 / 共享者退出清空。绘制入口仍在会议共享预览，不注入远控输入。共享者为每位观看者建立独立桌面采集 / 编码链路，三路持续负载待实机评估。
+
+服务端维护唯一共享代次和有界规范画布，校验成员、坐标及清除权限；UI 通过 `SessionCoordinator` 提交意图，协作远控路径保留。X11 桌面层会采入视频，通过 `annotationsInVideo` 避免观看端重复叠加。修复单点 JSON 数组初始化错误，以及 Windows 主窗口最小化导致桌面层隐藏的问题；原生回归覆盖后者。
+
+Windows / Ubuntu Release 构建与部署通过，现有客户端未重启。两端原生 GUI 专项均 9 通过 / 0 失败（含初始化 / 清理），覆盖多人标注、四人画面 / 全屏、离会与原远控生命周期。Windows Debug 六组非 GUI 回归、Ubuntu Release 五组均通过，包含完整合成媒体套件。
+
+两台实际电脑在不同物理局域网，通过已有 Tailscale 与独立 `100.87.60.58:8767` 信令完成 Ubuntu → Windows、Windows → Ubuntu 两轮真实 1920×1080 桌面传输、双方鼠标标注、清除和停止共享。Windows GUI 位于原生隔离桌面，Ubuntu 位于真实 X11 `:1`；未用 offscreen。尚未验收四台实体机、长期负载、真实会议音视频同时跨网运行或 Windows 活动主桌面人工显示效果；无 STUN / TURN，不代表任意公网穿透。具体命令、日志、截图现象和边界见 [多人标注验证](validation-meeting-annotations-20261108.md)。>>> ZJ-desk
 
 ## 2026-11-07 启动卡片收敛为「对端 IP + 连接服务」
 

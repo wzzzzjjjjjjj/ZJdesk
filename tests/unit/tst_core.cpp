@@ -2,6 +2,7 @@
 #include "platform/platform_info.h"
 #include "platform/camera_permission_p.h"
 #include "protocol/message.h"
+#include "protocol/annotation.h"
 #include "remote-control/control_session.h"
 #include "remote-control/input_receiver.h"
 #include "session/session_coordinator.h"
@@ -21,6 +22,37 @@ class CoreTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void annotationBoundsAndTools()
+    {
+        using namespace zjdesk::protocol;
+        QJsonArray singlePoint;
+        singlePoint.append(QJsonArray{0, 1});
+        QJsonObject stroke{{"strokeId", "stroke1"}, {"tool", "pen"}, {"points", singlePoint}};
+        QVERIFY(isAnnotationStrokeValid(stroke));
+        QJsonArray points;
+        for (int i = 0; i < MaximumAnnotationPoints; ++i) points.append(QJsonArray{0.5, 0.5});
+        stroke.insert("points", points);
+        QVERIFY(isAnnotationStrokeValid(stroke));
+        points.append(QJsonArray{0.5, 0.5});
+        stroke.insert("points", points);
+        QVERIFY(!isAnnotationStrokeValid(stroke));
+        for (const QString &tool : {QString("circle"), QString("arrow")})
+        {
+            stroke.insert("tool", tool);
+            stroke.insert("points", QJsonArray{QJsonArray{0.2, 0.2}, QJsonArray{0.8, 0.8}});
+            QVERIFY(isAnnotationStrokeValid(stroke));
+            stroke.insert("points", QJsonArray{QJsonArray{0.2, 0.2}});
+            QVERIFY(!isAnnotationStrokeValid(stroke));
+        }
+        stroke.insert("tool", "pen");
+        for (const auto &invalid : {QJsonArray{QJsonArray{-0.01, 0.5}}, QJsonArray{QJsonArray{0.5, 1.01}},
+                QJsonArray{QJsonArray{"0.5", 0.5}}, QJsonArray{QJsonArray{0.5, 0.5, 0.5}}, QJsonArray{}})
+        {
+            stroke.insert("points", invalid);
+            QVERIFY(!isAnnotationStrokeValid(stroke));
+        }
+    }
+
     void inputReceiverRejectsStaleDuplicateAndRevokedInput()
     {
         zjdesk::InputReceiver receiver;

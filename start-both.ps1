@@ -40,7 +40,7 @@ function Stop-WindowsZjdeskInstances {
 }
 try {
     if (-not $LinuxSsh.Count) {
-        Write-Host 'Linux IPv4: run ip -4 addr show up on Linux. Windows IPv4: run ipconfig on Windows.'
+        Write-Host 'Linux IPv4: run sh tools/ip-info.sh on Linux. Windows IPv4: run tools\ip-info.cmd on Windows.'
         $endpoint = Read-Host 'Enter Linux SSH target (your Linux username@IPv4 address)'
         if (-not $endpoint.Trim()) { throw 'Linux SSH target is required. Alternatively pass -LinuxSsh username@IPv4.' }
         $LinuxSsh = @($endpoint.Trim())

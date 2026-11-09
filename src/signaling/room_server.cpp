@@ -1,4 +1,5 @@
 #include "room_server.h"
+#include "protocol/annotation.h"
 #include <QJsonArray>
 #include <QRandomGenerator>
 #include <QUuid>
@@ -7,6 +8,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QStandardPaths>
+#include <QPointer>
 
 namespace zjdesk
 {
@@ -62,6 +64,7 @@ void RoomServer::close()
     }
     peers_.clear();
     rooms_.clear();
+    sharedScreens_.clear();
     remoteCodes_.clear();
 }
 
@@ -186,6 +189,7 @@ void RoomServer::leave(QWebSocket *socket)
         }
         return;
     }
+    if (sharedScreens_.value(peer.room).ownerId == peer.id) stopSharedScreen(peer.room);
     rooms_[peer.room].removeAll(socket);
     if (rooms_[peer.room].isEmpty())
         rooms_.remove(peer.room);
@@ -195,6 +199,99 @@ void RoomServer::leave(QWebSocket *socket)
     emit event("Participant left; room count: " + QString::number(rooms_.size()));
 }
 
+void RoomServer::broadcastAnnotation(const QString &room, const QJsonObject &payload)
+{
+    for (auto *member : rooms_.value(room)) send(member, {"annotation", payload});
+}
+
+void RoomServer::stopSharedScreen(const QString &room)
+{
+    if (!sharedScreens_.contains(room)) return;
+    const auto shared = sharedScreens_.take(room);
+    broadcastAnnotation(room, {{"action", "stopped"}, {"streamId", shared.streamId}});
+}
+
+void RoomServer::receiveAnnotation(QWebSocket *socket, const QJsonObject &payload)
+{
+    const auto peer = peers_.value(socket);
+    const auto error = [this, socket](const QString &code) {
+        send(socket, {"annotation", {{"action", "error"}, {"code", code}}});
+    };
+    if (!peer.room.startsWith(QStringLiteral("meeting") + QChar(0x1f))) return error("not_in_meeting");
+    const auto streamId = payload.value("streamId").toString();
+    if (!protocol::isRoomIdValid(streamId)) return error("invalid_stream");
+    const auto action = payload.value("action").toString();
+    if (action == "start")
+    {
+        if (sharedScreens_.contains(peer.room))
+        {
+            send(socket, {"annotation", {{"action", "busy"}, {"streamId", streamId}}});
+            return;
+        }
+        if (payload.contains("annotationsInVideo") && !payload.value("annotationsInVideo").isBool())
+            return error("invalid_stream");
+        const bool embedded = payload.value("annotationsInVideo").toBool();
+        sharedScreens_.insert(peer.room, {streamId, peer.id, {}, embedded});
+        broadcastAnnotation(peer.room, {{"action", "started"}, {"streamId", streamId}, {"ownerId", peer.id},
+            {"annotationsInVideo", embedded}});
+        return;
+    }
+    if (!sharedScreens_.contains(peer.room) || sharedScreens_[peer.room].streamId != streamId)
+        return error("inactive_stream");
+    auto &shared = sharedScreens_[peer.room];
+    if (action == "stop")
+    {
+        if (shared.ownerId != peer.id) return error("not_share_owner");
+        stopSharedScreen(peer.room);
+        return;
+    }
+    if (action == "clear")
+    {
+        if (payload.contains("all") && !payload.value("all").isBool()) return error("invalid_clear");
+        const bool all = payload.value("all").toBool();
+        if (all && shared.ownerId != peer.id) return error("not_share_owner");
+        for (qsizetype i = shared.strokes.size(); i-- > 0;)
+            if (all || shared.strokes.at(i).toObject().value("authorId").toString() == peer.id)
+                shared.strokes.removeAt(i);
+        broadcastAnnotation(peer.room, {{"action", "clear"}, {"streamId", streamId}, {"all", all}, {"authorId", peer.id}});
+        return;
+    }
+    if (action != "stroke" || !protocol::isAnnotationStrokeValid(payload)) return error("invalid_stroke");
+    qsizetype index = -1;
+    for (qsizetype i = 0; i < shared.strokes.size(); ++i)
+        if (shared.strokes.at(i).toObject().value("strokeId") == payload.value("strokeId")) { index = i; break; }
+    if (index >= 0 && shared.strokes.at(index).toObject().value("authorId").toString() != peer.id)
+        return error("stroke_not_owned");
+    if (index < 0 && shared.strokes.size() >= protocol::MaximumAnnotationStrokes) return error("annotation_limit");
+    const QJsonObject stroke{{"action", "stroke"}, {"streamId", streamId}, {"strokeId", payload.value("strokeId")},
+        {"tool", payload.value("tool")}, {"points", payload.value("points")},
+        {"authorId", peer.id}, {"name", peer.name}, {"color", peer.annotationColor}};
+    if (index < 0) shared.strokes.append(stroke);
+    else shared.strokes.replace(index, stroke);
+    broadcastAnnotation(peer.room, stroke);
+}
+
+void RoomServer::replayAnnotations(QWebSocket *socket, const QString &room, const QString &streamId,
+    const QStringList &strokeIds, int next)
+{
+    if (peers_.value(socket).room != room || sharedScreens_.value(room).streamId != streamId) return;
+    while (next < strokeIds.size() && socket->bytesToWrite() < protocol::MaxMessageBytes)
+    {
+        const auto id = strokeIds.at(next++);
+        // Resolve current state so edits/clears during a slow replay cannot resurrect old marks.
+        for (const auto &stroke : sharedScreens_.value(room).strokes)
+            if (stroke.toObject().value("strokeId").toString() == id)
+            {
+                send(socket, {"annotation", stroke.toObject()});
+                break;
+            }
+    }
+    if (next < strokeIds.size())
+        QTimer::singleShot(10, this, [this, socket = QPointer<QWebSocket>(socket), room, streamId, strokeIds, next] {
+            if (socket) replayAnnotations(socket, room, streamId, strokeIds, next);
+        });
+}
+
 void RoomServer::receive(QWebSocket *socket, const QString &text)
 {
     QString error;
@@ -202,6 +299,11 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
     if (!message)
     {
         reject(socket, error);
+        return;
+    }
+    if (message->type == "annotation")
+    {
+        receiveAnnotation(socket, message->payload);
         return;
     }
     if (message->type == "register_remote")
@@ -293,9 +395,29 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
             members.append(QJsonObject{{"peerId", peers_[member].id}, {"name", peers_[member].name}});
         peers_[socket].room = roomKey;
         peers_[socket].name = name;
+        if (roomType == "meeting")
+        {
+            for (const auto &color : {"#e5484d", "#2474e5", "#168765", "#a345c8"})
+            {
+                bool used = false;
+                for (auto *member : rooms_.value(roomKey))
+                    used |= peers_[member].annotationColor == color;
+                if (!used) { peers_[socket].annotationColor = color; break; }
+            }
+        }
         rooms_[roomKey].append(socket);
         send(socket, {"joined", {{"roomId", room}, {"peerId", peers_[socket].id},
-                                 {"roomType", roomType}, {"peers", members}, {"initiator", members.isEmpty()}}});
+                                 {"roomType", roomType}, {"peers", members}, {"initiator", members.isEmpty()},
+                                 {"annotationColor", peers_[socket].annotationColor}}});
+        if (sharedScreens_.contains(roomKey))
+        {
+            const auto &shared = sharedScreens_[roomKey];
+            send(socket, {"annotation", {{"action", "started"}, {"streamId", shared.streamId}, {"ownerId", shared.ownerId},
+                {"annotationsInVideo", shared.annotationsInVideo}}});
+            QStringList ids;
+            for (const auto &stroke : shared.strokes) ids.append(stroke.toObject().value("strokeId").toString());
+            replayAnnotations(socket, roomKey, shared.streamId, ids);
+        }
         for (auto *other : rooms_.value(roomKey))
             if (other != socket)
                 send(other, {"peer_joined", {{"peerId", peers_[socket].id}, {"name", name}}});

@@ -20,7 +20,8 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-add_library(zjdesk_protocol STATIC src/protocol/message.cpp src/protocol/message.h)
+add_library(zjdesk_protocol STATIC src/protocol/message.cpp src/protocol/message.h
+    src/protocol/annotation.cpp src/protocol/annotation.h)
 target_include_directories(zjdesk_protocol PUBLIC src "${CMAKE_BINARY_DIR}/generated")
 target_link_libraries(zjdesk_protocol PUBLIC Qt6::Core)
 
@@ -30,6 +31,7 @@ target_link_libraries(zjdesk_signaling PUBLIC zjdesk_protocol Qt6::Network Qt6::
 add_library(zjdesk_client_core STATIC
     src/signaling/signaling_client.cpp src/signaling/signaling_client.h
     src/session/session_coordinator.cpp src/session/session_coordinator.h
+    src/session/meeting_share.cpp
     src/session/network_setup.cpp src/session/network_setup.h
     src/remote-control/control_session.cpp src/remote-control/control_session.h
     src/remote-control/file_clipboard.cpp src/remote-control/file_clipboard.h
@@ -73,6 +75,7 @@ if(ZJDESK_BUILD_CLIENT)
     find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets OpenGLWidgets)
     qt_add_executable(zjdesk WIN32
         apps/client/main.cpp apps/client/main_window.cpp apps/client/main_window.h
+        apps/client/annotation_layer.cpp apps/client/annotation_layer.h
         apps/client/video_surface.cpp apps/client/video_surface.h)
     qt_add_resources(zjdesk styles PREFIX "/" FILES resources/styles.qss)
     qt_add_resources(zjdesk branding PREFIX "/icons" BASE packaging FILES packaging/zjdesk.png)
@@ -85,6 +88,14 @@ if(ZJDESK_BUILD_CLIENT)
     endif()
     target_link_libraries(zjdesk PRIVATE zjdesk_client_core Qt6::Widgets Qt6::OpenGLWidgets)
     install(TARGETS zjdesk RUNTIME DESTINATION bin)
+    if(WIN32)
+        install(FILES tools/ip-info.ps1 tools/ip-info.cmd DESTINATION bin/tools)
+    else()
+        install(PROGRAMS tools/ip-info.sh DESTINATION bin/tools)
+    endif()
+    add_custom_command(TARGET zjdesk POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools" "$<TARGET_FILE_DIR:zjdesk>/tools")
     qt_generate_deploy_app_script(TARGET zjdesk OUTPUT_SCRIPT deploy_script
         NO_UNSUPPORTED_PLATFORM_ERROR)
     install(SCRIPT "${deploy_script}")
@@ -133,6 +144,7 @@ if(BUILD_TESTING)
     if(ZJDESK_BUILD_CLIENT AND ZJDESK_GUI_TESTS)
         qt_add_executable(zjdesk-ui-tests tests/ui/tst_window.cpp
             apps/client/main_window.cpp apps/client/main_window.h
+            apps/client/annotation_layer.cpp apps/client/annotation_layer.h
             apps/client/video_surface.cpp apps/client/video_surface.h)
         target_include_directories(zjdesk-ui-tests PRIVATE apps/client)
         target_link_libraries(zjdesk-ui-tests PRIVATE zjdesk_client_core zjdesk_signaling

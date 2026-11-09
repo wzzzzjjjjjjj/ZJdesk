@@ -1,5 +1,6 @@
 #include "session/session_coordinator.h"
 #include "signaling/room_server.h"
+#include "protocol/annotation.h"
 #include <QNetworkProxy>
 #include <QWebSocket>
 #include <QWebSocketServer>
@@ -15,6 +16,127 @@ class SignalingTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void meetingAnnotationsBroadcastValidateAndReplay()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SignalingClient clients[5];
+        QString ids[5];
+        QList<QJsonObject> events[5];
+        int connected = 0;
+        for (int i = 0; i < 5; ++i)
+        {
+            connect(&clients[i], &zjdesk::SignalingClient::connected, this, [&connected] { ++connected; });
+            connect(&clients[i], &zjdesk::SignalingClient::messageReceived, this,
+                [&, i](const zjdesk::protocol::Message &message) {
+                    if (message.type == "joined") ids[i] = message.payload.value("peerId").toString();
+                    if (message.type == "annotation") events[i].append(message.payload);
+                });
+            clients[i].open(url);
+        }
+        QTRY_COMPARE(connected, 5);
+        for (int i = 0; i < 5; ++i)
+            QVERIFY(clients[i].send({"join", {{"roomId", i == 4 ? "other" : "drawing"},
+                {"roomType", "meeting"}, {"name", QString("Member%1").arg(i)}}}));
+        QTRY_VERIFY(!ids[4].isEmpty() && !ids[3].isEmpty());
+        QVERIFY(clients[0].send({"annotation", {{"action", "start"}, {"streamId", "screen1"}}}));
+        QTRY_COMPARE(events[0].size(), 1);
+        for (int i = 0; i < 4; ++i)
+        {
+            QTRY_COMPARE(events[i].size(), 1);
+            QCOMPARE(events[i].last().value("action").toString(), "started");
+            QCOMPARE(events[i].last().value("ownerId").toString(), ids[0]);
+        }
+        QVERIFY(events[4].isEmpty());
+        QVERIFY(clients[1].send({"annotation", {{"action", "start"}, {"streamId", "screen2"}}}));
+        QTRY_COMPARE(events[1].last().value("action").toString(), "busy");
+        QCOMPARE(events[0].size(), 1);
+        QJsonObject stroke{{"action", "stroke"}, {"streamId", "screen1"}, {"strokeId", "circle1"},
+            {"tool", "circle"}, {"points", QJsonArray{QJsonArray{0.2, 0.3}, QJsonArray{0.6, 0.7}}},
+            {"authorId", ids[1]}, {"name", "spoofed"}, {"color", "#ffffff"}};
+        QVERIFY(clients[0].send({"annotation", stroke}));
+        QTRY_COMPARE(events[0].last().value("action").toString(), "stroke");
+        for (int i = 0; i < 4; ++i)
+        {
+            QTRY_COMPARE(events[i].last().value("strokeId").toString(), "circle1");
+            QCOMPARE(events[i].last().value("authorId").toString(), ids[0]);
+            QCOMPARE(events[i].last().value("name").toString(), "Member0");
+            QVERIFY(events[i].last().value("color").toString() != "#ffffff");
+        }
+        QVERIFY(clients[1].send({"annotation", stroke})); // Another author cannot overwrite the circle.
+        QTRY_COMPARE(events[1].last().value("action").toString(), "error");
+        auto invalid = stroke;
+        invalid.insert("strokeId", "invalid");
+        for (const auto &points : {QJsonArray{QJsonArray{-0.01, 0.3}},
+                QJsonArray{QJsonArray{0.3, 1.01}}, QJsonArray{QJsonArray{"0.3", 0.4}}})
+        {
+            const auto count = events[0].size();
+            invalid.insert("points", points);
+            QVERIFY(clients[0].send({"annotation", invalid}));
+            QTRY_COMPARE(events[0].size(), count + 1);
+            QCOMPARE(events[0].last().value("action").toString(), "error");
+        }
+        invalid = stroke;
+        invalid.insert("streamId", "oldScreen");
+        QVERIFY(clients[0].send({"annotation", invalid}));
+        QTRY_COMPARE(events[0].last().value("code").toString(), "inactive_stream");
+        stroke.insert("strokeId", "arrow1");
+        stroke.insert("tool", "arrow");
+        QVERIFY(clients[1].send({"annotation", stroke}));
+        QTRY_COMPARE(events[1].last().value("strokeId").toString(), "arrow1");
+        QVERIFY(events[1].last().value("color") != events[0].at(1).value("color"));
+        QVERIFY(clients[1].send({"annotation", {{"action", "clear"}, {"streamId", "screen1"}, {"all", true}}}));
+        QTRY_COMPARE(events[1].last().value("action").toString(), "error");
+        QVERIFY(clients[1].send({"annotation", {{"action", "clear"}, {"streamId", "screen1"}}}));
+        QTRY_COMPARE(events[0].last().value("action").toString(), "clear");
+        QCOMPARE(events[0].last().value("authorId").toString(), ids[1]);
+        clients[3].close();
+        QTest::qWait(50);
+        zjdesk::SignalingClient late;
+        QList<QJsonObject> replay;
+        QSignalSpy ready(&late, &zjdesk::SignalingClient::connected);
+        connect(&late, &zjdesk::SignalingClient::messageReceived, this,
+            [&replay](const zjdesk::protocol::Message &message) {
+                if (message.type == "annotation") replay.append(message.payload);
+            });
+        late.open(url);
+        QTRY_COMPARE(ready.size(), 1);
+        QVERIFY(late.send({"join", {{"roomId", "drawing"}, {"roomType", "meeting"}, {"name", "Late"}}}));
+        QTRY_COMPARE(replay.size(), 2);
+        QCOMPARE(replay.first().value("action").toString(), "started");
+        QCOMPARE(replay.last().value("strokeId").toString(), "circle1");
+        // A full, point-heavy canvas must replay without overflowing the signaling queue.
+        late.close();
+        QTest::qWait(50);
+        QJsonArray points;
+        for (int i = 0; i < zjdesk::protocol::MaximumAnnotationPoints; ++i)
+            points.append(QJsonArray{double(i) / 257, double(i + 1) / 259});
+        stroke.insert("tool", "pen");
+        stroke.insert("points", points);
+        for (int i = 1; i < zjdesk::protocol::MaximumAnnotationStrokes; ++i)
+        {
+            stroke.insert("strokeId", QString("dense%1").arg(i));
+            QVERIFY(clients[0].send({"annotation", stroke}));
+            QTRY_COMPARE(events[0].last().value("strokeId").toString(), QString("dense%1").arg(i));
+        }
+        stroke.insert("strokeId", "overflow");
+        QVERIFY(clients[0].send({"annotation", stroke}));
+        QTRY_COMPARE(events[0].last().value("code").toString(), "annotation_limit");
+        replay.clear();
+        late.open(url);
+        QTRY_COMPARE(ready.size(), 2);
+        QVERIFY(late.send({"join", {{"roomId", "drawing"}, {"roomType", "meeting"}, {"name", "Late"}}}));
+        QTRY_COMPARE_WITH_TIMEOUT(replay.size(), zjdesk::protocol::MaximumAnnotationStrokes + 1, 10000);
+        QVERIFY(clients[0].send({"annotation", {{"action", "stop"}, {"streamId", "screen1"}}}));
+        QTRY_COMPARE(replay.last().value("action").toString(), "stopped");
+        QVERIFY(clients[0].send({"annotation", {{"action", "start"}, {"streamId", "screen3"}}}));
+        QTRY_COMPARE(replay.last().value("streamId").toString(), "screen3");
+        clients[0].close();
+        QTRY_COMPARE(replay.last().value("action").toString(), "stopped");
+        QVERIFY(events[4].isEmpty()); // No room crossover, including snapshots and owner departure.
+    }
+
     void remoteCodePoliciesPersistAndExpire_data()
     {
         QTest::addColumn<QString>("policy");

@@ -13,6 +13,7 @@
 #include <QElapsedTimer>
 #include <QDeadlineTimer>
 #include <QMap>
+#include <QJsonArray>
 #include <QTimer>
 #include <functional>
 
@@ -77,6 +78,15 @@ public:
     QString shareDetail() const { return shareDetail_; }
     bool receivingScreen() const { return receivingScreen_; }
     bool screenActive() const { return !streamId_.isEmpty(); }
+    QJsonArray annotations() const { return annotations_; }
+    QJsonObject annotationAuthor() const { return {{"authorId", ownPeerId_}, {"name", name_}, {"color", annotationColor_}}; }
+    bool canAnnotate() const { return roomType_ == RoomType::Meeting && !shareOwnerId_.isEmpty() && screenActive(); }
+    bool ownsSharedScreen() const { return canAnnotate() && shareOwnerId_ == ownPeerId_; }
+    bool isDesktopShare() const { return ownsSharedScreen() && desktopSource_; }
+    bool annotationsInVideo() const { return annotationsInVideo_; }
+    QString annotationDetail() const { return annotationDetail_; }
+    bool submitAnnotation(const QJsonObject &stroke);
+    bool clearAnnotations(bool all = false);
     enum class RemoteState { Idle, Requesting, Pending, Controlling, Controlled };
     Q_ENUM(RemoteState)
     RemoteState remoteState() const { return remoteState_; }
@@ -109,6 +119,8 @@ public:
     void setConferenceMuted(bool microphone, bool camera, bool speaker);
 
 signals:
+    void annotationsChanged();
+    void annotationsCleared(const QString &authorId);
     void stateChanged(zjdesk::SessionCoordinator::State state);
     void membersChanged();
     void trafficChanged();
@@ -145,6 +157,11 @@ private:
     void clearMembership();
     void receiveShare(const protocol::Message &message);
     void clearScreenShare(bool notifyPeer);
+    bool startMeetingShare(const QString &source, int targetFps);
+    void clearMeetingShare(bool notifyPeer);
+    void addMeetingSharePeer(const QString &id);
+    void removeMeetingSharePeer(const QString &id);
+    void receiveAnnotation(const QJsonObject &payload);
     void receiveControl(const QJsonObject &message);
     void receiveControlRequest(const QJsonObject &message);
     void requestRemoteControlWhenReady();
@@ -195,6 +212,12 @@ private:
     QTimer deadline_;
     MediaEngine media_;
     ScreenShare screen_;
+    QMap<QString, ScreenShare *> meetingSharePeers_;
+    QSet<QString> meetingShareRunning_;
+    QString shareOwnerId_, pendingShareId_, meetingShareSource_, annotationColor_, annotationDetail_;
+    int meetingShareFps_ = 0;
+    QJsonArray annotations_;
+    bool annotationsInVideo_ = false;
     InputReceiver inputReceiver_; // Stops before the media channel is destroyed.
     ConferenceMedia conference_;
     MeetingMedia meetingMedia_;
