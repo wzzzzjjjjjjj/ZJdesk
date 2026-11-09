@@ -66,6 +66,27 @@ private slots:
         }
         QVERIFY(clients[1].send({"annotation", stroke})); // Another author cannot overwrite the circle.
         QTRY_COMPARE(events[1].last().value("action").toString(), "error");
+        QCOMPARE(events[1].last().value("code").toString(), "annotation_not_authorized");
+        QVERIFY(clients[1].send({"annotation", {{"action", "request_permission"}, {"streamId", "screen1"}}}));
+        QTRY_COMPARE(events[0].last().value("action").toString(), "permission_requested");
+        QCOMPARE(events[0].last().value("peerId").toString(), ids[1]);
+        QVERIFY(clients[2].send({"annotation", {{"action", "permission_response"}, {"streamId", "screen1"},
+            {"peerId", ids[1]}, {"approved", true}}}));
+        QTRY_COMPARE(events[2].last().value("code").toString(), "not_share_owner");
+        QVERIFY(clients[0].send({"annotation", {{"action", "permission_response"}, {"streamId", "screen1"},
+            {"peerId", ids[1]}, {"approved", false}}}));
+        QTRY_COMPARE(events[1].last().value("action").toString(), "permission_result");
+        QVERIFY(!events[1].last().value("approved").toBool());
+        QVERIFY(clients[1].send({"annotation", stroke}));
+        QTRY_COMPARE(events[1].last().value("code").toString(), "annotation_not_authorized");
+        const auto requestsBeforeRetry = events[0].size();
+        QVERIFY(clients[1].send({"annotation", {{"action", "request_permission"}, {"streamId", "screen1"}}}));
+        QTRY_COMPARE(events[0].size(), requestsBeforeRetry + 1);
+        QCOMPARE(events[0].last().value("action").toString(), "permission_requested");
+        QVERIFY(clients[0].send({"annotation", {{"action", "permission_response"}, {"streamId", "screen1"},
+            {"peerId", ids[1]}, {"approved", true}}}));
+        QTRY_COMPARE(events[1].last().value("action").toString(), "permission_result");
+        QVERIFY(events[1].last().value("approved").toBool());
         auto invalid = stroke;
         invalid.insert("strokeId", "invalid");
         for (const auto &points : {QJsonArray{QJsonArray{-0.01, 0.3}},
@@ -132,6 +153,19 @@ private slots:
         QTRY_COMPARE(replay.last().value("action").toString(), "stopped");
         QVERIFY(clients[0].send({"annotation", {{"action", "start"}, {"streamId", "screen3"}}}));
         QTRY_COMPARE(replay.last().value("streamId").toString(), "screen3");
+        QVERIFY(clients[1].send({"annotation", {{"action", "request_permission"}, {"streamId", "screen3"}}}));
+        QTRY_COMPARE(events[1].last().value("action").toString(), "permission_result");
+        QVERIFY(events[1].last().value("approved").toBool());
+        const auto previousId = ids[1];
+        clients[1].close();
+        QTest::qWait(100);
+        clients[1].open(url);
+        QTRY_COMPARE(connected, 6);
+        QVERIFY(clients[1].send({"join", {{"roomId", "drawing"}, {"roomType", "meeting"}, {"name", "Member1"}}}));
+        QTRY_VERIFY(ids[1] != previousId);
+        stroke.insert("streamId", "screen3");
+        QVERIFY(clients[1].send({"annotation", stroke}));
+        QTRY_COMPARE(events[1].last().value("code").toString(), "annotation_not_authorized");
         clients[0].close();
         QTRY_COMPARE(replay.last().value("action").toString(), "stopped");
         QVERIFY(events[4].isEmpty()); // No room crossover, including snapshots and owner departure.

@@ -82,6 +82,10 @@ public:
     QJsonObject annotationAuthor() const { return {{"authorId", ownPeerId_}, {"name", name_}, {"color", annotationColor_}}; }
     bool canAnnotate() const { return roomType_ == RoomType::Meeting && !shareOwnerId_.isEmpty() && screenActive(); }
     bool ownsSharedScreen() const { return canAnnotate() && shareOwnerId_ == ownPeerId_; }
+    bool canDrawAnnotation() const { return canAnnotate() && (ownsSharedScreen() || annotationApproved_); }
+    bool annotationRequestPending() const { return annotationRequestPending_; }
+    bool requestAnnotationPermission();
+    bool respondAnnotationPermission(const QString &peerId, const QString &streamId, bool approved);
     bool isDesktopShare() const { return ownsSharedScreen() && desktopSource_; }
     bool annotationsInVideo() const { return annotationsInVideo_; }
     QString annotationDetail() const { return annotationDetail_; }
@@ -120,6 +124,8 @@ public:
 
 signals:
     void annotationsChanged();
+    void annotationPermissionRequested(const QString &peerId, const QString &name, const QString &streamId);
+    void annotationPermissionResult(bool approved);
     void annotationsCleared(const QString &authorId);
     void stateChanged(zjdesk::SessionCoordinator::State state);
     void membersChanged();
@@ -215,6 +221,8 @@ private:
     QMap<QString, ScreenShare *> meetingSharePeers_;
     QSet<QString> meetingShareRunning_;
     QString shareOwnerId_, pendingShareId_, meetingShareSource_, annotationColor_, annotationDetail_;
+    bool annotationApproved_ = false;
+    bool annotationRequestPending_ = false;
     int meetingShareFps_ = 0;
     QJsonArray annotations_;
     bool annotationsInVideo_ = false;

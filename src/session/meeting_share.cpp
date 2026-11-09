@@ -65,6 +65,8 @@ void SessionCoordinator::clearMeetingShare(bool notifyPeer)
     annotations_ = {};
     annotationsInVideo_ = false;
     annotationDetail_.clear();
+    annotationApproved_ = false;
+    annotationRequestPending_ = false;
     shareStats_ = {};
     shareState_ = PreviewState::Stopped;
     shareDetail_ = QStringLiteral("屏幕共享已停止");
@@ -134,11 +136,28 @@ void SessionCoordinator::removeMeetingSharePeer(const QString &id)
 
 bool SessionCoordinator::submitAnnotation(const QJsonObject &stroke)
 {
-    if (!canAnnotate() || !protocol::isAnnotationStrokeValid(stroke)) return false;
+    if (!canDrawAnnotation() || !protocol::isAnnotationStrokeValid(stroke)) return false;
     auto payload = stroke;
     payload.insert("action", "stroke");
     payload.insert("streamId", streamId_);
     return signaling_.send({"annotation", payload});
+}
+
+bool SessionCoordinator::requestAnnotationPermission()
+{
+    if (!canAnnotate() || canDrawAnnotation() || annotationRequestPending_) return false;
+    if (!signaling_.send({"annotation", {{"action", "request_permission"}, {"streamId", streamId_}}})) return false;
+    annotationRequestPending_ = true;
+    annotationDetail_ = QStringLiteral("等待共享者同意使用画笔");
+    emit annotationsChanged();
+    return true;
+}
+
+bool SessionCoordinator::respondAnnotationPermission(const QString &peerId, const QString &streamId, bool approved)
+{
+    if (!ownsSharedScreen() || streamId != streamId_) return false;
+    return signaling_.send({"annotation", {{"action", "permission_response"}, {"streamId", streamId},
+        {"peerId", peerId}, {"approved", approved}}});
 }
 
 bool SessionCoordinator::clearAnnotations(bool all)
@@ -178,6 +197,11 @@ void SessionCoordinator::receiveAnnotation(const QJsonObject &payload)
     }
     if (action == "busy" || action == "error")
     {
+        if (annotationRequestPending_)
+        {
+            annotationRequestPending_ = false;
+            emit annotationPermissionResult(false);
+        }
         if (!pendingShareId_.isEmpty())
         {
             pendingShareId_.clear();
@@ -191,6 +215,20 @@ void SessionCoordinator::receiveAnnotation(const QJsonObject &payload)
         return;
     }
     if (streamId != streamId_ || !canAnnotate()) return;
+    if (action == "permission_requested" && ownsSharedScreen())
+    {
+        emit annotationPermissionRequested(payload.value("peerId").toString(), payload.value("name").toString(), streamId);
+        return;
+    }
+    if (action == "permission_result" && !ownsSharedScreen())
+    {
+        annotationRequestPending_ = false;
+        annotationApproved_ = payload.value("approved").toBool();
+        annotationDetail_ = annotationApproved_ ? QStringLiteral("共享者已同意标注") : QStringLiteral("共享者未同意标注");
+        emit annotationPermissionResult(annotationApproved_);
+        emit annotationsChanged();
+        return;
+    }
     if (action == "stopped") { clearMeetingShare(false); return; }
     if (action == "clear")
     {

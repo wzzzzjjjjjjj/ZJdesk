@@ -356,7 +356,9 @@ private slots:
         MainWindow window(url.toString(), {}, "Owner");
         auto &owner = window.session_;
         owner.setConferenceAutoConnect(false);
-        Session first, second, late;
+        MainWindow viewerWindow(url.toString(), {}, "First");
+        auto &first = viewerWindow.session_;
+        Session second, late;
         if (!owner.mediaEnvironment().ready) QSKIP("GStreamer is not enabled");
         int frames[3] = {};
         const QList<Session *> viewers{&first, &second, &late};
@@ -369,12 +371,36 @@ private slots:
         QVERIFY(owner.startScreenShare("test", 15));
         QTRY_VERIFY_WITH_TIMEOUT(frames[0] >= 3 && frames[1] >= 3, 30000);
         QVERIFY(owner.canAnnotate() && first.canAnnotate() && second.canAnnotate());
+        viewerWindow.show();
+        for (auto *button : viewerWindow.findChildren<QPushButton *>())
+            if (button->text() == QStringLiteral("视频会议")) { button->click(); break; }
+        QTRY_VERIFY(viewerWindow.meetingShareVideo_->isVisible());
+        viewerWindow.expandMeetingVideo(viewerWindow.meetingShareVideo_);
+        QTRY_VERIFY(viewerWindow.annotationTool_->isVisible());
+        QTRY_VERIFY(viewerWindow.annotationTool_->isEnabled());
+        viewerWindow.annotationTool_->setCurrentIndex(1);
+        QTRY_VERIFY(window.findChild<QMessageBox *>("annotationPermissionDialog"));
+        window.findChild<QMessageBox *>("annotationPermissionDialog")->done(QMessageBox::No);
+        QTRY_VERIFY(!first.annotationRequestPending());
+        QVERIFY(!first.canDrawAnnotation());
+        QCOMPARE(viewerWindow.annotationTool_->currentIndex(), 0);
+        QTRY_VERIFY(!window.findChild<QMessageBox *>("annotationPermissionDialog"));
+        viewerWindow.annotationTool_->setCurrentIndex(1);
+        QTRY_VERIFY(window.findChild<QMessageBox *>("annotationPermissionDialog"));
+        window.findChild<QMessageBox *>("annotationPermissionDialog")->done(QMessageBox::Yes);
+        QTRY_VERIFY(first.canDrawAnnotation());
+        viewerWindow.restoreMeetingVideo();
         const QJsonObject circle{{"strokeId", "owner-circle"}, {"tool", "circle"},
             {"points", QJsonArray{QJsonArray{0.2, 0.2}, QJsonArray{0.8, 0.8}}}};
         auto arrow = circle;
         arrow.insert("strokeId", "viewer-arrow");
         arrow.insert("tool", "arrow");
         QVERIFY(owner.submitAnnotation(circle));
+        QVERIFY(!second.submitAnnotation(arrow));
+        QVERIFY(second.requestAnnotationPermission());
+        QTRY_VERIFY(window.findChild<QMessageBox *>("annotationPermissionDialog"));
+        window.findChild<QMessageBox *>("annotationPermissionDialog")->done(QMessageBox::Yes);
+        QTRY_VERIFY(second.canDrawAnnotation());
         QVERIFY(second.submitAnnotation(arrow));
         QTRY_COMPARE(first.annotations().size(), 2);
         QTRY_COMPARE(owner.annotations(), first.annotations());
@@ -383,6 +409,18 @@ private slots:
         QVERIFY(late.join(url, "annotations", "Late", Session::RoomType::Meeting));
         QTRY_COMPARE(late.annotations(), first.annotations());
         QTRY_VERIFY_WITH_TIMEOUT(frames[2] >= 3, 30000);
+        QVERIFY(late.requestAnnotationPermission());
+        QTRY_VERIFY(window.findChild<QMessageBox *>("annotationPermissionDialog"));
+        late.leave();
+        QTRY_COMPARE(owner.memberCount(), 3);
+        QTRY_VERIFY(!window.findChild<QMessageBox *>("annotationPermissionDialog"));
+        QVERIFY(late.join(url, "annotations", "Late", Session::RoomType::Meeting));
+        QTRY_COMPARE(owner.memberCount(), 4);
+        QTRY_VERIFY(late.canAnnotate());
+        QVERIFY(late.requestAnnotationPermission());
+        QTRY_VERIFY(window.findChild<QMessageBox *>("annotationPermissionDialog"));
+        window.findChild<QMessageBox *>("annotationPermissionDialog")->done(QMessageBox::No);
+        QTRY_VERIFY(!late.annotationRequestPending());
         // Losing the first/primary viewer must not stop another member's sharing.
         first.leave();
         QTRY_COMPARE(owner.memberCount(), 3);
@@ -397,6 +435,19 @@ private slots:
         // The native desktop window paints the same model and remains click-through.
         owner.desktopSource_ = true;
         window.refreshAnnotations();
+        QVERIFY(window.desktopAnnotationTools_->isVisible());
+        auto *desktopBrowse = window.desktopAnnotationTools_->findChild<QPushButton *>("desktopAnnotationTool0");
+        auto *desktopCircle = window.desktopAnnotationTools_->findChild<QPushButton *>("desktopAnnotationTool2");
+        auto *desktopArrow = window.desktopAnnotationTools_->findChild<QPushButton *>("desktopAnnotationTool3");
+        QVERIFY(desktopBrowse && desktopCircle && desktopArrow);
+        QVERIFY(desktopBrowse->isChecked());
+        auto screenGeometry = QGuiApplication::primaryScreen()->geometry();
+#ifndef Q_OS_WIN
+        for (auto *screen : QGuiApplication::screens()) screenGeometry = screenGeometry.united(screen->geometry());
+#endif
+        QVERIFY(window.desktopAnnotationTools_->geometry().right() <= screenGeometry.right());
+        QVERIFY(window.desktopAnnotationTools_->geometry().right() >= screenGeometry.right() - 20);
+        QCOMPARE(window.desktopAnnotationTools_->geometry().top(), screenGeometry.top() + 12);
         QVERIFY(window.desktopAnnotations_->isVisible());
         QVERIFY(window.desktopAnnotations_->windowFlags().testFlag(Qt::WindowTransparentForInput));
         QVERIFY(window.desktopAnnotations_->testAttribute(Qt::WA_ShowWithoutActivating));
@@ -410,11 +461,74 @@ private slots:
         window.showMinimized();
         QTest::qWait(250);
         QVERIFY(window.desktopAnnotations_->windowHandle()->isExposed());
+        QVERIFY(window.desktopAnnotationTools_->windowHandle()->isExposed());
+        QVERIFY(owner.isDesktopShare());
+        QVERIFY(window.annotationTool_->isEnabled());
+        desktopCircle->click();
+        QCOMPARE(window.desktopAnnotations_->tool(), QString("circle"));
+        QVERIFY(desktopCircle->isChecked());
+        desktopCircle->click();
+        QVERIFY(desktopCircle->isChecked());
+        QCOMPARE(window.desktopAnnotations_->tool(), QString("circle"));
+        QVERIFY(!window.desktopAnnotations_->windowFlags().testFlag(Qt::WindowTransparentForInput));
+#ifdef Q_OS_WIN
+        const auto drawingHwnd = reinterpret_cast<HWND>(window.desktopAnnotations_->winId());
+        QVERIFY(!(GetWindowLongPtr(drawingHwnd, GWL_EXSTYLE) & WS_EX_TRANSPARENT));
+        RECT drawingRect{};
+        QVERIFY(GetWindowRect(drawingHwnd, &drawingRect));
+        const POINT drawingPoint{drawingRect.left + (drawingRect.right - drawingRect.left) / 4,
+            drawingRect.top + (drawingRect.bottom - drawingRect.top) / 4};
+        QTRY_COMPARE(WindowFromPoint(drawingPoint), drawingHwnd);
+        DWORD affinity = 0;
+        QVERIFY(GetWindowDisplayAffinity(drawingHwnd, &affinity));
+        QCOMPARE(affinity, DWORD(0x00000011));
+        DWORD buttonAffinity = 0;
+        const auto buttonHwnd = reinterpret_cast<HWND>(window.desktopAnnotationTools_->winId());
+        QVERIFY(GetWindowDisplayAffinity(buttonHwnd, &buttonAffinity));
+        QCOMPARE(buttonAffinity, DWORD(0x00000011));
+        RECT buttonRect{};
+        QVERIFY(GetWindowRect(buttonHwnd, &buttonRect));
+        const POINT buttonPoint{(buttonRect.left + buttonRect.right) / 2, (buttonRect.top + buttonRect.bottom) / 2};
+        QTRY_COMPARE(WindowFromPoint(buttonPoint), buttonHwnd);
+#endif
+        QVERIFY(window.desktopAnnotationTools_->isVisible());
+        auto *desktopLayer = window.desktopAnnotations_;
+        const QPoint desktopStart(desktopLayer->width() / 5, desktopLayer->height() / 5);
+        const QPoint desktopEnd(desktopLayer->width() * 2 / 5, desktopLayer->height() * 2 / 5);
+        QTest::mousePress(desktopLayer, Qt::LeftButton, Qt::NoModifier, desktopStart);
+        QTest::mouseMove(desktopLayer, desktopEnd);
+        QTest::mouseRelease(desktopLayer, Qt::LeftButton, Qt::NoModifier, desktopEnd);
+        QTRY_COMPARE(owner.annotations().size(), 2);
+        QTRY_COMPARE(late.annotations(), owner.annotations());
+        const auto desktopPoints = owner.annotations().last().toObject().value("points").toArray();
+        QVERIFY(qAbs(desktopPoints.first().toArray().first().toDouble() - 0.2) < 0.01);
+        QTest::mouseClick(desktopLayer, Qt::RightButton, Qt::NoModifier, desktopStart);
+        QCOMPARE(window.annotationTool_->currentIndex(), 0);
+        QVERIFY(window.desktopAnnotations_->windowFlags().testFlag(Qt::WindowTransparentForInput));
+#ifdef Q_OS_WIN
+        QVERIFY(GetWindowLongPtr(reinterpret_cast<HWND>(window.desktopAnnotations_->winId()), GWL_EXSTYLE) & WS_EX_TRANSPARENT);
+        QTRY_VERIFY(WindowFromPoint(drawingPoint) != reinterpret_cast<HWND>(window.desktopAnnotations_->winId()));
+#endif
+        QVERIFY(window.desktopAnnotationTools_->isVisible());
+        desktopArrow->click();
+        QCOMPARE(window.desktopAnnotations_->tool(), QString("arrow"));
+        desktopBrowse->click();
+        QCOMPARE(window.annotationTool_->currentIndex(), 0);
+        QVERIFY(window.desktopAnnotationTools_->isVisible());
         QVERIFY(owner.clearAnnotations(true));
         QTRY_VERIFY(late.annotations().isEmpty() && owner.annotations().isEmpty());
         QVERIFY(!window.desktopAnnotations_->isVisible());
+        QVERIFY(window.desktopAnnotationTools_->isVisible());
+        QTRY_VERIFY(!window.findChild<QMessageBox *>("annotationPermissionDialog"));
+        QVERIFY(late.requestAnnotationPermission());
+        QTRY_VERIFY(window.findChild<QMessageBox *>("annotationPermissionDialog"));
+        window.annotationTool_->setCurrentIndex(1);
+        QVERIFY(window.desktopAnnotationTools_->isVisible());
         owner.leave();
+        QTRY_VERIFY(!window.findChild<QMessageBox *>("annotationPermissionDialog"));
         QTRY_VERIFY(!late.canAnnotate() && !second.canAnnotate());
+        QVERIFY(!window.desktopAnnotationTools_->isVisible());
+        QVERIFY(!window.desktopAnnotations_->isVisible());
         QVERIFY(!window.annotationTool_->isEnabled());
     }
 
@@ -434,6 +548,13 @@ private slots:
             if (button->text() == QStringLiteral("视频会议")) { button->click(); break; }
         auto &session = window.session_;
         session.setConferenceAutoConnect(false);
+        if (owner)
+            connect(&session, &Session::annotationPermissionRequested, this, [&window] {
+                QTimer::singleShot(0, &window, [&window] {
+                    if (auto *dialog = window.findChild<QMessageBox *>("annotationPermissionDialog"))
+                        dialog->done(QMessageBox::Yes);
+                });
+            });
         int frames = 0;
         QImage latest;
         connect(&session, &Session::shareFrame, this, [&](const QImage &frame) {
@@ -446,6 +567,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(session.canAnnotate() && frames >= 5, 45000);
         auto *layer = window.meetingShareVideo_->annotationLayer();
         window.annotationTool_->setCurrentIndex(owner ? 2 : 3);
+        QTRY_VERIFY_WITH_TIMEOUT(session.canDrawAnnotation(), 15000);
         const auto start = QPoint(layer->width() / 5, layer->height() / 5);
         const auto end = QPoint(layer->width() * 4 / 5, layer->height() * 4 / 5);
         QTest::mousePress(layer, Qt::LeftButton, Qt::NoModifier, start);
@@ -1058,6 +1180,8 @@ private slots:
         for (auto *surface : surfaces + QList<VideoSurface *>{window.meetingShareVideo_})
         {
             auto *parent = surface->parentWidget();
+            const int headerHeight = surface == window.meetingShareVideo_
+                ? window.findChild<QWidget *>("stageHeader")->height() : 0;
             const auto normalSize = surface->size();
             auto *button = surface->findChild<QPushButton *>("expandFrameButton");
             QVERIFY(button && button->isVisible());
@@ -1067,13 +1191,13 @@ private slots:
             QCOMPARE(surface->parentWidget(), parent);
             QTRY_VERIFY(surface->width() > normalSize.width() && surface->height() > normalSize.height());
             QTRY_VERIFY(surface->width() >= window.width() - 40);
-            QTRY_VERIFY2(surface->height() >= window.height() - 40,
+            QTRY_VERIFY2(surface->height() >= window.height() - headerHeight - 40,
                 qPrintable(QString("%1 height %2 of %3").arg(surface->objectName()).arg(surface->height()).arg(window.height())));
             QVERIFY(button->isVisible());
             QCOMPARE(button->text(), QStringLiteral("缩小"));
             window.refreshMeetingParticipants();
             QTest::qWait(100);
-            QTRY_VERIFY2(surface->height() >= window.height() - 40,
+            QTRY_VERIFY2(surface->height() >= window.height() - headerHeight - 40,
                 qPrintable(QString("%1 height %2 of %3").arg(surface->objectName()).arg(surface->height()).arg(window.height())));
             for (auto *other : surfaces + QList<VideoSurface *>{window.meetingShareVideo_})
                 QCOMPARE(other->isVisible(), other == surface);

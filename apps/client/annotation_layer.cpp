@@ -11,7 +11,7 @@
 #include <windows.h>
 #endif
 
-AnnotationLayer::AnnotationLayer(QWidget *parent, bool desktop) : QWidget(parent)
+AnnotationLayer::AnnotationLayer(QWidget *parent, bool desktop) : QWidget(parent), desktop_(desktop)
 {
     setObjectName(desktop ? "desktopAnnotations" : "sharedScreenAnnotations");
     setAttribute(Qt::WA_NoSystemBackground);
@@ -56,9 +56,21 @@ void AnnotationLayer::cancelDraft()
 void AnnotationLayer::setTool(const QString &tool)
 {
     const auto next = tool == "pen" || tool == "circle" || tool == "arrow" ? tool : QString();
-    if (tool_ != next) cancelDraft();
+    setAttribute(Qt::WA_TransparentForMouseEvents, next.isEmpty());
+    if (tool_ != next)
+    {
+        cancelDraft();
+        if (desktop_ && tool_.isEmpty() != next.isEmpty())
+        {
+            const bool wasVisible = isVisible();
+            setWindowFlag(Qt::WindowTransparentForInput, next.isEmpty());
+#ifdef Q_OS_WIN
+            SetWindowDisplayAffinity(reinterpret_cast<HWND>(winId()), 0x00000011);
+#endif
+            if (wasVisible) show();
+        }
+    }
     tool_ = next;
-    setAttribute(Qt::WA_TransparentForMouseEvents, tool_.isEmpty());
     setCursor(tool_.isEmpty() ? Qt::ArrowCursor : Qt::CrossCursor);
 }
 
@@ -92,6 +104,12 @@ void AnnotationLayer::appendPoint(const QPointF &point)
 
 void AnnotationLayer::mousePressEvent(QMouseEvent *event)
 {
+    if (desktop_ && !tool_.isEmpty() && event->button() == Qt::RightButton)
+    {
+        emit drawingExitRequested();
+        event->accept();
+        return;
+    }
     if (tool_.isEmpty() || event->button() != Qt::LeftButton) return;
     cancelDraft();
     drawing_ = true;
@@ -138,6 +156,13 @@ void AnnotationLayer::hideEvent(QHideEvent *event)
 void AnnotationLayer::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
+    if (desktop_)
+    {
+        // Windows ignores fully transparent pixels during native mouse hit testing.
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.fillRect(rect(), tool_.isEmpty() ? QColor(0, 0, 0, 0) : QColor(0, 0, 0, 1));
+        painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    }
     painter.setRenderHint(QPainter::Antialiasing);
     // X11 already captures the owner's desktop layer; avoid drawing it twice.
     auto strokes = embedded_ ? QJsonArray() : strokes_;

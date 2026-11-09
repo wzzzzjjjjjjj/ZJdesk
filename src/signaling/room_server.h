@@ -8,6 +8,7 @@
 #include <QSettings>
 #include <QWebSocketServer>
 #include <QJsonArray>
+#include <QSet>
 
 class QWebSocket;
 
@@ -49,6 +50,7 @@ private:
         QString streamId, ownerId;
         QJsonArray strokes;
         bool annotationsInVideo = false;
+        QSet<QString> annotationRequests;
     };
     void acceptConnection();
     void receive(QWebSocket *socket, const QString &text);
@@ -67,6 +69,7 @@ private:
     QHash<QWebSocket *, Peer> peers_;
     QHash<QString, QList<QWebSocket *>> rooms_;
     QHash<QString, SharedScreen> sharedScreens_;
+    QHash<QString, QHash<QString, QSet<QString>>> annotationGrants_;
     QHash<QString, QWebSocket *> remoteCodes_;
     QSettings remoteRegistry_;
     QHash<QString, QString> reservedCodes_;

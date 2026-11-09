@@ -844,6 +844,33 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     meetingShareVideo_ = new VideoSurface;
     meetingShareVideo_->setObjectName("meetingShareVideo");
     desktopAnnotations_ = new AnnotationLayer(nullptr, true);
+    desktopAnnotationTools_ = new QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint
+        | Qt::WindowDoesNotAcceptFocus);
+    desktopAnnotationTools_->setObjectName("desktopAnnotationTools");
+    desktopAnnotationTools_->setAttribute(Qt::WA_ShowWithoutActivating);
+    auto *desktopToolsLayout = new QHBoxLayout(desktopAnnotationTools_);
+    desktopToolsLayout->setContentsMargins(4, 4, 4, 4);
+    desktopToolsLayout->setSpacing(4);
+    const QStringList desktopTools{QStringLiteral("浏览"), QStringLiteral("画笔"), QStringLiteral("圆圈"), QStringLiteral("箭头")};
+    for (int i = 0; i < desktopTools.size(); ++i)
+    {
+        auto *button = new QPushButton(desktopTools.at(i), desktopAnnotationTools_);
+        button->setObjectName(QStringLiteral("desktopAnnotationTool%1").arg(i));
+        button->setCheckable(true);
+        desktopToolsLayout->addWidget(button);
+        connect(button, &QPushButton::clicked, this, [this, i] {
+            if (annotationTool_->currentIndex() == i) refreshAnnotations();
+            else annotationTool_->setCurrentIndex(i);
+        });
+    }
+    desktopAnnotationTools_->setStyleSheet(QStringLiteral(
+        "QWidget#desktopAnnotationTools { background: #253646; border-radius: 6px; }"
+        "QPushButton { color: white; background: #394e61; border: 0; border-radius: 4px; padding: 5px 10px; }"
+        "QPushButton:checked { background: #2474e5; }"));
+    desktopAnnotationTools_->adjustSize();
+#ifdef Q_OS_WIN
+    SetWindowDisplayAffinity(reinterpret_cast<HWND>(desktopAnnotationTools_->winId()), 0x00000011);
+#endif
     meetingShareVideo_->setMinimumSize(300, 200);
     meetingShareVideo_->setParticipant(QStringLiteral("屏幕共享"), QStringLiteral("共享屏幕后，内容将在这里显示"));
     auto *tile = card();
@@ -951,16 +978,58 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     tileTitle->addWidget(annotationTool_);
     tileTitle->addWidget(clearAnnotations_);
     tileTitle->addWidget(clearAllAnnotations_);
-    connect(annotationTool_, &QComboBox::currentIndexChanged, this, &MainWindow::refreshAnnotations);
+    connect(annotationTool_, &QComboBox::currentIndexChanged, this, [this] {
+        if (!annotationTool_->currentData().toString().isEmpty() && !session_.canDrawAnnotation())
+            session_.requestAnnotationPermission();
+        refreshAnnotations();
+    });
     connect(clearAnnotations_, &QPushButton::clicked, this, [this] { session_.clearAnnotations(); });
     connect(clearAllAnnotations_, &QPushButton::clicked, this, [this] { session_.clearAnnotations(true); });
     connect(meetingShareVideo_->annotationLayer(), &AnnotationLayer::strokeReady,
         &session_, &zjdesk::SessionCoordinator::submitAnnotation);
+    connect(desktopAnnotations_, &AnnotationLayer::strokeReady, &session_, &zjdesk::SessionCoordinator::submitAnnotation);
+    connect(desktopAnnotations_, &AnnotationLayer::drawingExitRequested, this, [this] { annotationTool_->setCurrentIndex(0); });
     connect(meetingShareVideo_, &VideoSurface::frameAvailabilityChanged, this, &MainWindow::refreshAnnotations);
     connect(&session_, &zjdesk::SessionCoordinator::annotationsChanged, this, &MainWindow::refreshAnnotations);
+    connect(&session_, &zjdesk::SessionCoordinator::annotationPermissionResult, this, [this](bool approved) {
+        if (!approved)
+        {
+            const QSignalBlocker blocker(annotationTool_);
+            annotationTool_->setCurrentIndex(0);
+            shareLabel_->setText(session_.annotationDetail());
+        }
+    });
+    connect(&session_, &zjdesk::SessionCoordinator::annotationPermissionRequested, this,
+        [this](const QString &peerId, const QString &participantName, const QString &streamId) {
+            auto *dialog = new QMessageBox(QMessageBox::Question, QStringLiteral("画笔使用申请"),
+                QStringLiteral("%1 请求在共享画面上使用画笔，是否同意？").arg(participantName),
+                QMessageBox::Yes | QMessageBox::No, this);
+            dialog->setObjectName("annotationPermissionDialog");
+            dialog->setProperty("annotationPeerId", peerId);
+            dialog->setAttribute(Qt::WA_DeleteOnClose);
+            connect(dialog, &QMessageBox::finished, this, [this, dialog, peerId, streamId](int result) {
+                if (dialog->property("annotationCancelled").toBool()) return;
+                session_.respondAnnotationPermission(peerId, streamId, result == QMessageBox::Yes);
+            });
+            dialog->open();
+        });
+    const auto discardStaleAnnotationRequests = [this] {
+        for (auto *dialog : findChildren<QMessageBox *>("annotationPermissionDialog"))
+        {
+            if (session_.ownsSharedScreen() && session_.conferencePeers().contains(dialog->property("annotationPeerId").toString()))
+                continue;
+            dialog->setProperty("annotationCancelled", true);
+            dialog->reject();
+        }
+    };
+    connect(&session_, &zjdesk::SessionCoordinator::membersChanged, this, discardStaleAnnotationRequests);
+    connect(&session_, &zjdesk::SessionCoordinator::annotationsChanged, this, discardStaleAnnotationRequests);
     connect(&session_, &zjdesk::SessionCoordinator::annotationsCleared, this, [this](const QString &author) {
         if (author.isEmpty() || author == session_.annotationAuthor().value("authorId").toString())
+        {
             meetingShareVideo_->annotationLayer()->cancelDraft();
+            desktopAnnotations_->cancelDraft();
+        }
     });
     footerColumn->addLayout(meetingControls);
     meetingLayout->addWidget(controlsCard);
@@ -1256,6 +1325,7 @@ MainWindow::~MainWindow()
     // Session teardown emits frames and state changes after later-declared roster containers die.
     // Stop those UI callbacks while all MainWindow members are still alive.
     QObject::disconnect(&session_, nullptr, nullptr, nullptr);
+    delete desktopAnnotationTools_;
     delete desktopAnnotations_;
 }
 
@@ -1615,18 +1685,33 @@ void MainWindow::refreshAnnotations()
 {
     if (!annotationTool_) return;
     const bool active = session_.canAnnotate();
+    if (!active && annotationTool_->currentIndex() != 0)
+    {
+        const QSignalBlocker blocker(annotationTool_);
+        annotationTool_->setCurrentIndex(0);
+    }
     annotationTool_->setEnabled(active && meetingShareVideo_->hasFrame());
+    annotationTool_->setToolTip(session_.annotationRequestPending() ? QStringLiteral("等待共享者同意使用画笔")
+        : session_.annotationDetail());
+    if (active && (session_.annotationRequestPending() || session_.canDrawAnnotation()))
+        shareLabel_->setText(session_.annotationRequestPending() ? QStringLiteral("等待共享者同意使用画笔")
+            : session_.shareDetail());
     clearAnnotations_->setEnabled(active);
     clearAllAnnotations_->setVisible(session_.ownsSharedScreen());
     auto *layer = meetingShareVideo_->annotationLayer();
     layer->setAnnotationsInVideo(session_.annotationsInVideo());
     layer->setAnnotations(session_.annotations(), session_.annotationAuthor());
-    layer->setTool(annotationTool_->isEnabled() ? annotationTool_->currentData().toString() : QString());
-    if (!active) layer->cancelDraft();
+    layer->setTool(annotationTool_->isEnabled() && session_.canDrawAnnotation()
+        ? annotationTool_->currentData().toString() : QString());
+    if (!session_.canDrawAnnotation()) layer->cancelDraft();
     shareLabel_->setToolTip(session_.annotationDetail());
-    desktopAnnotations_->setAnnotations(session_.annotations());
-    const bool desktop = session_.isDesktopShare() && !session_.annotations().isEmpty();
-    if (desktop)
+    desktopAnnotations_->setAnnotations(session_.annotations(), session_.annotationAuthor());
+    const bool desktopDrawing = session_.isDesktopShare() && session_.canDrawAnnotation()
+        && annotationTool_->isEnabled() && !annotationTool_->currentData().toString().isEmpty();
+    desktopAnnotations_->setTool(desktopDrawing ? annotationTool_->currentData().toString() : QString());
+    const bool desktopSharing = session_.isDesktopShare();
+    const bool desktop = desktopSharing && (desktopDrawing || !session_.annotations().isEmpty());
+    if (desktopSharing)
     {
         auto geometry = QGuiApplication::primaryScreen()->geometry();
 #ifndef Q_OS_WIN
@@ -1634,8 +1719,15 @@ void MainWindow::refreshAnnotations()
         for (auto *screen : QGuiApplication::screens()) geometry = geometry.united(screen->geometry());
 #endif
         desktopAnnotations_->setGeometry(geometry);
+        desktopAnnotationTools_->move(geometry.right() - desktopAnnotationTools_->width() - 11, geometry.top() + 12);
     }
     desktopAnnotations_->setVisible(desktop);
+    desktopAnnotationTools_->setEnabled(annotationTool_->isEnabled());
+    for (int i = 0; i < 4; ++i)
+        desktopAnnotationTools_->findChild<QPushButton *>(QStringLiteral("desktopAnnotationTool%1").arg(i))
+            ->setChecked(annotationTool_->currentIndex() == i);
+    desktopAnnotationTools_->setVisible(desktopSharing);
+    if (desktopSharing) desktopAnnotationTools_->raise();
 }
 
 void MainWindow::expandVideo(bool expanded)
@@ -1707,7 +1799,9 @@ void MainWindow::refreshExpandedMeetingVideo()
     // Hidden camera tiles must not reserve their normal minimum height.
     for (auto *surface : QList<VideoSurface *>{meetingLocalVideo_} + meetingRemoteVideos_)
         surface->setMinimumHeight(0);
-    for (const auto &sibling : videoSiblingVisibility_) sibling.first->hide();
+    for (const auto &sibling : videoSiblingVisibility_)
+        if (expandedMeetingVideo_ != meetingShareVideo_ || sibling.first->objectName() != "stageHeader")
+            sibling.first->hide();
 }
 
 void MainWindow::restoreMeetingVideo()

@@ -65,6 +65,7 @@ void RoomServer::close()
     peers_.clear();
     rooms_.clear();
     sharedScreens_.clear();
+    annotationGrants_.clear();
     remoteCodes_.clear();
 }
 
@@ -190,9 +191,19 @@ void RoomServer::leave(QWebSocket *socket)
         return;
     }
     if (sharedScreens_.value(peer.room).ownerId == peer.id) stopSharedScreen(peer.room);
+    if (sharedScreens_.contains(peer.room))
+    {
+        sharedScreens_[peer.room].annotationRequests.remove(peer.id);
+    }
+    auto &grants = annotationGrants_[peer.room];
+    grants.remove(peer.id);
+    for (auto it = grants.begin(); it != grants.end(); ++it) it.value().remove(peer.id);
     rooms_[peer.room].removeAll(socket);
     if (rooms_[peer.room].isEmpty())
+    {
         rooms_.remove(peer.room);
+        annotationGrants_.remove(peer.room);
+    }
     peers_[socket].room.clear();
     for (auto *other : rooms_.value(peer.room))
         send(other, {"peer_left", {{"peerId", peer.id}}});
@@ -239,6 +250,36 @@ void RoomServer::receiveAnnotation(QWebSocket *socket, const QJsonObject &payloa
     if (!sharedScreens_.contains(peer.room) || sharedScreens_[peer.room].streamId != streamId)
         return error("inactive_stream");
     auto &shared = sharedScreens_[peer.room];
+    if (action == "request_permission")
+    {
+        if (peer.id == shared.ownerId) return;
+        if (annotationGrants_[peer.room][shared.ownerId].contains(peer.id))
+        {
+            send(socket, {"annotation", {{"action", "permission_result"}, {"streamId", streamId}, {"approved", true}}});
+            return;
+        }
+        if (shared.annotationRequests.contains(peer.id)) return;
+        shared.annotationRequests.insert(peer.id);
+        for (auto *member : rooms_.value(peer.room))
+            if (peers_.value(member).id == shared.ownerId)
+                send(member, {"annotation", {{"action", "permission_requested"}, {"streamId", streamId},
+                    {"peerId", peer.id}, {"name", peer.name}}});
+        return;
+    }
+    if (action == "permission_response")
+    {
+        if (peer.id != shared.ownerId) return error("not_share_owner");
+        const auto target = payload.value("peerId").toString();
+        if (!payload.value("approved").isBool() || !shared.annotationRequests.remove(target))
+            return error("invalid_permission_request");
+        const bool approved = payload.value("approved").toBool();
+        if (approved) annotationGrants_[peer.room][shared.ownerId].insert(target);
+        for (auto *member : rooms_.value(peer.room))
+            if (peers_.value(member).id == target)
+                send(member, {"annotation", {{"action", "permission_result"}, {"streamId", streamId},
+                    {"approved", approved}}});
+        return;
+    }
     if (action == "stop")
     {
         if (shared.ownerId != peer.id) return error("not_share_owner");
@@ -256,6 +297,8 @@ void RoomServer::receiveAnnotation(QWebSocket *socket, const QJsonObject &payloa
         broadcastAnnotation(peer.room, {{"action", "clear"}, {"streamId", streamId}, {"all", all}, {"authorId", peer.id}});
         return;
     }
+    if (action == "stroke" && peer.id != shared.ownerId && !annotationGrants_[peer.room][shared.ownerId].contains(peer.id))
+        return error("annotation_not_authorized");
     if (action != "stroke" || !protocol::isAnnotationStrokeValid(payload)) return error("invalid_stroke");
     qsizetype index = -1;
     for (qsizetype i = 0; i < shared.strokes.size(); ++i)

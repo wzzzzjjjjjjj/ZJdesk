@@ -105,6 +105,7 @@ private:
     QList<VideoSurface *> meetingRemoteVideos_;
     VideoSurface *meetingShareVideo_ = nullptr;
     AnnotationLayer *desktopAnnotations_ = nullptr;
+    QWidget *desktopAnnotationTools_ = nullptr;
     QComboBox *annotationTool_ = nullptr;
     QPushButton *clearAnnotations_ = nullptr;
     QPushButton *clearAllAnnotations_ = nullptr;

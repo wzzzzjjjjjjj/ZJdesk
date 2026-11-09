@@ -18,6 +18,7 @@ public:
 
 signals:
     void strokeReady(const QJsonObject &stroke);
+    void drawingExitRequested();
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -33,6 +34,7 @@ private:
     QTimer publish_;
     bool drawing_ = false;
     bool embedded_ = false;
+    bool desktop_ = false;
     QPointF normalized(const QPointF &point) const;
     void appendPoint(const QPointF &point);
 };
