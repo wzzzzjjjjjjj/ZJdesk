@@ -994,7 +994,8 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     connect(meetingShareVideo_, &VideoSurface::frameAvailabilityChanged, this, &MainWindow::refreshAnnotations);
     connect(&session_, &zjdesk::SessionCoordinator::annotationsChanged, this, &MainWindow::refreshAnnotations);
     connect(&session_, &zjdesk::SessionCoordinator::annotationPermissionResult, this, [this](bool approved) {
-        if (!approved)
+        const auto tool = annotationTool_->currentData().toString();
+        if (!approved && !tool.isEmpty() && tool != "control")
         {
             const QSignalBlocker blocker(annotationTool_);
             annotationTool_->setCurrentIndex(0);

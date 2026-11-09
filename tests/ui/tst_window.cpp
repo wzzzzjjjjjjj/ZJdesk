@@ -589,6 +589,14 @@ private slots:
         QVERIFY(!uiInput.isEmpty());
         QCOMPARE(uiInput.last().first().toJsonObject().value("kind").toString(), "release");
         QTRY_VERIFY(ownerWindow.findChild<QMessageBox *>("annotationPermissionDialog"));
+        viewerWindow.annotationTool_->setCurrentIndex(viewerWindow.annotationTool_->findData("control"));
+        ownerWindow.findChild<QMessageBox *>("annotationPermissionDialog")->done(QMessageBox::No);
+        QTRY_VERIFY(!first.annotationRequestPending());
+        QCOMPARE(viewerWindow.annotationTool_->currentData().toString(), "control");
+        QCOMPARE(first.remoteState(), Remote::Controlling);
+        QTRY_VERIFY(!ownerWindow.findChild<QMessageBox *>("annotationPermissionDialog"));
+        viewerWindow.annotationTool_->setCurrentIndex(1);
+        QTRY_VERIFY(ownerWindow.findChild<QMessageBox *>("annotationPermissionDialog"));
         ownerWindow.findChild<QMessageBox *>("annotationPermissionDialog")->done(QMessageBox::Yes);
         QTRY_VERIFY(first.canDrawAnnotation());
         const QJsonObject stroke{{"strokeId", "during-control"}, {"tool", "circle"},
