@@ -2,6 +2,7 @@
 /build/
 /dist/
 /output/
+/可执行程序/
 /cmake-build-*/
 
 # CMake / Ninja files from accidental in-source builds

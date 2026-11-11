@@ -1,5 +1,11 @@
 # ZJdesk 项目交接
 
+## 2026-11-11 打包入口：一键生成 EXE 与 AppImage
+
+新增根目录 `package-release.ps1` 和 `打包可执行程序.bat`。一次运行先打包 Windows 自解压 EXE，再通过 SSH 把当前源码同步到 Linux 构建机生成 AppImage，两端都成功后才替换 `可执行程序` 内的旧文件，每种产物只保留最新一份。AppImage 无法在 Windows 生成（依赖 `ldd`、`dpkg-query`、`mksquashfs` 和 appimagetool），appimagetool 与 type2 runtime 缓存在 `build/packaging-tools/` 并随每次打包上传远端。
+
+Windows 路径与完整路径实际运行均退出 0，生成 `ZJdesk-0.4.5-windows-x64.exe`（135,518,208 字节）和 `ZJdesk-0.4.5-linux-x86_64.AppImage`（61,221,368 字节）。AppImage 在构建机真实 X11 执行 `--version` 输出 `ZJdesk 0.4.5`、退出 0。新 EXE 未能在当前执行环境启动（创建进程被取消），不计为启动验证；未跑整机 / 媒体 / 双机远控回归。详见 [发布包说明](packaging.md)。
+
 ## 2026-11-11 合并 IPv4 输入与对端别名
 
 合并 `codex/ZJdesk-2` 时保留四段 IPv4 输入、最近地址筛选与当前分支的别名和自动线路切换。启动输入控件增加别名输入模式，下拉菜单同时列出已保存的别名，设置保存后同步刷新。回车验证继续由原有协调层处理。

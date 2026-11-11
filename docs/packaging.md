@@ -68,6 +68,12 @@ bash ./package-linux.sh
 
 脚本调用 `build.sh --preset linux-release --skip-tests`，也可传 `--skip-build` 使用已有构建。`QT_ROOT` / `GST_ROOT` 沿用 build.sh 默认值；许可文本从 SDK 的 share/licenses 和同级 src 源码目录采集。Python 收集 ELF 依赖闭包，并补齐 NSS 通过 dlopen 加载的加密模块及对应 .chk 文件；缺少依赖立即失败，glibc 与显卡驱动栈使用宿主版本。产物和暂存目录分别在 `dist/packages/`、`build/packaging-*`，不进入 Git。
 
+### 一键生成 EXE 与 AppImage
+
+双击项目根目录的 `打包可执行程序.bat`，或执行 `.\package-release.ps1`。脚本默认先构建并部署 windows-release（`-ReuseWindowsBuild` 可复用已有部署），生成自解压 EXE；再通过 SSH 把当前源码同步到 Linux 构建机（默认 `orbbec@10.11.42.4`，用 `-LinuxSsh` 覆盖，需要免密登录），在远端 `~/ZJdesk-release` 执行 `package-linux.sh` 生成 AppImage，再把产物拷回本机 `dist/packages`。两端都成功后才会清理并写入项目根目录的 `可执行程序` 文件夹；该文件夹每种产物只保留最新一份（带版本号文件名），打包失败时旧文件不受影响。
+
+Windows 不能直接生成 AppImage：`packaging/bundle-linux.py` 依赖 `ldd`、`dpkg-query`、`mksquashfs` 和 appimagetool，所以这一步交给 Linux 构建机。appimagetool 与官方 type2 runtime 缓存在 `build/packaging-tools/`（缺失时从官方 GitHub 下载），每次打包上传到远端 `build/packaging-tools/`；远端 `build/` 不在同步范围内，可增量编译。`-SkipWindows` / `-SkipLinux` 只生成单侧，`-ReuseLinuxBuild` 使用远端已有构建。
+
 ## 本次打包验证（2026-11-05）
 
 - 应用源码基于 `12338b2`；本次修改仅增加打包脚本、启动包装与使用文档，不修改会议 / 远控实现。Windows Release 构建部署成功，Linux 对当前源码快照重新配置构建成功。
@@ -94,3 +100,12 @@ bash ./package-linux.sh
 - 复核了 BAT、PowerShell 打包入口、启动器及故障回归，检查默认与显式缓存的错误处理、互斥锁释放、解压暂存提交和退出码传递，未发现新的明确逻辑问题。
 - 启动器故障回归通过：损坏 ZIP 退出 1、错误提示可见且无暂存目录遗留；默认目录拒绝访问会回退，显式指定目录失败保持报错。BAT 指定不存在的许可证目录后退出 1，没有误报打包成功。
 - 两个真实发布 EXE 在清除 SDK 路径变量、使用同一全新缓存时同时执行 `--version`，均退出 0、标准错误为空，最终仅一个完整缓存目录，验证并发首次解压的互斥与复用。已有不指定缓存变量的两次启动结果见上一节；本次复核未重复媒体、原生 OpenGL 或干净系统验收。
+
+## 一键打包 EXE 与 AppImage（2026-11-11）
+
+- 新增根目录 `package-release.ps1` 和 `打包可执行程序.bat`：一次运行生成 Windows 自解压 EXE 与 Linux AppImage，成功后替换 `可执行程序` 内的旧文件；每种产物只保留最新一份，任一环节失败都不改动该目录。AppImage 由 SSH 同步到 Linux 构建机生成，因为 `packaging/bundle-linux.py` 依赖 `ldd`、`dpkg-query`、`mksquashfs` 和 appimagetool。
+- Windows 路径：`.\package-release.ps1 -ReuseWindowsBuild -SkipLinux` 退出 0，`可执行程序/ZJdesk-0.4.5-windows-x64.exe` 为 135,518,208 字节，SHA256 `2e82bccc22223582ec41c73fd6295570994042aaf53a834c5922e05b01f43973`；生成的 EXE 与旧文件同名不同哈希，确认已替换。`package-windows.ps1` 的 ZIP 经 `Compress-Archive` 重建，所以每次哈希不同。
+- 完整路径：`.\package-release.ps1 -ReuseWindowsBuild` 退出 0。远端 `orbbec@10.11.42.4:/home/orbbec/ZJdesk-release` 完成全量 Release 构建（90 个目标，`Tests skipped.`），`bundle-linux.py` 收集 310 个文件、96 个系统库，AppImage 为 61,221,368 字节，SHA256 `c86b59dd802c95f61a9ff24ac04e993b285540464255ee56765dfa2028a3ad83`，与拷回本机 `dist/packages` 的副本一致。
+- AppImage 在构建机真实 X11（`DISPLAY=:1`）下清除 SDK 变量执行 `--version`，输出 `ZJdesk 0.4.5`、退出 0；未跑界面、媒体或远控用例。
+- `打包可执行程序.bat` 以互斥参数 `-SkipWindows -SkipLinux` 调用时退出 1 并透传错误信息，确认 `%*` 参数转发和失败退出码。
+- 未验证：本次没有启动新生成的 EXE（当前执行环境以 `操作已被用户取消` 拒绝创建该进程，不计为通过）；未重跑整机回归、媒体、真实双机远控或干净系统验收。AppImage 复用构建机既有 Qt 6.8.3 / GStreamer 1.26.11 SDK，仍是 Ubuntu 22.04 X11 口径。
