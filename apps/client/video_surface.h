@@ -34,6 +34,7 @@ public:
     AnnotationLayer *annotationLayer();
 
 signals:
+    void framePresented(quint64 frameId, qint64 monotonicNs);
     void remoteInput(const QJsonObject &input);
     void frameAvailabilityChanged();
     void expandRequested();

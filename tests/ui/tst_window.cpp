@@ -797,6 +797,37 @@ private slots:
         QCOMPARE(window.findChild<QLineEdit *>("meetingServerAddress")->text(), url);
     }
 
+    void startupNetworkSwitchesAddressFamily_data()
+    {
+        QTest::addColumn<QString>("startupUrl");
+        QTest::addColumn<QString>("previousUrl");
+        QTest::addColumn<QString>("peerAddress");
+        QTest::newRow("lan-to-tailscale") << QString() << "ws://10.42.0.9:8765" << "100.89.0.9";
+        QTest::newRow("tailscale-to-lan") << QString() << "ws://100.89.0.9:8765" << "10.42.0.9";
+        QTest::newRow("automatic-custom-port") << "ws://127.0.0.1:18765" << "ws://100.89.0.9:18765" << "10.42.0.9";
+        QTest::newRow("explicit-server") << "ws://192.0.2.10:18765" << "ws://192.0.2.10:18765" << "100.89.0.9";
+    }
+
+    void startupNetworkSwitchesAddressFamily()
+    {
+        QFETCH(QString, startupUrl);
+        QFETCH(QString, previousUrl);
+        QFETCH(QString, peerAddress);
+        MainWindow window(startupUrl, {}, "Network switch test");
+        window.enableNetworkSetup();
+        // A successful verification replaces the displayed URL with its resolved address.
+        window.serverEdit_->setText(previousUrl);
+        window.networkPeer_->setText(peerAddress);
+        window.verifyStartupPeer();
+        const auto configuration = window.networkSetup_.configuration();
+        QCOMPARE(configuration.peerAddress(), peerAddress);
+        const auto expected = startupUrl == "ws://192.0.2.10:18765" ? QUrl(startupUrl)
+            : QUrl(QString("ws://%1:%2").arg(configuration.linuxAddress)
+                .arg(QUrl(startupUrl).port(8765)));
+        QCOMPARE(configuration.serverUrl, expected);
+        window.networkSetup_.cancel();
+    }
+
     void startupNetworkCannotSkipVerification()
     {
         QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
@@ -3295,6 +3326,7 @@ sys.stdout.buffer.write(data)
     void presentationCountsSwapsAndIgnoresCursorOnlyRedraws()
     {
         VideoSurface surface;
+        QSignalSpy presented(&surface, &VideoSurface::framePresented);
         surface.resize(640, 480);
         surface.show();
         QVERIFY(QTest::qWaitForWindowExposed(&surface));
@@ -3303,12 +3335,16 @@ sys.stdout.buffer.write(data)
         surface.setFrame(frame);
         QCOMPARE(surface.presentedFrames(), quint64(0));
         QTRY_COMPARE(surface.presentedFrames(), quint64(1));
+        QCOMPARE(presented.size(), 1);
+        QCOMPARE(presented.first().at(0).toULongLong(), quint64(1));
+        QVERIFY(presented.first().at(1).toLongLong() > 0);
         for (int i = 0; i < 3; ++i)
         {
             surface.update();
             waitForPresentation(30);
         }
         QCOMPARE(surface.presentedFrames(), quint64(1));
+        QCOMPARE(presented.size(), 1);
         surface.setFrame(frame);
         QTRY_COMPARE(surface.presentedFrames(), quint64(2));
         QVERIFY(surface.takePresentationGapMaxMs() > 0);

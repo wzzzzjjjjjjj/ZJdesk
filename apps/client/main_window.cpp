@@ -1370,6 +1370,7 @@ void MainWindow::requestCameraPermission()
 void MainWindow::enableNetworkSetup()
 {
     if (networkPeer_) return;
+    networkServerOverride_ = QUrl(serverEdit_->text());
     remoteCodeLabel_->hide();
     normalWidgets_.removeAll(remoteCodeLabel_);
     // 启动校验模式不需要本机校验码，连同小标题与复制按钮一起收起，避免留下空行。
@@ -1491,7 +1492,7 @@ void MainWindow::verifyStartupPeer()
         networkStatus_->setToolTip(QStringLiteral("正在检查本机网卡、对端 ping 和共用服务"));
     }
     refreshSession();
-    networkSetup_.verifyPeer(networkPeer_->text().trimmed(), QUrl(serverEdit_->text()));
+    networkSetup_.verifyPeer(networkPeer_->text().trimmed(), networkServerOverride_);
 }
 
 void MainWindow::invalidateNetworkSetup()

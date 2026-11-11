@@ -8,6 +8,7 @@
 #include "session/session_coordinator.h"
 #include "media/share_quality.h"
 #include "media/congestion_budget.h"
+#include "media/test_frame_marker.h"
 #include <QFile>
 #include <QBuffer>
 #include <QScopeGuard>
@@ -22,6 +23,28 @@ class CoreTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void latencyFrameMarkerRejectsDamageAndPreservesEpoch()
+    {
+        QImage image(640, 480, QImage::Format_RGB888);
+        image.fill(Qt::gray);
+        QVERIFY(!zjdesk::TestFrameMarker::read(image));
+        for (quint32 sequence : {quint32(1), quint32(0x80000000), quint32(0xffffffff)})
+        {
+            zjdesk::TestFrameMarker::draw(image, {0xabcdef01, sequence});
+            const auto decoded = zjdesk::TestFrameMarker::read(image);
+            QVERIFY(decoded);
+            QCOMPARE(decoded->epoch, quint32(0xabcdef01));
+            QCOMPARE(decoded->sequence, sequence);
+        }
+        QPainter painter(&image);
+        painter.fillRect(0, 0, 8, 8, Qt::gray);
+        painter.end();
+        QVERIFY(!zjdesk::TestFrameMarker::read(image));
+        zjdesk::TestFrameMarker::draw(image, {0, 1});
+        QVERIFY(!zjdesk::TestFrameMarker::read(image));
+        QVERIFY(!zjdesk::TestFrameMarker::read(QImage(10, 10, QImage::Format_RGB32)));
+    }
+
     void annotationBoundsAndTools()
     {
         using namespace zjdesk::protocol;
