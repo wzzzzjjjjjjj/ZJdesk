@@ -166,7 +166,8 @@ case $zjdesk_listeners in '') ;; *) exit 20;; esac
     Remove-Item Env:ZJDESK_WEBRTC_MAX_BITRATE -ErrorAction SilentlyContinue
     # Keep the mutex through client creation, then release it before run.ps1 waits.
     $onClientStarted = { $lockStream.Dispose() }.GetNewClosure()
-    & (Join-Path $PSScriptRoot 'run.ps1') -Preset windows-release -ServerUrl "ws://${LinuxAddress}:8765" -OnClientStarted $onClientStarted
+    # A loopback URL lets startup verification resolve the currently entered Linux IP.
+    & (Join-Path $PSScriptRoot 'run.ps1') -Preset windows-release -ServerUrl 'ws://127.0.0.1:8765' -OnClientStarted $onClientStarted
 } catch {
     Write-Host $_ -ForegroundColor Red
     if ($env:ZJDESK_LAUNCH_DEBUG) {
