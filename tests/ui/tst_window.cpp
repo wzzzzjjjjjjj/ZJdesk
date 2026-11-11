@@ -3576,14 +3576,23 @@ sys.stdout.buffer.write(data)
     void screenShareFrameRates_data()
     {
         QTest::addColumn<int>("fps");
-        QTest::newRow("30fps") << 30;
-        QTest::newRow("60fps") << 60;
-        QTest::newRow("auto") << 0;
+        QTest::addColumn<bool>("wideArea");
+        QTest::newRow("30fps") << 30 << false;
+        QTest::newRow("60fps") << 60 << false;
+        QTest::newRow("auto") << 0 << false;
+        QTest::newRow("wan-30fps") << 0 << true;
     }
 
     void screenShareFrameRates()
     {
         QFETCH(int, fps);
+        QFETCH(bool, wideArea);
+        const auto previousWan = qgetenv("ZJDESK_SHARE_WAN");
+        const auto restoreWan = qScopeGuard([previousWan] {
+            if (previousWan.isNull()) qunsetenv("ZJDESK_SHARE_WAN");
+            else qputenv("ZJDESK_SHARE_WAN", previousWan);
+        });
+        if (wideArea) qputenv("ZJDESK_SHARE_WAN", "1");
         zjdesk::RoomServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
         zjdesk::SessionCoordinator sender, receiver;
@@ -3595,6 +3604,7 @@ sys.stdout.buffer.write(data)
         marker.move(QGuiApplication::primaryScreen()->geometry().topLeft());
         VideoSurface surface;
         surface.resize(700, 400);
+        if (wideArea) surface.setWindowFlag(Qt::WindowStaysOnTopHint);
         surface.move(marker.pos() + QPoint(930, 50));
         marker.show();
         surface.show();
@@ -3604,7 +3614,8 @@ sys.stdout.buffer.write(data)
         QVERIFY(sender.join(url, "fps", "Sender"));
         QVERIFY(receiver.join(url, "fps", "Receiver"));
         QTRY_COMPARE(sender.memberCount(), 2);
-        QVERIFY(sender.startScreenShare("desktop", fps));
+        // The WAN row can animate its HD source on an inactive native desktop.
+        QVERIFY(sender.startScreenShare(wideArea ? "test-hd" : "desktop", fps));
         using Preview = zjdesk::SessionCoordinator::PreviewState;
         QTRY_VERIFY_WITH_TIMEOUT(receiver.shareState() == Preview::Running
             || receiver.shareState() == Preview::Failed, 20000);
@@ -3641,16 +3652,25 @@ sys.stdout.buffer.write(data)
         const auto stats = receiver.shareStats();
         QVERIFY(sampleSeconds >= 8);
         const double receivedFps = receivedFrames / sampleSeconds;
-        QJsonObject report{{"targetFps", fps}, {"width", stats.size.width()}, {"height", stats.size.height()},
+        QJsonObject report{{"targetFps", fps}, {"syntheticSource", wideArea},
+            {"width", stats.size.width()}, {"height", stats.size.height()},
             {"receivedFps", receivedFps}, {"deliveredFps", deliveredFrames / sampleSeconds},
             {"selectedFps", stats.targetFps}, {"encodedFps", encodedFrames / encodedSeconds},
             {"presentedFps", presentedFps}, {"processCpuPercent", cpuPercent},
+            {"senderDiagnostics", sender.shareStats().timingDiagnostics()},
+            {"receiverDiagnostics", stats.timingDiagnostics()},
             {"seconds", seconds}, {"samples", samples}};
         QVERIFY(QDir().mkpath("output"));
-        QFile result(QString("output/share-%1fps.json").arg(fps));
+        QFile result(wideArea ? QString("output/share-wan-30fps.json") : QString("output/share-%1fps.json").arg(fps));
         QVERIFY(result.open(QIODevice::WriteOnly));
         result.write(QJsonDocument(report).toJson());
         qInfo().noquote() << QJsonDocument(report).toJson(QJsonDocument::Compact);
+        if (wideArea)
+        {
+            QCOMPARE(stats.size, QSize(1920, 1080));
+            QCOMPARE(stats.targetFps, 30);
+            QVERIFY2(presentedFps >= 27, qPrintable(QString::number(presentedFps)));
+        }
         QVERIFY(receivedFps > 5);
         QVERIFY(presentedFps > 5);
         if (fps == 0)

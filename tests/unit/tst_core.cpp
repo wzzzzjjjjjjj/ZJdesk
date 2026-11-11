@@ -398,11 +398,11 @@ private slots:
 
     void lowBandwidthQualityCapsAndRecoversWithinBudget()
     {
-        zjdesk::ShareQuality quality(QSize(3840, 2160), 144, 24, true);
+        zjdesk::ShareQuality quality(QSize(3840, 2160), 144, 24, zjdesk::ShareQuality::Mode::LowBandwidth);
         QCOMPARE(quality.profile().size, QSize(960, 540));
         QCOMPARE(quality.profile().fps, 15);
         QCOMPARE(quality.profile().bitrate(), 800000);
-        for (int i = 0; i < 60; ++i) quality.observeNetwork(-1, -1, 100);
+        for (int i = 0; i < 60; ++i) quality.observeNetwork(-1, -1, 300);
         QCOMPARE(quality.profile().bitrate(), 128000);
         for (int i = 0; i < 300; ++i) quality.observeNetwork(-1, -1, 0);
         QCOMPARE(quality.profile().bitrate(), 800000);
@@ -413,8 +413,58 @@ private slots:
         QVERIFY(quality.profile().size.width() <= 960);
         QVERIFY(quality.profile().fps <= 15);
         QVERIFY(quality.profile().bitrate() <= 800000);
-        zjdesk::ShareQuality small(QSize(320, 240), 60, 24, true);
+        zjdesk::ShareQuality small(QSize(320, 240), 60, 24, zjdesk::ShareQuality::Mode::LowBandwidth);
         QCOMPARE(small.profile().size, QSize(320, 240));
+    }
+
+    void wideAreaQualityTargets1080p30AndRecovers()
+    {
+        using Mode = zjdesk::ShareQuality::Mode;
+        zjdesk::ShareQuality quality(QSize(3840, 2160), 144, 24, Mode::WideArea);
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        QCOMPARE(quality.profile().fps, 30);
+        const int bitrate = quality.profile().bitrate();
+        QVERIFY(bitrate >= 4000000 && bitrate <= 12000000);
+        for (int i = 0; i < 100; ++i) quality.observeNetwork(-1, -1, 300);
+        QCOMPARE(quality.profile().bitrate(), 128000);
+        for (int i = 0; i < 900; ++i) quality.observeNetwork(-1, -1, 0);
+        QCOMPARE(quality.profile().bitrate(), bitrate);
+        QVERIFY(!quality.observe(1, 1));
+        QVERIFY(quality.observe(1, 1));
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        QCOMPARE(quality.profile().fps, 24);
+        QVERIFY(!quality.observe(1, 1));
+        QVERIFY(quality.observe(1, 1));
+        QCOMPARE(quality.profile().size, QSize(1600, 900));
+        for (int i = 0; i < 60; ++i) quality.observe(0, 0);
+        QCOMPARE(quality.profile().size, QSize(640, 360));
+        QCOMPARE(quality.profile().fps, 5);
+        for (int i = 0; i < 900; ++i) quality.observe(30, 30);
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        QCOMPARE(quality.profile().fps, 30);
+        zjdesk::ShareQuality small(QSize(320, 240), 15, 24, Mode::WideArea);
+        QCOMPARE(small.profile().size, QSize(320, 240));
+        QCOMPARE(small.profile().fps, 15);
+        zjdesk::ShareQuality portrait(QSize(1080, 1920), 60, 24, Mode::WideArea);
+        QCOMPARE(portrait.profile().size, QSize(606, 1080));
+    }
+
+    void wideAreaBudgetStartsConservativelyAndHonorsExplicitCap()
+    {
+        const auto budget = zjdesk::CongestionBudget::fromMaximum({}, 4147200, true);
+        QVERIFY(budget);
+        QCOMPARE(budget->minimum, 128000);
+        QCOMPARE(budget->initial, 4000000);
+        QCOMPARE(budget->maximum, 12000000);
+        for (const auto &value : {"128000", "512000", "8000000", "40000000"})
+        {
+            const auto capped = zjdesk::CongestionBudget::fromMaximum(value, 4147200, true);
+            QVERIFY(capped);
+            QCOMPARE(capped->minimum, 128000);
+            QCOMPARE(capped->maximum, QString(value).toInt());
+            QCOMPARE(capped->initial, qMin(4000000, capped->maximum));
+        }
+        QVERIFY(!zjdesk::CongestionBudget::fromMaximum("invalid", 4147200, true));
     }
 
     void shareQualityPreservesResolutionAndAvoidsOscillation()
@@ -423,9 +473,8 @@ private slots:
         QCOMPARE(quality.profile().size, QSize(3840, 2160));
         QCOMPARE(quality.profile().fps, 60);
         QVERIFY(!quality.observe(60, 60));
-        QVERIFY(!quality.observe(60, 20));
-        QVERIFY(!quality.observe(60, 60));
-        QVERIFY(!quality.observe(60, 20));
+        for (int i = 0; i < 3; ++i)
+            QVERIFY(!quality.observe(60, 20));
         QVERIFY(quality.observe(60, 20));
         QCOMPARE(quality.profile().fps, 50);
         QCOMPARE(quality.profile().size, QSize(3840, 2160));
@@ -440,7 +489,7 @@ private slots:
         QVERIFY(quality.observe(1, 1));
         QCOMPARE(quality.profile().size, QSize(1920, 1080));
         QCOMPARE(quality.profile().fps, 60);
-        for (int i = 0; i < 29; ++i)
+        for (int i = 0; i < 14; ++i)
             QVERIFY(!quality.observe(60, 60));
         QVERIFY(quality.observe(60, 60));
         QCOMPARE(quality.profile().size, QSize(3840, 2160));
@@ -464,11 +513,11 @@ private slots:
         QVERIFY(!quality.observe(1, 1));
         QVERIFY(quality.observe(1, 1));
         QCOMPARE(quality.profile().size, QSize(1600, 900));
-        for (int i = 0; i < 29; ++i) QVERIFY(!quality.observe(60, 60));
+        for (int i = 0; i < 14; ++i) QVERIFY(!quality.observe(60, 60));
         QVERIFY(quality.observe(60, 60));
         QCOMPARE(quality.profile().size, QSize(1920, 1080));
         QCOMPARE(quality.profile().fps, 15);
-        for (int i = 0; i < 29; ++i) QVERIFY(!quality.observe(15, 15));
+        for (int i = 0; i < 14; ++i) QVERIFY(!quality.observe(15, 15));
         QVERIFY(quality.observe(15, 15));
         QCOMPARE(quality.profile().fps, 20);
     }
@@ -480,7 +529,7 @@ private slots:
             quality.observe(1, 1);
         QCOMPARE(quality.profile().size, QSize(1280, 720));
         QCOMPARE(quality.profile().fps, zjdesk::ShareQuality::MinimumFps);
-        for (int i = 0; i < 29; ++i)
+        for (int i = 0; i < 14; ++i)
             QVERIFY(!quality.observe(24, 24));
         QVERIFY(quality.observe(24, 24));
         QCOMPARE(quality.profile().size, QSize(1600, 900));
@@ -517,7 +566,8 @@ private slots:
     {
         zjdesk::ShareQuality quality(QSize(2560, 1440), 144);
         QCOMPARE(quality.profile().fps, 144);
-        QVERIFY(!quality.observe(144, 55));
+        for (int i = 0; i < 3; ++i)
+            QVERIFY(!quality.observe(144, 55));
         QVERIFY(quality.observe(144, 55));
         QCOMPARE(quality.profile().fps, 120);
         QCOMPARE(quality.profile().size, QSize(2560, 1440));
@@ -528,8 +578,8 @@ private slots:
     void shareQualityChangesOnlyOneFrameRateStep()
     {
         zjdesk::ShareQuality quality(QSize(1920, 1080));
-        QVERIFY(!quality.observe(60, 45));
-        QVERIFY(quality.observe(60, 35));
+        for (int i = 0; i < 3; ++i) QVERIFY(!quality.observe(60, 45));
+        QVERIFY(quality.observe(60, 45));
         QCOMPARE(quality.profile().fps, 50);
         QCOMPARE(quality.profile().size, QSize(1920, 1080));
     }
@@ -541,7 +591,7 @@ private slots:
             quality.observe(1, 1);
         QCOMPARE(quality.profile().size, QSize(1600, 900));
         QCOMPARE(quality.profile().fps, 60);
-        for (int i = 0; i < 29; ++i)
+        for (int i = 0; i < 14; ++i)
             QVERIFY(!quality.observe(52, 52));
         QVERIFY(quality.observe(52, 52));
         QCOMPARE(quality.profile().size, QSize(1920, 1080));
@@ -591,14 +641,15 @@ private slots:
     {
         zjdesk::ShareQuality quality(QSize(1920, 1080));
         const int initial = quality.profile().bitrate();
-        QVERIFY(!quality.observeNetwork(1000, 0, 100));
-        QVERIFY(quality.observeNetwork(2000, 0, 100));
+        QVERIFY(!quality.observeNetwork(1000, 0, 300));
+        QVERIFY(!quality.observeNetwork(2000, 0, 300));
+        QVERIFY(quality.observeNetwork(3000, 0, 300));
         QCOMPARE(quality.profile().bitrate(), initial * 85 / 100);
         QCOMPARE(quality.profile().size, QSize(1920, 1080));
         QCOMPARE(quality.profile().fps, 60);
         const int reduced = quality.profile().bitrate();
         for (int i = 1; i <= 20; ++i)
-            QVERIFY(!quality.observeNetwork(2000 + i * 1000, 0, 40));
+            QVERIFY(!quality.observeNetwork(2000 + i * 1000, 0, 100));
         QCOMPARE(quality.profile().bitrate(), reduced);
         for (int i = 1; i <= 14; ++i)
             QVERIFY(!quality.observeNetwork(22000 + i * 1000, 0, 10));
@@ -613,8 +664,9 @@ private slots:
         for (double delay : {100., 10., 100., -1., 100., 10.})
             QVERIFY(!quality.observeNetwork(-1, -1, delay));
         QCOMPARE(quality.profile().bitrate(), initial);
-        QVERIFY(!quality.observeNetwork(-1, -1, 100));
-        QVERIFY(quality.observeNetwork(-1, -1, 100));
+        QVERIFY(!quality.observeNetwork(-1, -1, 300));
+        QVERIFY(!quality.observeNetwork(-1, -1, 300));
+        QVERIFY(quality.observeNetwork(-1, -1, 300));
         QCOMPARE(quality.profile().bitrate(), initial * 85 / 100);
         for (int i = 0; i < 15; ++i)
             quality.observeNetwork(-1, -1, 10);
@@ -629,12 +681,12 @@ private slots:
         QCOMPARE(quality.profile().fps, 50);
         for (int i = 0; i < 30; ++i)
         {
-            quality.observeNetwork(-1, -1, 40);
+            quality.observeNetwork(-1, -1, 100);
             QVERIFY(!quality.observe(50, 50));
         }
         QCOMPARE(quality.profile().fps, 50);
         quality.observeNetwork(-1, -1, -1);
-        for (int i = 0; i < 29; ++i)
+        for (int i = 0; i < 14; ++i)
             QVERIFY(!quality.observe(50, 50));
         QVERIFY(quality.observe(50, 50));
         QCOMPARE(quality.profile().fps, 60);

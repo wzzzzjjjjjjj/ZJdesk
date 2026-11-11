@@ -191,6 +191,7 @@ void NetworkSetup::probeServer()
             return;
         }
         qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", configuration_.localAddress().toUtf8());
+        qputenv("ZJDESK_WEBRTC_PEER_ADDRESS", configuration_.peerAddress().toUtf8());
         complete(true, QStringLiteral("本机地址、对端 ping 和信令 WebSocket 验证通过。实际远控、音视频仍需两端防火墙允许 WebRTC 动态端口。"));
     });
     connect(socket_, &QWebSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {

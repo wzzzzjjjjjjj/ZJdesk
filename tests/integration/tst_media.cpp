@@ -1068,10 +1068,10 @@ private slots:
         connect(&slowDisplay, &QTimer::timeout, &receiver,
             [&receiver] { receiver.reportSharePresentation(0); });
         slowDisplay.start(1000);
-        QTRY_COMPARE_WITH_TIMEOUT(sender.shareStats().targetFps, 24, 45000);
+        QTRY_COMPARE_WITH_TIMEOUT(sender.shareStats().targetFps, 24, 60000);
         QTRY_COMPARE(receiver.shareStats().targetFps, 24);
         QCOMPARE(lastFrameSize, QSize(640, 480));
-        QTRY_VERIFY_WITH_TIMEOUT(lastFrameSize == QSize(480, 360), 30000);
+        QTRY_VERIFY_WITH_TIMEOUT(lastFrameSize == QSize(480, 360), 45000);
         QCOMPARE(sender.shareState(), Preview::Running);
         QCOMPARE(receiver.shareState(), Preview::Running);
         QVERIFY(sender.screenActive());

@@ -8,18 +8,19 @@ int ShareQuality::compatibleMaximumFps(int sourceFps, int receiverFps)
     return receiverFps >= 5 && receiverFps <= 240 ? qMin(source, receiverFps) : source;
 }
 
-ShareQuality::ShareQuality(const QSize &nativeSize, int maximumFps, int minimumFps, bool lowBandwidth)
+ShareQuality::ShareQuality(const QSize &nativeSize, int maximumFps, int minimumFps, Mode mode)
 {
     auto native = nativeSize.isEmpty() ? QSize(1920, 1080) : nativeSize;
     maximumFps = maximumFps > 0 ? qBound(5, maximumFps, 240) : 60;
-    if (lowBandwidth)
+    if (mode != Mode::Local)
     {
-        native = native.scaled(QSize(960, 540), Qt::KeepAspectRatio).boundedTo(native);
+        const bool conservative = mode == Mode::LowBandwidth;
+        native = native.scaled(conservative ? QSize(960, 540) : QSize(1920, 1080), Qt::KeepAspectRatio).boundedTo(native);
         native = {qMax(2, native.width() / 2 * 2), qMax(2, native.height() / 2 * 2)};
-        maximumFps = qMin(maximumFps, 15);
-        minimumFps = 5;
+        maximumFps = qMin(maximumFps, conservative ? 15 : 30);
+        if (conservative) minimumFps = 5;
         minimumBitrate_ = 128000;
-        maximumBitrate_ = 800000;
+        maximumBitrate_ = conservative ? 800000 : 12000000;
     }
     minimumFps = qBound(5, minimumFps, maximumFps);
     QList<int> frameRates;
@@ -60,15 +61,21 @@ bool ShareQuality::observe(double encodedFps, double receivedFps)
 {
     const int fps = profile().fps;
     const double actual = receivedFps < 0 ? encodedFps : qMin(encodedFps, receivedFps);
-    slowWindows_ = actual < fps * 0.85 ? slowWindows_ + 1 : 0;
+    const bool starved = actual < fps * 0.85;
+    slowWindows_ = starved ? slowWindows_ + 1 : 0;
+    // 编码端跟不上说明当前档位确实过高，两次测量即可确认；编码正常而接收帧率
+    // 掉下去多半是链路或接收端的一次抖动（跨网实测出现过 0.4~0.7 秒的停顿，
+    // 最多占掉两个统计窗口），缩短尺寸并不能消除它，所以要求连续四个窗口才降档，
+    // 避免一次抖动把整场会话永久降级。
+    const bool encoderStarved = starved && encodedFps < fps * 0.85;
     int higherResolution = index_ - 1;
     while (higherResolution >= 0 && profiles_.at(higherResolution).size == profile().size)
         --higherResolution;
-    stableWindows_ = excessDelayMs_ < 30 && actual >= fps * (higherResolution >= 0 ? 0.85 : 0.95)
+    stableWindows_ = excessDelayMs_ < 60 && actual >= fps * (higherResolution >= 0 ? 0.85 : 0.95)
         ? stableWindows_ + 1 : 0;
-    if (slowWindows_ >= 2 && index_ + 1 < profiles_.size())
+    if (slowWindows_ >= (encoderStarved ? 2 : 4) && index_ + 1 < profiles_.size())
         ++index_;
-    else if (stableWindows_ >= 30 && index_ > 0)
+    else if (stableWindows_ >= 15 && index_ > 0)
         index_ = higherResolution >= 0 ? higherResolution : index_ - 1;
     else
         return false;
@@ -79,7 +86,9 @@ bool ShareQuality::observe(double encodedFps, double receivedFps)
 bool ShareQuality::observeNetwork(qint64 receivedPackets, qint64 lostPackets, double excessDelayMs)
 {
     excessDelayMs_ = excessDelayMs;
-    delayedWindows_ = excessDelayMs >= 80 ? delayedWindows_ + 1 : 0;
+    // 数据通道往返时延的基线抖动本身就有几十到一两百毫秒，单窗口 80 毫秒的
+    // 尖峰不足以说明链路拥塞；要求 250 毫秒以上且连续三个窗口才降码率。
+    delayedWindows_ = excessDelayMs >= 250 ? delayedWindows_ + 1 : 0;
     double loss = -1;
     if (receivedPackets >= 0 && lostPackets >= 0)
     {
@@ -93,10 +102,10 @@ bool ShareQuality::observeNetwork(qint64 receivedPackets, qint64 lostPackets, do
     }
     congestedWindows_ = loss >= 0.02 ? congestedWindows_ + 1 : 0;
     const bool healthy = loss >= 0 ? loss < 0.005 : excessDelayMs >= 0;
-    healthyNetworkWindows_ = healthy && excessDelayMs <= 20 ? healthyNetworkWindows_ + 1 : 0;
+    healthyNetworkWindows_ = healthy && excessDelayMs <= 60 ? healthyNetworkWindows_ + 1 : 0;
     const int current = profile().bitrate();
     int next = current;
-    if (congestedWindows_ >= 2 || delayedWindows_ >= 2)
+    if (congestedWindows_ >= 2 || delayedWindows_ >= 3)
         next = qMax(minimumBitrate_, current * 85 / 100);
     else if (healthyNetworkWindows_ >= 15 && bitrateLimit_ > 0)
         next = qMin(qMin(profiles_.at(index_).bitrate(), maximumBitrate_), current + qMax(100000, current / 20));

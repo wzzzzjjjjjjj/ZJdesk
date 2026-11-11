@@ -40,19 +40,33 @@ function Start-DemoProcess([string]$Executable, [string[]]$Arguments, [bool]$Bac
     $startInfo.WorkingDirectory = $binaryRoot
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $Background
-    $startInfo.EnvironmentVariables['PATH'] = "$QtRoot\bin;" + $env:PATH
-    $startInfo.EnvironmentVariables['QT_PLUGIN_PATH'] = "$QtRoot\plugins"
-    if ($GstRoot) {
-        $startInfo.EnvironmentVariables['PATH'] = "$GstRoot\bin;" + $startInfo.EnvironmentVariables['PATH']
-        $startInfo.EnvironmentVariables['GST_PLUGIN_SYSTEM_PATH_1_0'] = "$GstRoot\lib\gstreamer-1.0"
-        $startInfo.EnvironmentVariables['GST_PLUGIN_PATH_1_0'] = ''
-        $startInfo.EnvironmentVariables['GST_PLUGIN_SCANNER'] = "$GstRoot\libexec\gstreamer-1.0\gst-plugin-scanner.exe"
-        $startInfo.EnvironmentVariables['GST_REGISTRY_1_0'] = Join-Path $PSScriptRoot "build\gst-registry-$Preset.bin"
-    }
     $startInfo.Arguments = ($Arguments | ForEach-Object {
         '"' + ([regex]::Replace($_, '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
     }) -join ' '
-    [System.Diagnostics.Process]::Start($startInfo)
+    # Windows PowerShell 5.1 returns a null ProcessStartInfo.EnvironmentVariables block, so
+    # scope the child environment through this process instead and restore it right after Start.
+    $savedEnvironment = @{}
+    foreach ($name in @('PATH', 'QT_PLUGIN_PATH', 'GST_PLUGIN_SYSTEM_PATH_1_0', 'GST_PLUGIN_PATH_1_0',
+            'GST_PLUGIN_SCANNER', 'GST_REGISTRY_1_0')) {
+        $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
+    }
+    try {
+        $childPath = "$QtRoot\bin;" + $savedEnvironment['PATH']
+        if ($GstRoot) { $childPath = "$GstRoot\bin;" + $childPath }
+        [Environment]::SetEnvironmentVariable('PATH', $childPath)
+        [Environment]::SetEnvironmentVariable('QT_PLUGIN_PATH', "$QtRoot\plugins")
+        if ($GstRoot) {
+            [Environment]::SetEnvironmentVariable('GST_PLUGIN_SYSTEM_PATH_1_0', "$GstRoot\lib\gstreamer-1.0")
+            [Environment]::SetEnvironmentVariable('GST_PLUGIN_PATH_1_0', '')
+            [Environment]::SetEnvironmentVariable('GST_PLUGIN_SCANNER', "$GstRoot\libexec\gstreamer-1.0\gst-plugin-scanner.exe")
+            [Environment]::SetEnvironmentVariable('GST_REGISTRY_1_0', (Join-Path $PSScriptRoot "build\gst-registry-$Preset.bin"))
+        }
+        [System.Diagnostics.Process]::Start($startInfo)
+    } finally {
+        foreach ($name in $savedEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name])
+        }
+    }
 }
 $demoServer = $null
 $demoClient = $null

@@ -19,15 +19,17 @@ struct ShareProfile
 };
 
 // 尺寸优先：原分辨率内先降帧率，但帧率不低于 MinimumFps；只有到下限之后才缩小尺寸。
-// 每次只切换一档，并要求连续两次测量确认，避免一次跳到底或来回抖动。
+// 每次只切换一档；编码端跟不上时连续两次测量即确认，接收端掉帧（链路抖动）则要求
+// 连续四个统计窗口，避免一次传输停顿被当成长期能力不足而永久降档。
 class ShareQuality
 {
 public:
+    enum class Mode { Local, WideArea, LowBandwidth };
     // 远控手感下限：达到它之后改为降低尺寸，而不是继续降到个位数帧率。
     static constexpr int MinimumFps = 24;
     static int compatibleMaximumFps(int sourceFps, int receiverFps = 0);
     explicit ShareQuality(const QSize &nativeSize = {}, int maximumFps = 60, int minimumFps = MinimumFps,
-        bool lowBandwidth = false);
+        Mode mode = Mode::Local);
     ShareProfile profile() const
     {
         auto result = profiles_.at(index_);

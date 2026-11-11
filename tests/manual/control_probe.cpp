@@ -1,8 +1,10 @@
 #include "session/network_setup.h"
 #include "session/session_coordinator.h"
+#include "video_surface.h"
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QCursor>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonDocument>
 #include <QMouseEvent>
@@ -16,6 +18,7 @@ class InputTarget final : public QWidget
 {
 public:
     int moves = 0, presses = 0, releases = 0;
+    int animationFrame = 0;
 protected:
     void mouseMoveEvent(QMouseEvent *) override { ++moves; }
     void mousePressEvent(QMouseEvent *) override { ++presses; update(); }
@@ -24,6 +27,7 @@ protected:
     {
         QPainter painter(this);
         painter.fillRect(rect(), presses ? QColor("#16804a") : QColor("#245b96"));
+        painter.fillRect((animationFrame * 7) % width(), 0, 24, height(), QColor("#d98426"));
         painter.setPen(Qt::white);
         painter.drawText(rect(), Qt::AlignCenter,
             QString("ZJdesk remote input test\npresses=%1 releases=%2").arg(presses).arg(releases));
@@ -39,6 +43,9 @@ int main(int argc, char **argv)
         {"listen", "Start signaling service locally."},
         {"server", "Signaling URL.", "url"}, {"peer", "Other computer IPv4.", "ip"},
         {"output", "JSON lines report.", "path"},
+        {"present", "Render received frames with the client OpenGL surface."},
+        {"animate", "Animate the host test window at 30 FPS."},
+        {"media-only", "Skip the host test window and remote input."},
         {"seconds", "Test duration.", "seconds", "45"}});
     parser.process(app);
     QFile output(parser.value("output"));
@@ -49,10 +56,22 @@ int main(int argc, char **argv)
         output.flush();
     };
     const bool host = parser.isSet("host");
+    const bool mediaOnly = parser.isSet("media-only");
+    const bool present = !host && parser.isSet("present");
+    VideoSurface surface;
+    if (present)
+    {
+        surface.setWindowFlag(Qt::WindowStaysOnTopHint);
+        surface.setAttribute(Qt::WA_ShowWithoutActivating);
+        surface.resize(960, 540);
+        surface.show();
+    }
     const QUrl server(parser.value("server"));
     const auto savedCursor = QCursor::pos();
     InputTarget target;
-    if (host)
+    QTimer animation;
+    QObject::connect(&animation, &QTimer::timeout, &target, [&] { ++target.animationFrame; target.update(); });
+    if (host && !mediaOnly)
     {
         target.setWindowTitle("ZJdesk remote input test");
         target.setWindowFlag(Qt::WindowStaysOnTopHint);
@@ -61,10 +80,14 @@ int main(int argc, char **argv)
         target.resize(400, 240);
         target.move(QGuiApplication::primaryScreen()->geometry().center() - QPoint(200, 120));
         target.show();
+        if (parser.isSet("animate")) animation.start(33);
     }
     bool dialed = false, sent = false;
     int frames = 0, accepted = 0;
     double maximumRttMs = 0;
+    QElapsedTimer presentationClock;
+    presentationClock.start();
+    quint64 previousPresented = 0;
     zjdesk::NetworkSetup network;
     zjdesk::SessionCoordinator session;
     QObject::connect(session.events(), &zjdesk::EventLog::appended, &app,
@@ -86,7 +109,10 @@ int main(int argc, char **argv)
             session.grantControl();
     });
     QObject::connect(&session, &zjdesk::SessionCoordinator::shareFrame, &app,
-        [&](const QImage &frame) { if (!frame.isNull()) ++frames; });
+        [&](const QImage &frame) {
+            if (!frame.isNull()) ++frames;
+            if (present) surface.setFrame(frame);
+        });
     QObject::connect(&session, &zjdesk::SessionCoordinator::inputProbeAcknowledged, &app,
         [&](quint64 sequence, qint64 rtt, qint64 inject, bool ok) {
             if (ok) ++accepted;
@@ -96,12 +122,23 @@ int main(int argc, char **argv)
         });
     QObject::connect(&session, &zjdesk::SessionCoordinator::shareStatisticsChanged, &app,
         [&](const zjdesk::ShareStats &stats) {
+            const auto presented = surface.presentedFrames();
+            const double presentedFps = 1000.0 * (presented - previousPresented)
+                / qMax<qint64>(1, presentationClock.restart());
+            previousPresented = presented;
+            if (present) session.reportSharePresentation(presented);
             record({{"event", "stats"}, {"frames", frames}, {"width", stats.size.width()},
+                {"presentedFps", present ? presentedFps : -1},
+                {"presentationGapMaxMs", present ? surface.takePresentationGapMaxMs() : -1},
                 {"height", stats.size.height()}, {"fps", stats.deliveredFps}, {"targetFps", stats.targetFps},
                 {"mbps", stats.networkMbps}, {"codec", stats.codec}, {"transport", stats.transport},
+                {"processedFps", stats.processedFps}, {"packetsLost", stats.packetsLost},
+                {"jitterMs", stats.jitterMs}, {"controlRttMs", stats.controlRttMs},
+                {"transportExcessMs", stats.transportExcessMs}, {"peerFps", stats.peerFps},
+                {"minimized", surface.isMinimized()}, {"diagnostics", stats.timingDiagnostics()},
                 {"local", stats.localAddress}, {"remote", stats.remoteAddress},
                 {"maximumBitrate", stats.congestionMaximumBitrate}, {"encoderBitrate", stats.encoderBitrate}});
-            if (host || sent || frames < 10
+            if (host || mediaOnly || sent || frames < 10
                 || session.remoteState() != zjdesk::SessionCoordinator::RemoteState::Controlling) return;
             sent = true;
             session.sendRemoteInput({{"kind", "move"}, {"x", 0.5}, {"y", 0.5}, {"probe", true}});
@@ -113,7 +150,8 @@ int main(int argc, char **argv)
             });
         });
     QTimer::singleShot(qBound(10, parser.value("seconds").toInt(), 300) * 1000, &app, [&] {
-        const bool ok = host ? target.moves > 0 && target.presses == 1 && target.releases == 1
+        const bool ok = mediaOnly ? frames >= 30
+            : host ? target.moves > 0 && target.presses == 1 && target.releases == 1
                              : frames >= 30 && accepted == 3;
         record({{"event", "result"}, {"ok", ok}, {"frames", frames}, {"accepted", accepted},
             {"moves", target.moves}, {"presses", target.presses}, {"releases", target.releases}, {"maximumRttMs", maximumRttMs}});
@@ -126,6 +164,6 @@ int main(int argc, char **argv)
         network.verifyPeer(parser.value("peer"), server);
     });
     const int result = app.exec();
-    if (host) QCursor::setPos(savedCursor);
+    if (host && !mediaOnly) QCursor::setPos(savedCursor);
     return result;
 }

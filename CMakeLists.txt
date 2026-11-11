@@ -135,8 +135,11 @@ if(BUILD_TESTING)
         qt_add_executable(zjdesk-meeting-probe tests/manual/meeting_probe.cpp)
         target_link_libraries(zjdesk-meeting-probe PRIVATE zjdesk_client_core)
         if(TARGET Qt6::Widgets)
-            qt_add_executable(zjdesk-control-probe tests/manual/control_probe.cpp)
-            target_link_libraries(zjdesk-control-probe PRIVATE zjdesk_client_core Qt6::Widgets)
+            qt_add_executable(zjdesk-control-probe tests/manual/control_probe.cpp
+                apps/client/video_surface.cpp apps/client/video_surface.h
+                apps/client/annotation_layer.cpp apps/client/annotation_layer.h)
+            target_include_directories(zjdesk-control-probe PRIVATE apps/client)
+            target_link_libraries(zjdesk-control-probe PRIVATE zjdesk_client_core Qt6::Widgets Qt6::OpenGLWidgets)
         endif()
         add_test(NAME media COMMAND zjdesk-media-tests -o "${CMAKE_BINARY_DIR}/test-results/media.xml,junitxml")
         set_tests_properties(media PROPERTIES TIMEOUT 180)

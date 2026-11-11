@@ -13,6 +13,7 @@ class NetworkSetupTests : public QObject
     QTemporaryDir temporary_;
     QByteArray originalPath_;
     QByteArray originalBinding_;
+    QByteArray originalPeerBinding_;
     QString local_;
 
     zjdesk::NetworkConfiguration configuration(int port) const
@@ -77,6 +78,7 @@ private slots:
         local_ = addresses.first();
         originalPath_ = qgetenv("PATH");
         originalBinding_ = qgetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
+        originalPeerBinding_ = qgetenv("ZJDESK_WEBRTC_PEER_ADDRESS");
 #ifdef Q_OS_WIN
         const auto suffix = QStringLiteral(".exe");
 #else
@@ -93,6 +95,7 @@ private slots:
     {
         qputenv("ZJDESK_TEST_PING", "ok");
         qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", "previous-binding");
+        qputenv("ZJDESK_WEBRTC_PEER_ADDRESS", "previous-peer");
     }
 
     void cleanupTestCase()
@@ -100,6 +103,8 @@ private slots:
         qputenv("PATH", originalPath_);
         if (originalBinding_.isNull()) qunsetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
         else qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", originalBinding_);
+        if (originalPeerBinding_.isNull()) qunsetenv("ZJDESK_WEBRTC_PEER_ADDRESS");
+        else qputenv("ZJDESK_WEBRTC_PEER_ADDRESS", originalPeerBinding_);
         qunsetenv("ZJDESK_TEST_PING");
     }
 
@@ -163,6 +168,7 @@ private slots:
         QVERIFY(result.first().first().toBool());
         QVERIFY(setup.verified());
         QCOMPARE(qgetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS"), local_.toUtf8());
+        QCOMPARE(qgetenv("ZJDESK_WEBRTC_PEER_ADDRESS"), configuration(server.serverPort()).peerAddress().toUtf8());
         // Previously verified data does not authorize a subsequent failed attempt.
         setup.verify(configuration(0));
         QVERIFY(!setup.verified());
@@ -191,6 +197,7 @@ private slots:
         QVERIFY(!setup.verified());
         QCOMPARE(connections.size(), 0);
         QCOMPARE(qgetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS"), QByteArray("previous-binding"));
+        QCOMPARE(qgetenv("ZJDESK_WEBRTC_PEER_ADDRESS"), QByteArray("previous-peer"));
     }
 
     void refusedServerAndRetry()

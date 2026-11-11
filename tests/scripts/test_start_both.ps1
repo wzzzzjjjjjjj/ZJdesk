@@ -1,9 +1,9 @@
 ﻿$ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $buildLauncher = Get-Content -Raw -LiteralPath (Join-Path $projectRoot '构建启动.bat')
-if ($buildLauncher -notmatch 'start-both\.ps1.*-LinuxSsh.*orbbec@10\.11\.42\.4.*orbbec@100\.87\.60\.58.*-ForceRestart' -or
+if ($buildLauncher -notmatch 'start-both\.ps1.*-LinuxSsh.*orbbec@100\.87\.60\.58.*orbbec@10\.11\.42\.4.*-PreferTailscale.*-ForceRestart' -or
     $buildLauncher -match '-WindowsAddress|-LinuxAddress') {
-    throw 'The build launcher must try LAN and Tailscale SSH, discover current media addresses and request a force restart.'
+    throw 'The build launcher must try the Tailscale SSH target first, prefer Tailscale media addresses and request a force restart.'
 }
 $directLauncher = Get-Content -Raw -LiteralPath (Join-Path $projectRoot '直接启动.bat')
 if ($directLauncher -match 'start-both|run\.ps1|Read-Host|-ForceRestart' -or
@@ -74,7 +74,7 @@ function Get-NetIPAddress {
     if ($Scenario -eq 'CrossNetwork') {
         [pscustomobject]@{ IPAddress = '100.122.3.99'; InterfaceIndex = 30; InterfaceAlias = 'Tailscale'; AddressState = 'Preferred'; SkipAsSource = $false }
     }
-    if ($Scenario -in @('AutoCrossNetwork', 'LanWithTailscale')) {
+    if ($Scenario -in @('AutoCrossNetwork', 'LanWithTailscale', 'PreferTailscale')) {
         [pscustomobject]@{ IPAddress = '100.122.3.101'; InterfaceIndex = 30; InterfaceAlias = 'Tailscale'; AddressState = 'Preferred'; SkipAsSource = $false }
     }
     [pscustomobject]@{ IPAddress = '100.100.100.100'; InterfaceIndex = 30; AddressState = 'Preferred'; SkipAsSource = $false }
@@ -123,11 +123,26 @@ function Stop-Process {
 function ssh {
     $global:LASTEXITCODE = 0
     Write-Host 'SSH_CALLED'
+    if ($args -notcontains '-n') { throw 'SSH calls must not read the inherited console stdin; pass -n.' }
     $command = $args[-1]
     if ($Scenario -eq 'CrossNetwork' -and $args[-2] -ne 'orbbec@100.87.60.58') { throw 'Cross-network SSH must use Tailscale.' }
+    if ($Scenario -eq 'PreferTailscale' -and $args[-2] -ne 'orbbec@100.87.60.58') { throw 'Tailscale preference must SSH to the Tailscale target first.' }
     if ($Scenario -eq 'CrossNetwork' -and $command -like '*nohup env*' -and
         -not $command.Contains("ZJDESK_WEBRTC_LOCAL_ADDRESS='100.87.60.58'")) { throw 'Linux media must bind to Tailscale.' }
     if ($command -like 'ip -4 -o addr*') {
+        $script:inventoryAttempts++
+        if ($Scenario -eq 'SshWarning') { Write-Error 'ssh: nonfatal diagnostic' }
+        if ($Scenario -eq 'SshTransient' -and $script:inventoryAttempts -eq 1) {
+            $global:LASTEXITCODE = 255
+            Write-Output 'ssh: connection timed out'
+            return
+        }
+        if ($Scenario -eq 'SshEmpty' -or ($Scenario -eq 'SshEmptyRetry' -and $script:inventoryAttempts -eq 1)) { return }
+        if ($Scenario -eq 'SshAuthentication') {
+            $global:LASTEXITCODE = 255
+            Write-Output 'Permission denied (publickey).'
+            return
+        }
         if ($Scenario -eq 'SshUnavailable' -or ($Scenario -in @('WirelessOnly', 'BothWirelessOnly', 'AutoCrossNetwork') -and $args[-2] -eq 'orbbec@10.11.42.4')) {
             $global:LASTEXITCODE = 255
             return
@@ -136,7 +151,7 @@ function ssh {
         if ($Scenario -in @('WirelessOnly', 'BothWirelessOnly', 'WiredBlocked', 'WiredPreferred', 'ExplicitWireless', 'StaleLinux')) {
             "wireless`twlp0s20f3`t10.11.47.137"
         }
-        if ($Scenario -in @('VirtualOnly', 'CrossNetwork', 'AutoCrossNetwork', 'LanWithTailscale')) { "other`ttailscale0`t100.87.60.58" }
+        if ($Scenario -in @('VirtualOnly', 'CrossNetwork', 'AutoCrossNetwork', 'LanWithTailscale', 'PreferTailscale')) { "other`ttailscale0`t100.87.60.58" }
         if ($Scenario -notin @('WirelessOnly', 'BothWirelessOnly', 'VirtualOnly')) {
             $address = if ($Scenario -eq 'LinuxDhcpChanged') { '10.11.42.8' } else { '10.11.42.4' }
             "wired`tenp0s31f6`t$address"
@@ -197,6 +212,7 @@ if ($Scenario -eq 'RestartActiveBuild') {
     $heldBuildLock = [IO.File]::Open((Join-Path $PSScriptRoot 'build\start-both\launcher.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
 }
 $parameters = @{ SkipBuild = $true; LinuxSsh = @('orbbec@10.11.42.4', 'orbbec@10.11.47.137') }
+if ($Scenario -in @('SshTransient', 'SshEmptyRetry')) { $parameters.LinuxSsh = @('orbbec@10.11.42.4') }
 if ($Scenario -in @('PromptAddress', 'PromptEmpty')) {
     $parameters.Remove('LinuxSsh')
     function Read-Host {
@@ -223,6 +239,10 @@ if ($Scenario -eq 'CrossNetwork') {
 if ($Scenario -eq 'AutoCrossNetwork') {
     $parameters.LinuxSsh = @('orbbec@10.11.42.4', 'orbbec@100.87.60.58')
 }
+if ($Scenario -eq 'PreferTailscale') {
+    $parameters.LinuxSsh = @('orbbec@100.87.60.58', 'orbbec@10.11.42.4')
+    $parameters.PreferTailscale = $true
+}
 & (Join-Path $PSScriptRoot 'start-both.ps1') @parameters
 if ($Scenario -eq 'RestartLegacyLock') {
     $holder.EndInvoke($holderResult)
@@ -236,6 +256,7 @@ exit $LASTEXITCODE
 $cases = @(
     @{ Name = 'AutoCrossNetwork'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=100.122.3.101;SERVER=ws://100.87.60.58:8765' },
     @{ Name = 'LanWithTailscale'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'PreferTailscale'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=100.122.3.101;SERVER=ws://100.87.60.58:8765' },
     @{ Name = 'CrossNetwork'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=100.122.3.99;SERVER=ws://100.87.60.58:8765' },
     @{ Name = 'PromptAddress'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
     @{ Name = 'PromptEmpty'; ExitCode = 1; Expected = 'Linux SSH target is required.'; BeforeSsh = $true },
@@ -260,7 +281,12 @@ $cases = @(
     @{ Name = 'BothWirelessOnly'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.48.95;SERVER=ws://10.11.47.137:8765' },
     @{ Name = 'StaleLinux'; ExitCode = 1; Expected = 'Linux media address 10.11.42.3 is unavailable.' },
     @{ Name = 'NoReachable'; ExitCode = 1; Expected = 'No reachable Linux media address with a Windows route.' },
-    @{ Name = 'SshUnavailable'; ExitCode = 1; Expected = 'Could not query Linux network addresses over SSH.' },
+    @{ Name = 'SshUnavailable'; ExitCode = 1; Expected = 'Could not query Linux network addresses over SSH' },
+    @{ Name = 'SshWarning'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'SshTransient'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'SshEmptyRetry'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },
+    @{ Name = 'SshEmpty'; ExitCode = 1; Expected = 'No valid IPv4 addresses returned.' },
+    @{ Name = 'SshAuthentication'; ExitCode = 1; Expected = 'Permission denied (publickey).' },
     @{ Name = 'VirtualOnly'; ExitCode = 1; Expected = 'No reachable Linux media address with a Windows route.' },
     @{ Name = 'PortBusy'; ExitCode = 1; Expected = 'Linux port 8765 is already in use. Close the existing Linux client/server and retry.' },
     @{ Name = 'BuildSuccess'; ExitCode = 0; Expected = 'LAUNCH_ADDRESS=10.11.42.57;SERVER=ws://10.11.42.4:8765' },

@@ -1,5 +1,25 @@
 # ZJdesk 项目交接
 
+## 2026-11-10 跨局域网 1080p30
+
+新增 WAN 质量档位，验证选择 Tailscale 地址或跨子网地址后自动以最高 1920×1080 / 30 fps 启动，采用 VP9 4:2:0、GCC 4 Mbps 初始预算与 12 Mbps 默认上限，保留带宽余量及拥塞降档恢复。显式 `ZJDESK_SHARE_WAN=1` 支持其他路由环境，`ZJDESK_SHARE_LOW_BANDWIDTH=1` 优先选择原有保守档位。
+
+WAN 接收端按时钟交付帧，用户选择优先流畅度后默认缓冲提高至 400 ms。RTP 封包缩小到 1100 字节，修复 Tailscale 1280 MTU 下的大量 IP 分片。后台测试使用 Windows 独立原生 Desktop，Linux 双机探针采用无窗口、无键鼠注入模式。
+
+双机降档根因已定位：一次 0.4～0.7 秒的接收侧传输停顿会让接收端出现 1～2 个慢窗口，旧策略连续 2 个窗口即降档，重协商又制造新的停顿，形成正反馈直到 640×360。`ShareQuality` 因此改为区分"编码端饥饿"（连续 2 窗口降档）与"链路抖动"（连续 4 窗口才降档），恢复条件放宽到 15 个稳定窗口且额外延迟 < 60 ms，网络延迟门限从 80 ms 提高到 250 ms。修复后 300 秒双向样本全程保持 1920×1080 / 30，其中反向样本出现一次 628 ms 传输尖峰仍未降档。
+
+Windows Release 已构建，core、file-clipboard、signaling、network-setup、media 五组通过（170.68 s）；`windows-runtime-integrity` 在管理员 High Mandatory Level 会话中无法构造低完整性 fixture，需在普通会话复验。Ubuntu 独立验证目录为 `/home/orbbec/ZJdesk/wan-1080p30-20261110`（必须经 `wan-linux-run.sh` 运行），五组非 GUI 回归通过（148.94 s），真实 Xorg 本机 WAN 测试约 29.91 FPS。手机热点与 Tailscale 双机验收结果见 [跨网 1080p30 验证](validation-wan-1080p30-20261110.md)，达标判断必须使用接收端实际绘制帧率与分辨率。
+
+## 2026-11-10 双端启动器默认走 Tailscale 并修复 PowerShell 5.1 启动失败
+
+`构建启动.bat` 改为调用 `start-both.ps1 -LinuxSsh @('orbbec@100.87.60.58', 'orbbec@10.11.42.4') -PreferTailscale -ForceRestart`。`select-network.ps1` 新增 `-PreferTailscale`：两端都存在 Tailscale 候选时只用 Tailscale，否则回退原来的局域网优先顺序，跨网媒体与信令因此固定走已验证的 `100.122.3.99` / `100.87.60.58`。
+
+修复两处只在 Windows PowerShell 5.1 下出现的启动失败：一是同一进程内第二次 `ssh` 会因继承控制台 stdin 而挂起，`start-both.ps1` 与 `select-network.ps1` 的全部 ssh 调用改为 `ssh -n`；二是由 `cmd.exe` 启动的 PowerShell 5.1 中 `ProcessStartInfo.EnvironmentVariables` 返回 null，`run.ps1` 启动客户端时报「无法对 Null 值表达式调用方法」，改为临时设置当前进程的 Qt / GStreamer 环境变量、`Start` 后立即恢复。启动器失败时可设 `ZJDESK_LAUNCH_DEBUG=1` 输出出错行与调用栈。
+
+48 项启动器模拟回归通过；实际双击 `构建启动.bat` 完成双端源码同步、增量构建与部署，Linux 客户端与信令服务监听 8765，Windows 客户端窗口以 `ws://100.87.60.58:8765` 启动。界面内的对端 IP 验证与远控、共享仍需人工操作，本次未代为点击。
+
+后续修复 SSH 地址清单探测。PowerShell 5.1 会将重定向的原生 stderr 当作错误流，SSH 警告可中断地址读取。现在按 SSH 退出码与有效地址共同判断成功，空清单也会重试，最终失败时保留各次调用的目标、退出码和原始错误。新增警告、短暂失败、空结果恢复及认证失败用例，PowerShell 5.1 与 7 下各 53 项启动器回归通过。通过 `cmd.exe` 调用 PowerShell 5.1 的真实地址选择与 Linux 目录 / 桌面权限预检通过，选定两端 Tailscale 地址。此次验证在后台完成，完整双端窗口启动需重试确认。
+
 ## 2026-11-09 会议共享桌面控制权切换
 
 会议观看者可申请控制，共享者可批准、拒绝、收回或直接切换控制成员，一次一人。观看者可在远控和标注工具之间切换，切回标注释放键鼠并保留当前授权。输入按共享代次、通道绑定的成员身份、授权代次与序号校验，旧控制者、停止共享、离会和通道关闭会失效授权。键鼠仍由独立输入线程执行；会议复用每位观看者的现有共享链路与原标注画布。

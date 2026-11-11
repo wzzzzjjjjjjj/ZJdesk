@@ -78,7 +78,7 @@ Windows 被控后端已实现，真实键鼠和持续画质 / 帧率验收状态
 
 ## 网络要求
 
-当前不同局域网通过 Tailscale 互通时，屏幕共享自动使用低带宽模式：最高 960×540 / 15 fps、VP9 4:2:0、800 kbps 拥塞预算，拥塞时继续降档。2026-11-08 在 Windows `100.122.3.99` 与 Linux `100.87.60.58` 之间实测双向桌面传输和测试窗口原生移动 / 点击通过；Linux 控制 Windows 的点击回执曾达到约 1.05 秒，实际操作手感、放大 / 拖动及长期稳定性仍待验收。两端需运行新版，启动卡片分别填写对方 Tailscale IP 后点击「连接服务」，被控端按设置允许控制。启动命令、报告与边界见 [跨网低带宽验证](docs/validation-crossnet-20261108.md)。
+屏幕共享在已验证源地址属于 Tailscale `100.64.0.0/10`，或对端位于所选网卡子网之外时，自动使用 WAN 策略，最高 1920×1080 / 30 fps、VP9 4:2:0。GCC 从 4 Mbps 启动，在 128 kbps～12 Mbps 预算内调整，编码目标保留 20% 余量。编码端跟不上时连续两个 1 秒窗口即降档；只有对端掉帧而编码正常时要求连续四个窗口，避免一次链路停顿把整场会话压到低档，稳定后逐步恢复。WAN RTP 封包为 1100 字节，为 VPN 路径的协议开销留出余量。WAN 接收缓冲默认 400 ms，按时钟交付帧，优先流畅度，相比 200 ms 配置增加约 200 ms 画面延迟。`ZJDESK_WEBRTC_LATENCY_MS` 可选择 30、50、100、150、200 或 400 ms。实际帧率取决于双端性能与链路容量。两端需运行新版并验证对端可达地址，再由被控端授权。实现、实测和验收边界见 [跨网 1080p30 验证](docs/validation-wan-1080p30-20261110.md)。
 
 入房使用的信令连接与传输画面 / 音频 / 文件的 WebRTC 连接是两条路径：**校验码配对或会议入会成功，不代表媒体和远控通道已连通。**
 
@@ -207,7 +207,8 @@ ShareStats 的 `localAddress` / `remoteAddress` 记录实际选中地址。未�
 
 两端已加入同一 Tailnet 时，Linux 新版客户端自动提供共用信令服务。
 Windows 填 Linux `100.87.60.58`，Linux 填 Windows `100.122.3.99`，两端分别点击「连接服务」，再按被控端的二次验证设置授权。
-启动验证会选择本机 Tailscale 源地址并更新 `ZJDESK_WEBRTC_LOCAL_ADDRESS`，自动启用低带宽共享。
+启动验证会选择本机 Tailscale 源地址并更新 `ZJDESK_WEBRTC_LOCAL_ADDRESS` 与 `ZJDESK_WEBRTC_PEER_ADDRESS`，自动启用 WAN 1080p30 策略。
+其他路由可用 `ZJDESK_SHARE_WAN=1` 显式启用；受限链路可用 `ZJDESK_SHARE_LOW_BANDWIDTH=1` 优先选择原 540p15 / 800 kbps 策略。`ZJDESK_WEBRTC_MAX_BITRATE` 可覆盖 GCC 上限（128000～40000000 bit/s），编码仍受当前画质档位约束。
 显式指定服务时，Windows 启动可传入 `-ServerUrl 'ws://100.87.60.58:8765'`。
 媒体 ICE host 候选不限制局域网网段，能够使用 Tailscale 虚拟网卡地址，无需把 IP 写入代码。
 本次将媒体启动等待改为 45 秒、控制请求及允许后的连接等待改为 60 秒；
@@ -327,7 +328,7 @@ Linux 可选探测 VA-API VP9 profile 1 编码，启动及自动模式尺寸切�
 连续丢包或相对基线的持续往返延迟会保守降低编码预算，拥塞期间不自动升档；稳定后逐步恢复。
 另有 Linux 发送端 `ZJDESK_WEBRTC_GCC=tcp` 可选路径，使用实际协商的 TWCC 和单层 GCC pacing 并保留 ICE-TCP，
 需要可选 rsrtp / rtpgccbwe 插件；普通局域网下不设置或设为 0 保留原 ICE-TCP、不开启 GCC。
-跨网低带宽模式自动启用 GCC 并保留 UDP 候选；显式设置 `ZJDESK_WEBRTC_GCC=tcp` 仍会保留 Linux 的 ICE-TCP 限制。
+WAN 和显式低带宽模式自动启用 GCC 并保留 UDP 候选；显式设置 `ZJDESK_WEBRTC_GCC=tcp` 仍会保留 Linux 的 ICE-TCP 限制。
 2026-10-10 的 LAN 十分钟真实 Edge 隔离桌面对照平均显示 52.73 fps、保持 1080p，
 仍有最长约 907 ms 停顿，尚未达到稳定 60 fps；完整结果和物理 GNOME 验证边界见 docs/validation.md。
 设为 1 的 UDP 候选在物理 GNOME 首帧复验失败，不用于当前日常客户端。公司 LAN 对照结果见 docs/validation.md，

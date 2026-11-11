@@ -96,11 +96,20 @@ public:
         }
         sender_ = sender;
         automatic_ = targetFps == 0;
-        lowBandwidth_ = qEnvironmentVariable("ZJDESK_SHARE_LOW_BANDWIDTH") == "1"
-            || QHostAddress(qEnvironmentVariable("ZJDESK_WEBRTC_LOCAL_ADDRESS"))
-                .isInSubnet(QHostAddress("100.64.0.0"), 10);
+        const bool conservative = qEnvironmentVariable("ZJDESK_SHARE_LOW_BANDWIDTH") == "1";
+        const QHostAddress verifiedLocal(qEnvironmentVariable("ZJDESK_WEBRTC_LOCAL_ADDRESS"));
+        const QHostAddress verifiedPeer(qEnvironmentVariable("ZJDESK_WEBRTC_PEER_ADDRESS"));
+        bool wideArea = qEnvironmentVariable("ZJDESK_SHARE_WAN") == "1"
+            || verifiedLocal.isInSubnet(QHostAddress("100.64.0.0"), 10);
+        if (!verifiedPeer.isNull())
+            for (const auto &networkInterface : QNetworkInterface::allInterfaces())
+                for (const auto &entry : networkInterface.addressEntries())
+                    if (entry.ip() == verifiedLocal && entry.prefixLength() >= 0)
+                        wideArea = wideArea || !verifiedPeer.isInSubnet(verifiedLocal, entry.prefixLength());
+        lowBandwidth_ = conservative || wideArea;
         quality_ = ShareQuality(nativeSize, automatic_ ? maximumFps : targetFps,
-            ShareQuality::MinimumFps, lowBandwidth_);
+            ShareQuality::MinimumFps, conservative ? ShareQuality::Mode::LowBandwidth
+                : wideArea ? ShareQuality::Mode::WideArea : ShareQuality::Mode::Local);
         profile_ = quality_.profile();
         if (!automatic_ && !lowBandwidth_)
             profile_.fps = targetFps;
@@ -130,8 +139,8 @@ public:
         const auto gccMode = qEnvironmentVariable("ZJDESK_WEBRTC_GCC");
         gccEnabled_ = sender && (lowBandwidth_ || gccMode == "1" || gccMode == "tcp");
         auto maximumBitrate = sender ? qEnvironmentVariable("ZJDESK_WEBRTC_MAX_BITRATE") : QString();
-        if (sender && lowBandwidth_ && maximumBitrate.isEmpty()) maximumBitrate = "800000";
-        const auto budget = CongestionBudget::fromMaximum(maximumBitrate, profile_.bitrate());
+        if (sender && conservative && maximumBitrate.isEmpty()) maximumBitrate = "800000";
+        const auto budget = CongestionBudget::fromMaximum(maximumBitrate, profile_.bitrate(), wideArea && !conservative);
         if (!maximumBitrate.isEmpty() && (!gccEnabled_ || !budget))
             return fail(QStringLiteral("ZJDESK_WEBRTC_MAX_BITRATE 需要启用 GCC，且必须为 128000..40000000 bit/s 的整数"));
         gccMinimumBitrate_ = budget->minimum;
@@ -178,9 +187,9 @@ public:
         {
             selectEncoder();
             QString capture;
-            if (source == "test")
-                capture = "videotestsrc name=desktopcapture is-live=true pattern=ball ! "
-                    "video/x-raw,width=640,height=480 ! ";
+            if (source == "test" || source == "test-hd")
+                capture = QString("videotestsrc name=desktopcapture is-live=true pattern=ball ! "
+                    "video/x-raw,width=%1,height=%2 ! ").arg(nativeSize.width()).arg(nativeSize.height());
 #ifdef Q_OS_WIN
             else
                 capture = "d3d11screencapturesrc name=desktopcapture monitor-index=-1 show-cursor=true ! "
@@ -195,6 +204,8 @@ public:
                 return;
             }
 #endif
+            // Leave room for RTP extensions, repair and SRTP within a 1280-byte VPN MTU.
+            const int rtpMtu = lowBandwidth_ ? 1100 : 1400;
             description = capture + QString("videoscale add-borders=false ! "
                 "capsfilter name=quality caps=\"video/x-raw,width=%1,height=%2,framerate=%3/1,pixel-aspect-ratio=1/1%4\" ! ")
                 .arg(profile_.size.width()).arg(profile_.size.height()).arg(targetFps_)
@@ -204,21 +215,24 @@ public:
                 "appsink name=frames max-buffers=1 drop=true sync=false wait-on-eos=false "
                 "split. ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! " +
                 encoderPipeline() + QString(" ! video/x-vp9,profile=(string)%1 ! ").arg(lowBandwidth_ ? 0 : 1) +
-                "rtpvp9pay name=pay pt=96 picture-id-mode=15-bit ! "
+                QString("rtpvp9pay name=pay pt=96 mtu=%1 picture-id-mode=15-bit ! "
                 "application/x-rtp,media=video,encoding-name=VP9,payload=96 ! "
-                "webrtcbin name=rtc bundle-policy=max-bundle";
+                "webrtcbin name=rtc bundle-policy=max-bundle").arg(rtpMtu);
         }
         else
         {
             bool configured = false;
             const int requested = qEnvironmentVariableIntValue("ZJDESK_WEBRTC_LATENCY_MS", &configured);
+            const int defaultLatency = wideArea && !conservative ? 400 : 200;
             const int latency = configured && (requested == 30 || requested == 50
-                || requested == 100 || requested == 150 || requested == 200) ? requested : 200;
-            description = QString("webrtcbin name=rtc bundle-policy=max-bundle latency=%1 ").arg(latency) +
+                || requested == 100 || requested == 150 || requested == 200 || requested == 400)
+                ? requested : defaultLatency;
+            description = QString("webrtcbin name=rtc bundle-policy=max-bundle latency=%1 "
                 "rtpvp9depay name=incoming request-keyframe=true wait-for-keyframe=true ! "
                 "video/x-vp9,colorimetry=1:3:5:1 ! "
                 "vp9dec name=decoder ! videoconvert ! video/x-raw,format=RGB ! "
-                "appsink name=frames max-buffers=1 drop=true sync=false wait-on-eos=false";
+                "appsink name=frames max-buffers=1 drop=true sync=%2 wait-on-eos=false")
+                .arg(latency).arg(wideArea && !conservative ? "true" : "false");
         }
         GError *error = nullptr;
         pipeline_ = gst_parse_launch(description.toUtf8().constData(), &error);
@@ -974,7 +988,7 @@ private:
         codecFallbackReason_.clear();
         if (lowBandwidth_)
         {
-            codecFallbackReason_ = QStringLiteral("跨网低带宽使用 VP9 4:2:0 码率控制");
+            codecFallbackReason_ = QStringLiteral("跨网使用 VP9 4:2:0 码率控制");
             return;
         }
 #ifdef Q_OS_LINUX
@@ -1648,9 +1662,9 @@ int ScreenShare::displayMaximumFps()
 void ScreenShare::start(bool sender, const QString &source, quint64 epoch, int targetFps, int peerMaximumFps)
 {
     presentationClock_.invalidate();
-    QSize nativeSize(640, 480);
+    QSize nativeSize = source == "test-hd" ? QSize(1920, 1080) : QSize(640, 480);
     int maximumFps = 60;
-    if (source != "test")
+    if (source != "test" && source != "test-hd")
     {
         nativeSize = QSize(1920, 1080);
         if (qobject_cast<QGuiApplication *>(QCoreApplication::instance()))
