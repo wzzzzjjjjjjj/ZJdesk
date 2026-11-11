@@ -16,6 +16,12 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
     qRegisterMetaType<PreviewState>();
     qRegisterMetaType<RemoteCursor>();
     qRegisterMetaType<ConferenceState>();
+    peerRetry_.setInterval(5000);
+    connect(&peerRetry_, &QTimer::timeout, this, &SessionCoordinator::retryPeerSession);
+    connect(&peerConnection_, &PeerConnection::routeChanged, this, &SessionCoordinator::changePeerRoute);
+    connect(&peerConnection_, &PeerConnection::unavailable, this, [this] {
+        changePeerRoute({});
+    });
     meshDeadline_.setInterval(1000);
     connect(&meshDeadline_, &QTimer::timeout, this, [this] {
         for (const auto &id : meshDeadlines_.keys())
@@ -390,6 +396,12 @@ bool SessionCoordinator::join(const QUrl &url, const QString &roomId, const QStr
     }
     roomId_ = roomId;
     name_ = name.trimmed();
+    if (profileEnabled_ && type == RoomType::Meeting)
+    {
+        profileOnline_ = true;
+        profileMeetingRoom_ = roomId;
+        profileName_ = name_;
+    }
     sent_ = received_ = 0;
     emit trafficChanged();
     changeState(State::Connecting, QStringLiteral("正在连接信令服务"));
@@ -422,6 +434,12 @@ bool SessionCoordinator::startRemoteAccess(const QUrl &url, const QString &name,
     roomType_ = RoomType::Assistance;
     remoteCode_.clear();
     name_ = name.trimmed();
+    if (profileEnabled_)
+    {
+        profileOnline_ = true;
+        profileName_ = name_;
+        profileMeetingRoom_.clear();
+    }
     changeState(State::Connecting, QStringLiteral("正在连接远程控制服务"));
     deadline_.start(8000);
     signaling_.open(url);
@@ -445,6 +463,7 @@ bool SessionCoordinator::connectRemoteIp()
     if (!remoteAccess_ || remoteCode_.isEmpty() || state_ != State::WaitingForPeer
         || remoteConnecting_ || remotePeerAddress_.isEmpty()) return false;
     if (!signaling_.send({"connect_remote_ip", {{"address", remotePeerAddress_}}})) return false;
+    if (profileEnabled_) profileResumeControl_ = true;
     remoteConnecting_ = true;
     deadline_.start(8000);
     detail_ = QStringLiteral("正在连接对方电脑");
@@ -454,6 +473,7 @@ bool SessionCoordinator::connectRemoteIp()
 
 void SessionCoordinator::disconnectRemote()
 {
+    profileResumeControl_ = false;
     if (!remoteAccess_ || remoteCode_.isEmpty()) return;
     deadline_.stop();
     remoteConnecting_ = false;
@@ -469,7 +489,7 @@ void SessionCoordinator::disconnectRemote()
 void SessionCoordinator::clearMembership()
 {
     clearConference(false);
-    stopScreenShare();
+    clearScreenShare(true);
     failedStreamId_.clear();
     clearControl();
     peerControllable_ = false;
@@ -484,6 +504,10 @@ void SessionCoordinator::clearMembership()
 
 void SessionCoordinator::leave()
 {
+    profileOnline_ = false;
+    profileResumeControl_ = false;
+    profileMeetingRoom_.clear();
+    profileShareSource_.clear();
     stopConference();
     stopScreenShare();
     stopPreview();
@@ -497,6 +521,82 @@ void SessionCoordinator::leave()
     remoteAccess_ = false;
     changeState(State::Idle, QStringLiteral("连接已断开"));
     emit membersChanged();
+}
+
+bool SessionCoordinator::setPeerProfile(const PeerProfile &profile, const QUrl &serverOverride, const QString &name)
+{
+    if (!profile.error().isEmpty() || !protocol::isPeerNameValid(name)) return false;
+    clearPeerProfile();
+    profileEnabled_ = profileOnline_ = true;
+    profileName_ = name;
+    peerRetry_.start();
+    peerConnection_.start(profile, serverOverride);
+    return true;
+}
+
+void SessionCoordinator::clearPeerProfile()
+{
+    peerConnection_.stop();
+    peerRetry_.stop();
+    profileEnabled_ = false;
+    peerRoute_ = {};
+    leave();
+}
+
+void SessionCoordinator::changePeerRoute(const NetworkConfiguration &configuration)
+{
+    if (!profileEnabled_) return;
+    rememberPeerShare();
+    const bool online = profileOnline_;
+    const bool resume = profileResumeControl_;
+    const auto meeting = profileMeetingRoom_;
+    const auto shareSource = profileShareSource_;
+    const auto shareFps = profileShareFps_;
+    leave(); // Retire the old authorization, input channel and media before rebinding.
+    profileOnline_ = online;
+    profileResumeControl_ = resume;
+    profileMeetingRoom_ = meeting;
+    profileShareSource_ = shareSource;
+    profileShareFps_ = shareFps;
+    peerRoute_ = configuration;
+    if (configuration.peerAddress().isEmpty() || !NetworkSetup::configurationError(configuration).isEmpty())
+    {
+        peerRoute_ = {};
+        emit peerRouteUnavailable();
+        return;
+    }
+    qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", configuration.localAddress().toUtf8());
+    qputenv("ZJDESK_WEBRTC_PEER_ADDRESS", configuration.peerAddress().toUtf8());
+    emit peerRouteChanged(configuration);
+    retryPeerSession();
+}
+
+void SessionCoordinator::retryPeerSession()
+{
+    if (!profileEnabled_ || !profileOnline_ || peerRoute_.peerAddress().isEmpty()) return;
+    if (state_ == State::Idle || state_ == State::Failed)
+    {
+        if (!profileMeetingRoom_.isEmpty())
+            join(peerRoute_.serverUrl, profileMeetingRoom_, profileName_, RoomType::Meeting);
+        else
+            startRemoteAccess(peerRoute_.serverUrl, profileName_, peerRoute_.peerAddress());
+    }
+    else if (profileResumeControl_ && remoteAccess_ && state_ == State::WaitingForPeer && !remoteConnecting_)
+        connectRemoteIp();
+    else if (roomType_ == RoomType::Meeting && state_ == State::PeerAvailable
+        && !profileShareSource_.isEmpty() && shareState_ == PreviewState::Stopped)
+    {
+        if (startScreenShare(profileShareSource_, profileShareFps_)) profileShareSource_.clear();
+    }
+}
+
+void SessionCoordinator::rememberPeerShare()
+{
+    if (profileEnabled_ && roomType_ == RoomType::Meeting && !receivingScreen_ && screenActive())
+    {
+        profileShareSource_ = meetingShareSource_;
+        profileShareFps_ = meetingShareFps_;
+    }
 }
 
 void SessionCoordinator::changeState(State state, const QString &detail)
@@ -518,8 +618,9 @@ void SessionCoordinator::changeState(State state, const QString &detail)
 
 void SessionCoordinator::fail(const QString &reason)
 {
+    rememberPeerShare();
     clearConference(false);
-    stopScreenShare();
+    clearScreenShare(true);
     stopPreview();
     stopAudioTest();
     deadline_.stop();
@@ -663,6 +764,7 @@ bool SessionCoordinator::startScreenShare(const QString &source, int targetFps)
 
 void SessionCoordinator::stopScreenShare()
 {
+    profileShareSource_.clear();
     clearScreenShare(true);
 }
 
@@ -1498,6 +1600,8 @@ void SessionCoordinator::receive(const protocol::Message &message)
     }
     if (remoteAccess_ && message.type == "remote_ready")
     {
+        // Legacy servers have no reason field, so require a fresh user request there.
+        if (message.payload.value("reason").toString() != "disconnected") profileResumeControl_ = false;
         deadline_.stop();
         remoteConnecting_ = false;
         clearScreenShare(false);

@@ -34,6 +34,7 @@ public:
     bool startLocalServer(quint16 port = 8765);
     void verify(const NetworkConfiguration &configuration);
     void cancel();
+    void useVerifiedConfiguration(const NetworkConfiguration &configuration);
     bool verified() const { return verified_; }
     NetworkConfiguration configuration() const { return configuration_; }
 

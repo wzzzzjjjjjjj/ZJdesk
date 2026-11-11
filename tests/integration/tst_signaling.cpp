@@ -16,6 +16,39 @@ class SignalingTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void remoteReadyDistinguishesTransportLossFromExplicitEnd()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        zjdesk::SignalingClient controller, host;
+        QString controllerCode, hostCode, reason;
+        int connected = 0, paired = 0;
+        for (auto *client : {&controller, &host})
+        {
+            connect(client, &zjdesk::SignalingClient::connected, this, [&] { ++connected; });
+            connect(client, &zjdesk::SignalingClient::messageReceived, this,
+                [&, client](const zjdesk::protocol::Message &message) {
+                    if (message.type == "remote_registered")
+                        (client == &host ? hostCode : controllerCode) = message.payload.value("code").toString();
+                    if (message.type == "remote_paired") ++paired;
+                    if (client == &host && message.type == "remote_ready") reason = message.payload.value("reason").toString();
+                });
+            client->open(QUrl(QString("ws://127.0.0.1:%1").arg(server.port())));
+        }
+        QTRY_COMPARE(connected, 2);
+        QVERIFY(controller.send({"register_remote", {{"name", "Controller"}}}));
+        QVERIFY(host.send({"register_remote", {{"name", "Host"}}}));
+        QTRY_VERIFY(!hostCode.isEmpty() && !controllerCode.isEmpty());
+        QVERIFY(controller.send({"connect_remote", {{"code", hostCode}}}));
+        QTRY_COMPARE(paired, 2);
+        QVERIFY(controller.send({"disconnect_remote", {}}));
+        QTRY_COMPARE(reason, QString("ended"));
+        QVERIFY(controller.send({"connect_remote", {{"code", hostCode}}}));
+        QTRY_COMPARE(paired, 4);
+        controller.close();
+        QTRY_COMPARE(reason, QString("disconnected"));
+    }
+
     void meetingAnnotationsBroadcastValidateAndReplay()
     {
         zjdesk::RoomServer server;

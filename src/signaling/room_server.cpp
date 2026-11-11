@@ -175,7 +175,7 @@ QWebSocket *RoomServer::otherPeer(QWebSocket *socket) const
     return nullptr;
 }
 
-void RoomServer::leave(QWebSocket *socket)
+void RoomServer::leave(QWebSocket *socket, bool deliberate)
 {
     if (!peers_.contains(socket) || peers_.value(socket).room.isEmpty())
         return;
@@ -186,7 +186,7 @@ void RoomServer::leave(QWebSocket *socket)
         for (auto *member : members)
         {
             peers_[member].room.clear();
-            if (member != socket) send(member, {"remote_ready", {}});
+            if (member != socket) send(member, {"remote_ready", {{"reason", deliberate ? "ended" : "disconnected"}}});
         }
         return;
     }
@@ -416,8 +416,8 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
     if (message->type == "disconnect_remote")
     {
         if (peers_[socket].remoteCode.isEmpty()) return reject(socket, "not_registered");
-        leave(socket);
-        send(socket, {"remote_ready", {}});
+        leave(socket, true);
+        send(socket, {"remote_ready", {{"reason", "ended"}}});
         return;
     }
     if (message->type == "join")

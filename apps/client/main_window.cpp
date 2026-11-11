@@ -705,6 +705,72 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     settingsBodyLayout->addLayout(codePolicyForm);
     settingsBodyLayout->addWidget(codePolicyError);
     settingsLayout->addWidget(remoteCard);
+    auto *peerCard = new QFrame;
+    peerCard->setObjectName("settingsForm");
+    auto *peerLayout = new QVBoxLayout(peerCard);
+    peerLayout->setContentsMargins(20, 18, 20, 18);
+    peerLayout->addWidget(text(QStringLiteral("对端别名与自动连接"), "sectionTitle"));
+    QSettings networkPreferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+    peerProfile_ = {networkPreferences.value("peer/alias").toString(),
+        networkPreferences.value("peer/lanAddress").toString(),
+        networkPreferences.value("peer/tailscaleAddress").toString()};
+    auto *alias = new QLineEdit(peerProfile_.alias);
+    alias->setObjectName("peerAlias");
+    alias->setPlaceholderText("linux-wzj");
+    auto *lanAddress = new QLineEdit(peerProfile_.lanAddress);
+    lanAddress->setObjectName("peerLanAddress");
+    lanAddress->setPlaceholderText("192.168.1.10");
+    auto *tailscaleAddress = new QLineEdit(peerProfile_.tailscaleAddress);
+    tailscaleAddress->setObjectName("peerTailscaleAddress");
+    tailscaleAddress->setPlaceholderText("100.87.60.58");
+    auto *peerForm = new QFormLayout;
+    peerForm->addRow(QStringLiteral("对端别名"), alias);
+    peerForm->addRow(QStringLiteral("局域网 IPv4"), lanAddress);
+    peerForm->addRow(QStringLiteral("Tailscale IPv4"), tailscaleAddress);
+    peerLayout->addLayout(peerForm);
+    auto *autoConnect = new QCheckBox(QStringLiteral("启动后通过此别名自动连接服务"));
+    autoConnect->setObjectName("peerAutoConnect");
+    autoConnect->setChecked(networkPreferences.value("peer/autoConnect", false).toBool());
+    peerLayout->addWidget(autoConnect);
+    auto *peerHelp = text(QStringLiteral("局域网优先，每 5 秒检查连接，心跳 3 秒超时后切换。两端均须运行新版程序并放行 TCP 服务端口。"), "peerConnectionHelp");
+    peerHelp->setWordWrap(true);
+    peerLayout->addWidget(peerHelp);
+    auto *peerRecoveryHelp = text(QStringLiteral("切换时会重新建立会话，画面可能短暂停顿，远控按现有安全设置重新授权。两端分别保存对方的别名和地址。"));
+    peerRecoveryHelp->setWordWrap(true);
+    peerLayout->addWidget(peerRecoveryHelp);
+    auto *savePeer = new QPushButton(QStringLiteral("保存并应用"));
+    savePeer->setObjectName("savePeerProfile");
+    peerLayout->addWidget(savePeer);
+    auto *peerError = text({}, "peerProfileError");
+    peerError->setWordWrap(true);
+    peerLayout->addWidget(peerError);
+    connect(savePeer, &QPushButton::clicked, this, [this, alias, lanAddress, tailscaleAddress, autoConnect, peerError] {
+        const zjdesk::PeerProfile profile{alias->text().trimmed(), lanAddress->text().trimmed(), tailscaleAddress->text().trimmed()};
+        const bool clearing = profile.alias.isEmpty() && profile.lanAddress.isEmpty() && profile.tailscaleAddress.isEmpty() && !autoConnect->isChecked();
+        const auto error = clearing ? QString() : profile.error();
+        if (!error.isEmpty()) { peerError->setText(error); return; }
+        QSettings preferences(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+        preferences.setValue("peer/alias", profile.alias);
+        preferences.setValue("peer/lanAddress", profile.lanAddress);
+        preferences.setValue("peer/tailscaleAddress", profile.tailscaleAddress);
+        preferences.setValue("peer/autoConnect", autoConnect->isChecked());
+        preferences.sync();
+        if (preferences.status() != QSettings::NoError)
+        {
+            peerError->setText(QStringLiteral("保存失败，请检查本机配置目录的读写权限。"));
+            return;
+        }
+        peerProfile_ = profile;
+        peerError->setText(QStringLiteral("已保存"));
+        enableNetworkSetup();
+        invalidateNetworkSetup();
+        if (autoConnect->isChecked())
+        {
+            networkPeer_->setText(peerProfile_.alias);
+            verifyStartupPeer();
+        }
+    });
+    settingsLayout->addWidget(peerCard);
     auto *deviceSection = new QVBoxLayout;
     settingsLayout->addLayout(deviceSection);
     deviceSection->setSpacing(10);
@@ -1387,9 +1453,7 @@ void MainWindow::enableNetworkSetup()
     findChild<QWidget *>("remoteCodePolicyLabel")->hide();
     findChild<QLabel *>("remoteCodePolicyError")->hide();
     session_.setRemoteCodePolicy("startup", {});
-#ifdef Q_OS_LINUX
     networkSetup_.startLocalServer(QUrl(serverEdit_->text()).port(8765));
-#endif
     // IP 验证与发起远控分为两个独立操作。
     if (connectionLayout_ && networkColumn_)
     {
@@ -1411,8 +1475,8 @@ void MainWindow::enableNetworkSetup()
     QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
     networkPeer_ = new QLineEdit(settings.value("networkSetup/" + networkPeerKey_).toString());
     networkPeer_->setObjectName("networkPeerAddress");
-    networkPeer_->setPlaceholderText(QStringLiteral("填写对端 IP"));
-    networkPeer_->setAccessibleName(QStringLiteral("对端 IP 地址"));
+    networkPeer_->setPlaceholderText(QStringLiteral("填写对端 IP 或已保存的别名"));
+    networkPeer_->setAccessibleName(QStringLiteral("对端 IP 地址或别名"));
     networkPeer_->setClearButtonEnabled(true);
     auto *inputRow = new QHBoxLayout;
     inputRow->setSpacing(10);
@@ -1477,14 +1541,40 @@ void MainWindow::enableNetworkSetup()
             refreshSession();
         });
     connect(networkPeer_, &QLineEdit::returnPressed, this, &MainWindow::verifyStartupPeer);
+    connect(&session_, &zjdesk::SessionCoordinator::peerRouteChanged, this,
+        [this](const zjdesk::NetworkConfiguration &configuration) {
+            networkSetup_.useVerifiedConfiguration(configuration);
+            networkVerifying_ = false;
+            serverEdit_->setText(configuration.serverUrl.toString());
+            networkPeer_->setStyleSheet(QString());
+            networkPeer_->setProperty("networkInvalid", false);
+            const bool overlay = QHostAddress(configuration.peerAddress()).isInSubnet(QHostAddress("100.64.0.0"), 10);
+            networkStatus_->setText(QStringLiteral("%1 · %2").arg(peerProfile_.alias,
+                overlay ? QStringLiteral("Tailscale") : QStringLiteral("局域网")));
+            networkStatus_->setToolTip(QStringLiteral("本机 %1 · 对端 %2").arg(configuration.localAddress(), configuration.peerAddress()));
+            requestCameraPermission();
+            refreshSession();
+        });
+    connect(&session_, &zjdesk::SessionCoordinator::peerRouteUnavailable, this, [this] {
+        networkSetup_.cancel();
+        networkVerifying_ = false;
+        networkStatus_->setText(QStringLiteral("对端暂不可达，正在自动重试…"));
+        networkStatus_->setToolTip(QStringLiteral("请确认对端运行新版程序、地址正确、网络和 Tailscale 在线，且防火墙允许 TCP 服务端口。"));
+        refreshSession();
+    });
     invalidateNetworkSetup();
+    if (settings.value("peer/autoConnect", false).toBool() && peerProfile_.error().isEmpty())
+    {
+        networkPeer_->setText(peerProfile_.alias);
+        verifyStartupPeer();
+    }
 }
 
 void MainWindow::verifyStartupPeer()
 {
     if (!networkPeer_) return;
     networkSetup_.cancel();
-    session_.leave();
+    session_.clearPeerProfile();
     networkVerifying_ = true;
     networkPeer_->setStyleSheet(QString());
     networkPeer_->setProperty("networkInvalid", false);
@@ -1494,6 +1584,26 @@ void MainWindow::verifyStartupPeer()
         networkStatus_->setToolTip(QStringLiteral("正在检查本机网卡、对端 ping 和共用服务"));
     }
     refreshSession();
+    if (!peerProfile_.alias.isEmpty() && networkPeer_->text().trimmed().compare(peerProfile_.alias, Qt::CaseInsensitive) == 0)
+    {
+        const auto error = peerProfile_.error();
+        if (!error.isEmpty())
+        {
+            networkVerifying_ = false;
+            networkStatus_->setText(error);
+            refreshSession();
+            return;
+        }
+        const auto nickname = meetingNameEdit_->text().trimmed().isEmpty() ? QStringLiteral("我") : meetingNameEdit_->text().trimmed();
+        if (!session_.setPeerProfile(peerProfile_, networkServerOverride_, nickname))
+        {
+            networkVerifying_ = false;
+            networkStatus_->setText(QStringLiteral("昵称无效，请修改昵称后重试"));
+            networkStatus_->setToolTip(QStringLiteral("昵称须为 1–40 个字符，且不能包含换行或空字符。"));
+            refreshSession();
+        }
+        return;
+    }
     networkSetup_.verifyPeer(networkPeer_->text().trimmed(), networkServerOverride_);
 }
 
@@ -1501,7 +1611,7 @@ void MainWindow::invalidateNetworkSetup()
 {
     if (!networkPeer_) return;
     networkSetup_.cancel();
-    session_.leave();
+    session_.clearPeerProfile();
     networkVerifying_ = false;
     const bool empty = networkPeer_->text().trimmed().isEmpty();
     networkPeer_->setStyleSheet(empty ? QStringLiteral("QLineEdit { border: 2px solid #dc3545; background: #fff1f2; }") : QString());

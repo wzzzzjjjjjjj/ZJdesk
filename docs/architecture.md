@@ -1,5 +1,9 @@
 # 架构与扩展约定
 
+`PeerProfile` 保存单个对端别名及局域网 / Tailscale IPv4，使用 `QSettings` 的 `ZJdesk/network` 中 `peer/*` 键持久化。应用内匹配别名，不写系统 DNS。`PeerConnection` 将 `PeerRouteWorker` 放在独立 `QThread` 中，两条无代理 WebSocket 长连接并行探测对端服务端口，5 秒心跳、3 秒握手及 pong 超时，局域网优先，故障切换并在恢复后切回。每次探测重新计算源地址，地址族须匹配线路类型，配置代次过滤取消后迟到的结果。两端客户端均托管本地 `RoomServer` 以响应探测，别名模式从启动服务参数沿用端口，实际信令使用当前线路的 Linux 端地址。
+
+只有 `SessionCoordinator` 应用已选线路，先释放旧媒体和输入授权，再更新进程级 WebRTC 地址绑定并重新注册 / 入会。5 秒重试保留会议房间、本端共享意图及远控发起意图，主动离开清除恢复意图。`remote_ready.reason` 区分传输断开 `disconnected` 与主动结束 `ended`，旧服务没有 reason 时要求重新操作，避免自动再次发起已被用户结束的控制。重连遵循现有审批设置，媒体和输入使用新的代次。UI 保存设置并展示线路和暂不可达状态，网络连接与探测由协调层和后台线程管理。线路重建期间媒体会中断，双机恢复效果以实际验收为准。
+
 会议控制的信令撤销和 DataChannel 授权可交错到达。观看者在当前共享期间记录已结束请求，拒绝这些请求的迟到授权，并忽略当前请求的重复授权，避免重置输入序号。共享清理同时清除请求记录，旧共享消息继续由共享代次隔离。文件剪贴板启动入口限定为双人协助模式。
 
 2026-11-10 WAN 1080p30 路径由 `ScreenShareWorker` 在新流启动时选择。`NetworkSetup` 成功验证后同时写入进程级源地址 `ZJDESK_WEBRTC_LOCAL_ADDRESS` 和对端地址 `ZJDESK_WEBRTC_PEER_ADDRESS`。源地址属于 `100.64.0.0/10`，或对端不在该源地址所属网卡的子网内时启用 WAN，也可通过 `ZJDESK_SHARE_WAN=1` 显式启用。`ShareQuality::Mode::WideArea` 保持比例、不放大源画面，最高 1920×1080 / 30 fps，GCC 最低 128 kbps、初始 4 Mbps、默认最高 12 Mbps。编码 / 对端有效帧率连续不足时沿用原有尺寸与帧率降档机制，稳定后逐步恢复。`ZJDESK_SHARE_LOW_BANDWIDTH=1` 优先选择原 960×540 / 15 fps、128～800 kbps 策略。两种模式使用软件 VP9 profile 0 / I420、CBR 与 GCC，编码目标保留 20% 余量，默认允许 UDP，显式 `ZJDESK_WEBRTC_GCC=tcp` 保留 Linux ICE-TCP 限制。显式最大码率继续按 128000～40000000 bit/s 校验，GCC 估计和当前画质档位共同约束编码目标。RTP / 修复与关键帧突发由实际网络统计观察。实测与验收边界见 [跨网 1080p30 验证](validation-wan-1080p30-20261110.md)。

@@ -33,6 +33,7 @@ add_library(zjdesk_client_core STATIC
     src/session/session_coordinator.cpp src/session/session_coordinator.h
     src/session/meeting_share.cpp
     src/session/network_setup.cpp src/session/network_setup.h
+    src/session/peer_connection.cpp src/session/peer_connection.h
     src/remote-control/control_session.cpp src/remote-control/control_session.h
     src/remote-control/file_clipboard.cpp src/remote-control/file_clipboard.h
     src/remote-control/input_injector.cpp src/remote-control/input_injector.h
@@ -123,6 +124,8 @@ if(BUILD_TESTING)
     add_executable(zjdesk-network-ping-stub tests/unit/network_ping_stub.cpp)
     qt_add_executable(zjdesk-network-tests tests/unit/tst_network_setup.cpp)
     target_link_libraries(zjdesk-network-tests PRIVATE zjdesk_client_core Qt6::Test)
+    qt_add_executable(zjdesk-peer-tests tests/unit/tst_peer_connection.cpp)
+    target_link_libraries(zjdesk-peer-tests PRIVATE zjdesk_client_core Qt6::Test)
     add_dependencies(zjdesk-network-tests zjdesk-network-ping-stub)
     target_link_libraries(zjdesk-integration-tests PRIVATE zjdesk_client_core zjdesk_signaling Qt6::Test)
     file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/test-results")
@@ -130,6 +133,8 @@ if(BUILD_TESTING)
     add_test(NAME file-clipboard COMMAND zjdesk-file-tests -o "${CMAKE_BINARY_DIR}/test-results/file-clipboard.xml,junitxml")
     add_test(NAME signaling COMMAND zjdesk-integration-tests -o "${CMAKE_BINARY_DIR}/test-results/signaling.xml,junitxml")
     add_test(NAME network-setup COMMAND zjdesk-network-tests -o "${CMAKE_BINARY_DIR}/test-results/network-setup.xml,junitxml")
+    add_test(NAME peer-connection COMMAND zjdesk-peer-tests -o "${CMAKE_BINARY_DIR}/test-results/peer-connection.xml,junitxml")
+    set_tests_properties(peer-connection PROPERTIES TIMEOUT 60)
     set_tests_properties(network-setup PROPERTIES TIMEOUT 30)
     set_tests_properties(core signaling file-clipboard PROPERTIES TIMEOUT 30)
     if(ZJDESK_ENABLE_GSTREAMER)
@@ -175,7 +180,7 @@ endif()
 # at low integrity, where Windows denies camera access despite enabled consent.
 if(WIN32)
     find_program(ZJDESK_POWERSHELL NAMES powershell REQUIRED)
-    foreach(runtime_target zjdesk zjdesk-unit-tests zjdesk-file-tests zjdesk-integration-tests zjdesk-network-tests zjdesk-network-ping-stub zjdesk-media-tests zjdesk-ui-tests zjdesk-meeting-probe zjdesk-control-probe zjdesk-latency-probe)
+    foreach(runtime_target zjdesk zjdesk-unit-tests zjdesk-file-tests zjdesk-integration-tests zjdesk-network-tests zjdesk-peer-tests zjdesk-network-ping-stub zjdesk-media-tests zjdesk-ui-tests zjdesk-meeting-probe zjdesk-control-probe zjdesk-latency-probe)
         if(TARGET ${runtime_target})
             add_custom_command(TARGET ${runtime_target} POST_BUILD
                 COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath

@@ -79,6 +79,7 @@ private:
     zjdesk::SessionCoordinator session_;
     zjdesk::NetworkSetup networkSetup_;
     QUrl networkServerOverride_;
+    zjdesk::PeerProfile peerProfile_;
     QLineEdit *networkPeer_ = nullptr;
     QString networkPeerKey_;
     bool networkVerifying_ = false;

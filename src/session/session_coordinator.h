@@ -16,6 +16,7 @@
 #include <QJsonArray>
 #include <QTimer>
 #include <functional>
+#include "peer_connection.h"
 
 class WindowTests;
 
@@ -37,6 +38,8 @@ public:
     bool startRemoteAccess(const QUrl &url, const QString &name, const QString &peerAddress = {});
     bool connectRemote(const QString &code);
     bool connectRemoteIp();
+    bool setPeerProfile(const PeerProfile &profile, const QUrl &serverOverride, const QString &name);
+    void clearPeerProfile();
     void disconnectRemote();
     QString remoteCode() const { return remoteCode_; }
     bool remoteAccess() const { return remoteAccess_; }
@@ -132,6 +135,8 @@ signals:
     void annotationsCleared(const QString &authorId);
     void stateChanged(zjdesk::SessionCoordinator::State state);
     void membersChanged();
+    void peerRouteChanged(const zjdesk::NetworkConfiguration &configuration);
+    void peerRouteUnavailable();
     void trafficChanged();
     void negotiationReceived(const zjdesk::protocol::Message &message);
     void devicesChanged();
@@ -163,6 +168,9 @@ private:
     void receive(const protocol::Message &message);
     void changeState(State state, const QString &detail);
     void fail(const QString &reason);
+    void changePeerRoute(const NetworkConfiguration &configuration);
+    void retryPeerSession();
+    void rememberPeerShare();
     void clearMembership();
     void receiveShare(const protocol::Message &message);
     void clearScreenShare(bool notifyPeer);
@@ -192,6 +200,13 @@ private:
     void updateMeshState();
 
     SignalingClient signaling_;
+    PeerConnection peerConnection_;
+    QTimer peerRetry_;
+    NetworkConfiguration peerRoute_;
+    bool profileEnabled_ = false, profileOnline_ = false, profileResumeControl_ = false;
+    QString profileName_, profileMeetingRoom_;
+    QString profileShareSource_;
+    int profileShareFps_ = 0;
     bool remoteAccess_ = false, remoteDialPending_ = false, remoteConnecting_ = false, requireRemoteApproval_ = true;
     QString remoteCode_;
     QString remoteCodePolicy_ = "startup", registeredRemoteCodePolicy_ = "startup", remoteIdentity_;

@@ -785,6 +785,120 @@ private slots:
         session.leave();
     }
 
+    void peerProfileSettingsPersistAndResolveAlias()
+    {
+        QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+        settings.clear();
+        auto cleanup = qScopeGuard([&] { settings.clear(); });
+        {
+            MainWindow window({}, {}, "Alias test");
+            auto *alias = window.findChild<QLineEdit *>("peerAlias");
+            auto *lan = window.findChild<QLineEdit *>("peerLanAddress");
+            auto *overlay = window.findChild<QLineEdit *>("peerTailscaleAddress");
+            auto *save = window.findChild<QPushButton *>("savePeerProfile");
+            QVERIFY(alias && lan && overlay && save);
+            alias->setText("bad name");
+            lan->setText("203.0.113.9");
+            save->click();
+            QVERIFY(settings.value("peer/alias").toString().isEmpty());
+            alias->setText("linux-wzj");
+            overlay->setText("100.100.100.100");
+            save->click();
+            QCOMPARE(settings.value("peer/alias").toString(), QString("linux-wzj"));
+            window.networkPeer_->setText("LINUX-WZJ");
+            window.meetingNameEdit_->setText(QStringLiteral("Invalid") + QChar::Null);
+            window.verifyStartupPeer();
+            QVERIFY(!window.networkVerifying_);
+            QVERIFY(!window.session_.profileEnabled_);
+            QVERIFY(window.networkStatus_->text().contains(QStringLiteral("昵称")));
+            QVERIFY(window.joinButton_->isEnabled());
+            window.meetingNameEdit_->setText("Alias test");
+            window.verifyStartupPeer();
+            QVERIFY(window.session_.profileEnabled_);
+            QVERIFY(window.session_.profileOnline_);
+            window.networkPeer_->setText("203.0.113.10");
+            QVERIFY(!window.session_.profileEnabled_);
+        }
+        settings.setValue("peer/autoConnect", true);
+        MainWindow restored({}, {}, "Alias restored");
+        QCOMPARE(restored.findChild<QLineEdit *>("peerAlias")->text(), QString("linux-wzj"));
+        restored.enableNetworkSetup();
+        QCOMPARE(restored.networkPeer_->text(), QString("linux-wzj"));
+        QVERIFY(restored.session_.profileEnabled_);
+        restored.session_.clearPeerProfile();
+    }
+
+    void peerProfileRouteRebindRetryAndExplicitStop()
+    {
+        const auto addresses = zjdesk::NetworkSetup::localAddresses();
+        if (addresses.isEmpty()) QSKIP("No active IPv4 interface for route recovery test");
+        const auto local = addresses.first();
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress(local), 0));
+        zjdesk::SessionCoordinator session;
+        session.profileEnabled_ = session.profileOnline_ = true;
+        session.profileName_ = "Alias recovery";
+        auto configuration = zjdesk::NetworkSetup::configurationForPeer("203.0.113.9",
+            QUrl(QString("ws://%1:%2").arg(local).arg(server.port())));
+#ifdef Q_OS_WIN
+        configuration.windowsAddress = local;
+#else
+        configuration.linuxAddress = local;
+#endif
+        QSignalSpy routes(&session, &zjdesk::SessionCoordinator::peerRouteChanged);
+        session.changePeerRoute(configuration);
+        QTRY_COMPARE(session.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        QCOMPARE(session.remotePeerAddress_, QString("203.0.113.9"));
+        session.profileResumeControl_ = true;
+        session.changePeerRoute({});
+        QCOMPARE(session.state(), zjdesk::SessionCoordinator::State::Idle);
+        QVERIFY(session.profileResumeControl_);
+#ifdef Q_OS_WIN
+        configuration.linuxAddress = "100.100.100.100";
+#else
+        configuration.windowsAddress = "100.100.100.100";
+#endif
+        session.changePeerRoute(configuration);
+        QTRY_COMPARE(session.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        QCOMPARE(session.remotePeerAddress_, QString("100.100.100.100"));
+        QVERIFY(session.profileResumeControl_);
+        session.receive({"remote_ready", {{"reason", "disconnected"}}});
+        QVERIFY(session.profileResumeControl_);
+        session.receive({"remote_ready", {{"reason", "ended"}}});
+        QVERIFY(!session.profileResumeControl_);
+        session.fail("Simulated transport loss");
+        session.retryPeerSession();
+        QTRY_COMPARE(session.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        QCOMPARE(routes.size(), 2);
+        session.leave();
+        session.retryPeerSession();
+        QCOMPARE(session.state(), zjdesk::SessionCoordinator::State::Idle);
+        QVERIFY(!session.profileOnline_);
+        session.profileOnline_ = true;
+        session.profileMeetingRoom_ = "alias-meeting";
+        session.roomType_ = zjdesk::SessionCoordinator::RoomType::Meeting;
+        session.meetingShareSource_ = "desktop";
+        session.meetingShareFps_ = 30;
+        session.streamId_ = "alias-share";
+        session.shareState_ = zjdesk::SessionCoordinator::PreviewState::Running;
+        session.changePeerRoute({});
+        QCOMPARE(session.profileShareSource_, QString("desktop"));
+        QCOMPARE(session.profileShareFps_, 30);
+        session.changePeerRoute(configuration);
+        QTRY_COMPARE(session.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        QCOMPARE(session.roomId_, QString("alias-meeting"));
+        QCOMPARE(session.profileShareSource_, QString("desktop"));
+        session.fail("Simulated meeting transport loss");
+        QCOMPARE(session.profileShareSource_, QString("desktop"));
+        session.retryPeerSession();
+        QTRY_COMPARE(session.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
+        session.stopScreenShare();
+        QVERIFY(session.profileShareSource_.isEmpty());
+        session.leave();
+        session.retryPeerSession();
+        QCOMPARE(session.state(), zjdesk::SessionCoordinator::State::Idle);
+    }
+
     void startupNetworkServerRemainsVerified()
     {
         const QString url = "ws://192.0.2.10:8765";

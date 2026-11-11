@@ -228,6 +228,13 @@ void NetworkSetup::cancel()
     }
 }
 
+void NetworkSetup::useVerifiedConfiguration(const NetworkConfiguration &configuration)
+{
+    cancel();
+    configuration_ = configuration;
+    verified_ = configurationError(configuration).isEmpty();
+}
+
 void NetworkSetup::complete(bool success, const QString &message)
 {
     if (!busy_) return;

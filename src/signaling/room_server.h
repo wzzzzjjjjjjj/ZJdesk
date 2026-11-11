@@ -54,7 +54,7 @@ private:
     };
     void acceptConnection();
     void receive(QWebSocket *socket, const QString &text);
-    void leave(QWebSocket *socket);
+    void leave(QWebSocket *socket, bool deliberate = false);
     void send(QWebSocket *socket, const protocol::Message &message);
     void reject(QWebSocket *socket, const QString &code);
     void receiveAnnotation(QWebSocket *socket, const QJsonObject &payload);
