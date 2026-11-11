@@ -1,5 +1,11 @@
 # ZJdesk 项目交接
 
+## 2026-11-11 合并 IPv4 输入与对端别名
+
+合并 `codex/ZJdesk-2` 时保留四段 IPv4 输入、最近地址筛选与当前分支的别名和自动线路切换。启动输入控件增加别名输入模式，下拉菜单同时列出已保存的别名，设置保存后同步刷新。回车验证继续由原有协调层处理。
+
+Windows Release 已构建部署，25 项真实桌面 UI 回归全部通过（12.844 秒），包括别名键入、粘贴、历史菜单切换和 IPv4 分段输入。7 组非 GUI 回归均取得通过结果。首轮媒体组 `temporaryStartupDisplayDelayKeepsNativeFrameRate` 断言目标帧率 60、实际 50，单用例复测通过（21.441 秒），随后完整媒体组独立复测通过（168.84 秒，5 项平台限定跳过），媒体代码未改动。日志为 `build/merge-build.log`、`build/merge-ui.log`、`build/merge-tests.log`、`build/merge-media-retry.log` 和 `build/merge-media.log`。Ubuntu 构建、真实双机音视频、远控及迁网恢复未在本次合并中验证。
+
 ## 2026-11-11 应用内别名与自动线路切换
 
 设置新增一个对端别名（例如 `linux-wzj`）、局域网 IPv4、Tailscale IPv4 和启动后自动连接选项，保存在 `ZJdesk/network` 的 `peer/*` 配置。独立线程同时维护两条探测长连接，每 5 秒发送心跳、3 秒无响应判定失败，局域网优先，故障切换到 Tailscale，局域网恢复后切回。名称解析及探测均在应用内完成。

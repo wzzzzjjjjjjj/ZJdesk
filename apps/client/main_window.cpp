@@ -1,4 +1,5 @@
 #include "main_window.h"
+#include "ipv4_address_edit.h"
 #include "platform/platform_info.h"
 #include "video_surface.h"
 #include "annotation_layer.h"
@@ -763,6 +764,8 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
         peerProfile_ = profile;
         peerError->setText(QStringLiteral("已保存"));
         enableNetworkSetup();
+        networkPeer_->setAlias(peerProfile_.alias);
+        refreshNetworkPeerHistory();
         invalidateNetworkSetup();
         if (autoConnect->isChecked())
         {
@@ -1473,14 +1476,16 @@ void MainWindow::enableNetworkSetup()
     networkPeerKey_ = QStringLiteral("windowsAddress");
 #endif
     QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
-    networkPeer_ = new QLineEdit(settings.value("networkSetup/" + networkPeerKey_).toString());
+    networkPeer_ = new Ipv4AddressEdit;
     networkPeer_->setObjectName("networkPeerAddress");
-    networkPeer_->setPlaceholderText(QStringLiteral("填写对端 IP 或已保存的别名"));
     networkPeer_->setAccessibleName(QStringLiteral("对端 IP 地址或别名"));
-    networkPeer_->setClearButtonEnabled(true);
+    networkPeer_->setAlias(peerProfile_.alias);
+    networkPeer_->setText(settings.value("networkSetup/" + networkPeerKey_).toString());
+    connect(networkPeer_, &Ipv4AddressEdit::historyRequested, this, &MainWindow::refreshNetworkPeerHistory);
+    refreshNetworkPeerHistory();
     auto *inputRow = new QHBoxLayout;
     inputRow->setSpacing(10);
-    inputRow->addWidget(networkPeer_, 1);
+    inputRow->addWidget(networkPeer_);
     if (joinButton_)
     {
         joinButton_->setText(QStringLiteral("连接服务"));
@@ -1490,6 +1495,7 @@ void MainWindow::enableNetworkSetup()
     remoteConnectButton_->setObjectName("remoteConnectButton");
     remoteConnectButton_->setToolTip(QStringLiteral("连接服务后，点击此按钮请求控制对端电脑"));
     inputRow->addWidget(remoteConnectButton_);
+    inputRow->addStretch();
     connect(remoteConnectButton_, &QPushButton::clicked, this, [this] {
         if (networkSetup_.verified()) session_.connectRemoteIp();
     });
@@ -1510,7 +1516,7 @@ void MainWindow::enableNetworkSetup()
     networkStatus_->setWordWrap(true);
     layout->addWidget(networkStatus_);
     if (connectionLayout_) connectionLayout_->addWidget(panel, 1);
-    connect(networkPeer_, &QLineEdit::textChanged, this, &MainWindow::invalidateNetworkSetup);
+    connect(networkPeer_, &Ipv4AddressEdit::textChanged, this, &MainWindow::invalidateNetworkSetup);
     connect(&networkSetup_, &zjdesk::NetworkSetup::progress, this, [this](const QString &message) {
         if (!networkStatus_) return;
         networkStatus_->setText(QStringLiteral("正在验证…"));
@@ -1526,13 +1532,22 @@ void MainWindow::enableNetworkSetup()
                 networkStatus_->setToolTip(message);
             }
             networkPeer_->setProperty("networkInvalid", !success);
-            networkPeer_->setStyleSheet(success ? QString() : QStringLiteral("QLineEdit { border: 2px solid #dc3545; background: #fff1f2; }"));
+            networkPeer_->setStyleSheet(success ? QString() : QStringLiteral("QFrame#networkPeerAddress { border: 2px solid #dc3545; background: #fff1f2; }"));
             if (success)
             {
                 const auto configuration = networkSetup_.configuration();
                 serverEdit_->setText(configuration.serverUrl.toString());
                 QSettings saved(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+                const auto previous = saved.value("networkSetup/" + networkPeerKey_).toString();
                 saved.setValue("networkSetup/" + networkPeerKey_, configuration.peerAddress());
+                auto history = saved.value("networkSetup/" + networkPeerKey_ + "History").toStringList();
+                if (!previous.isEmpty() && !history.contains(previous)) history.append(previous);
+                history.removeAll(configuration.peerAddress());
+                history.prepend(configuration.peerAddress());
+                history.removeDuplicates();
+                while (history.size() > 20) history.removeLast();
+                saved.setValue("networkSetup/" + networkPeerKey_ + "History", history);
+                refreshNetworkPeerHistory();
                 if (networkStatus_)
                     networkStatus_->setToolTip(QStringLiteral("本机 %1 · 对端 %2").arg(configuration.localAddress(), configuration.peerAddress()));
                 startRemoteAccess();
@@ -1540,7 +1555,7 @@ void MainWindow::enableNetworkSetup()
             }
             refreshSession();
         });
-    connect(networkPeer_, &QLineEdit::returnPressed, this, &MainWindow::verifyStartupPeer);
+    connect(networkPeer_, &Ipv4AddressEdit::returnPressed, this, &MainWindow::verifyStartupPeer);
     connect(&session_, &zjdesk::SessionCoordinator::peerRouteChanged, this,
         [this](const zjdesk::NetworkConfiguration &configuration) {
             networkSetup_.useVerifiedConfiguration(configuration);
@@ -1584,7 +1599,7 @@ void MainWindow::verifyStartupPeer()
         networkStatus_->setToolTip(QStringLiteral("正在检查本机网卡、对端 ping 和共用服务"));
     }
     refreshSession();
-    if (!peerProfile_.alias.isEmpty() && networkPeer_->text().trimmed().compare(peerProfile_.alias, Qt::CaseInsensitive) == 0)
+    if (!peerProfile_.alias.isEmpty() && networkPeer_->address().trimmed().compare(peerProfile_.alias, Qt::CaseInsensitive) == 0)
     {
         const auto error = peerProfile_.error();
         if (!error.isEmpty())
@@ -1604,7 +1619,7 @@ void MainWindow::verifyStartupPeer()
         }
         return;
     }
-    networkSetup_.verifyPeer(networkPeer_->text().trimmed(), networkServerOverride_);
+    networkSetup_.verifyPeer(networkPeer_->address().trimmed(), networkServerOverride_);
 }
 
 void MainWindow::invalidateNetworkSetup()
@@ -1613,8 +1628,8 @@ void MainWindow::invalidateNetworkSetup()
     networkSetup_.cancel();
     session_.clearPeerProfile();
     networkVerifying_ = false;
-    const bool empty = networkPeer_->text().trimmed().isEmpty();
-    networkPeer_->setStyleSheet(empty ? QStringLiteral("QLineEdit { border: 2px solid #dc3545; background: #fff1f2; }") : QString());
+    const bool empty = networkPeer_->address().isEmpty();
+    networkPeer_->setStyleSheet(empty ? QStringLiteral("QFrame#networkPeerAddress { border: 2px solid #dc3545; background: #fff1f2; }") : QString());
     networkPeer_->setProperty("networkInvalid", empty);
     if (networkStatus_)
     {
@@ -1622,6 +1637,15 @@ void MainWindow::invalidateNetworkSetup()
         networkStatus_->setToolTip(QStringLiteral("请先启动对端并验证 IP，验证后可使用远控和会议。"));
     }
     refreshSession();
+}
+
+void MainWindow::refreshNetworkPeerHistory()
+{
+    QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+    auto history = settings.value("networkSetup/" + networkPeerKey_ + "History").toStringList();
+    const auto previous = settings.value("networkSetup/" + networkPeerKey_).toString();
+    if (!history.contains(previous)) history.append(previous);
+    networkPeer_->setSuggestions(zjdesk::NetworkSetup::suggestedPeerAddresses(history));
 }
 
 void MainWindow::refreshDevices()
@@ -2079,7 +2103,7 @@ void MainWindow::refreshSession()
     bool joinEnabled = networkReady && (idle || (!meeting && !session_.remoteConnecting() && (!ready || startup || (roomEdit_->hasAcceptableInput()
         && roomEdit_->text() != session_.remoteCode()))));
     if (startup && idle)
-        joinEnabled = !networkPeer_->text().trimmed().isEmpty() && !networkVerifying_;
+        joinEnabled = !networkPeer_->address().isEmpty() && !networkVerifying_;
     if (startup && ready) joinEnabled = false;
     joinButton_->setEnabled(joinEnabled);
     meetingJoinButton_->setEnabled(networkReady && (idle || meeting || ready));

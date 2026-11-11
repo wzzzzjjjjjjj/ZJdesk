@@ -64,6 +64,31 @@ QStringList NetworkSetup::localAddresses()
     return result;
 }
 
+QStringList NetworkSetup::suggestedPeerAddresses(const QStringList &history)
+{
+    QStringList result;
+    const auto local = localAddresses();
+    const auto interfaces = QNetworkInterface::allInterfaces();
+    for (const auto &value : history)
+    {
+        if (!usableAddress(value) || local.contains(value) || result.contains(value)) continue;
+        const QHostAddress peer(value);
+        bool matches = peer.isInSubnet(QHostAddress("100.64.0.0"), 10);
+        for (const auto &interface : interfaces)
+        {
+            if (!(interface.flags() & QNetworkInterface::IsUp)
+                || !(interface.flags() & QNetworkInterface::IsRunning)
+                || (interface.type() != QNetworkInterface::Ethernet
+                    && interface.type() != QNetworkInterface::Ieee80211)) continue;
+            for (const auto &entry : interface.addressEntries())
+                if (usableAddress(entry.ip().toString()) && entry.prefixLength() > 0
+                    && peer.isInSubnet(entry.ip(), entry.prefixLength())) matches = true;
+        }
+        if (matches) result.append(value);
+    }
+    return result;
+}
+
 QString NetworkSetup::configurationError(const NetworkConfiguration &configuration)
 {
     if (!usableAddress(configuration.windowsAddress))

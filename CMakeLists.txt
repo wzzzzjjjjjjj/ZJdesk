@@ -76,6 +76,7 @@ if(ZJDESK_BUILD_CLIENT)
     find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets OpenGLWidgets)
     qt_add_executable(zjdesk WIN32
         apps/client/main.cpp apps/client/main_window.cpp apps/client/main_window.h
+        apps/client/ipv4_address_edit.cpp apps/client/ipv4_address_edit.h
         apps/client/annotation_layer.cpp apps/client/annotation_layer.h
         apps/client/video_surface.cpp apps/client/video_surface.h)
     qt_add_resources(zjdesk styles PREFIX "/" FILES resources/styles.qss)
@@ -160,6 +161,7 @@ if(BUILD_TESTING)
     if(ZJDESK_BUILD_CLIENT AND ZJDESK_GUI_TESTS)
         qt_add_executable(zjdesk-ui-tests tests/ui/tst_window.cpp
             apps/client/main_window.cpp apps/client/main_window.h
+            apps/client/ipv4_address_edit.cpp apps/client/ipv4_address_edit.h
             apps/client/annotation_layer.cpp apps/client/annotation_layer.h
             apps/client/video_surface.cpp apps/client/video_surface.h)
         target_include_directories(zjdesk-ui-tests PRIVATE apps/client)

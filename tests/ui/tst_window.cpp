@@ -1,4 +1,5 @@
 #include "main_window.h"
+#include "ipv4_address_edit.h"
 #include "video_surface.h"
 #include "annotation_layer.h"
 #include "signaling/room_server.h"
@@ -11,6 +12,7 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QComboBox>
+#include <QAction>
 #include <QToolButton>
 #include <QOpenGLWidget>
 #include <QPushButton>
@@ -20,6 +22,7 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QLineEdit>
+#include <QMenu>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QPlainTextEdit>
@@ -823,7 +826,7 @@ private slots:
         MainWindow restored({}, {}, "Alias restored");
         QCOMPARE(restored.findChild<QLineEdit *>("peerAlias")->text(), QString("linux-wzj"));
         restored.enableNetworkSetup();
-        QCOMPARE(restored.networkPeer_->text(), QString("linux-wzj"));
+        QCOMPARE(restored.networkPeer_->address(), QString("linux-wzj"));
         QVERIFY(restored.session_.profileEnabled_);
         restored.session_.clearPeerProfile();
     }
@@ -951,15 +954,15 @@ private slots:
         window.setAttribute(Qt::WA_ShowWithoutActivating);
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
-        auto *peer = window.findChild<QLineEdit *>("networkPeerAddress");
-        QVERIFY(peer->text().isEmpty());
+        auto *peer = window.findChild<Ipv4AddressEdit *>("networkPeerAddress");
+        QVERIFY(window.networkPeer_->address().isEmpty());
         QVERIFY(peer->property("networkInvalid").toBool());
-        QVERIFY(peer->styleSheet().contains("#dc3545"));
+        QVERIFY(window.networkPeer_->styleSheet().contains("#dc3545"));
         QVERIFY(!window.joinButton_->isEnabled());
         QVERIFY(!window.meetingJoinButton_->isEnabled());
         window.startRemoteAccess();
         QCOMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
-        peer->setText("invalid");
+        peer->setText("999.1.1.1");
         window.joinButton_->click();
         QVERIFY(!window.networkSetup_.verified());
         QVERIFY(peer->property("networkInvalid").toBool());
@@ -994,6 +997,208 @@ private slots:
         QVERIFY(window.grab().save("output/ui-startup-network.png"));
         peer->clear();
         QVERIFY(peer->property("networkInvalid").toBool());
+    }
+
+    void ipv4EntryPreservesSavedAlias()
+    {
+        QWidget panel;
+        auto *layout = new QVBoxLayout(&panel);
+        auto *edit = new Ipv4AddressEdit;
+        layout->addWidget(edit);
+        panel.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&panel));
+        for (const auto &alias : {QString("linux-wzj"), QString("123-linux")})
+        {
+            edit->setAlias(alias);
+            edit->clear();
+            edit->setFocus();
+            for (const auto character : alias)
+                QTest::keyClicks(panel.focusWidget(), QString(character));
+            QCOMPARE(edit->address(), alias);
+            const QSignalSpy submitted(edit, &Ipv4AddressEdit::returnPressed);
+            QTest::keyClick(panel.focusWidget(), Qt::Key_Return);
+            QCOMPARE(submitted.size(), 1);
+            edit->setSuggestions({"203.0.113.9"});
+            auto *menu = edit->findChild<QMenu *>();
+            QCOMPARE(menu->actions().first()->data().toString(), alias);
+            menu->actions().last()->trigger();
+            QCOMPARE(edit->address(), QString("203.0.113.9"));
+            menu->actions().first()->trigger();
+            QCOMPARE(edit->address(), alias);
+            edit->clear();
+            edit->setFocus();
+            QApplication::clipboard()->setText(alias.toUpper());
+            QTest::keyClick(panel.focusWidget(), Qt::Key_V, Qt::ControlModifier);
+            QCOMPARE(edit->address(), alias.toUpper());
+            edit->setFocus();
+            QApplication::clipboard()->setText("192.168.1.2");
+            QTest::keyClick(panel.focusWidget(), Qt::Key_V, Qt::ControlModifier);
+            QCOMPARE(edit->address(), QString("192.168.1.2"));
+            QVERIFY(edit->findChild<QLineEdit *>("ipv4Octet0")->isVisible());
+        }
+    }
+
+    void ipv4EntryAdvancesAndPastesWithoutSeparators()
+    {
+        QWidget panel;
+        auto *layout = new QVBoxLayout(&panel);
+        auto *edit = new Ipv4AddressEdit;
+        auto *next = new QPushButton("Next");
+        layout->addWidget(edit);
+        layout->addWidget(next);
+        panel.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&panel));
+        edit->setFocus();
+        for (const auto digit : QString("1921681424"))
+            QTest::keyClicks(panel.focusWidget(), QString(digit));
+        QCOMPARE(edit->address(), QString("192.168.142.4"));
+        edit->clear();
+        edit->setFocus();
+        QTest::keyClicks(panel.focusWidget(), "10");
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Tab);
+        QCOMPARE(panel.focusWidget(), edit->findChild<QLineEdit *>("ipv4Octet1"));
+        QTest::keyClicks(panel.focusWidget(), "11");
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Space);
+        QTest::keyClicks(panel.focusWidget(), "42");
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Tab);
+        QTest::keyClicks(panel.focusWidget(), "4");
+        QCOMPARE(edit->address(), QString("10.11.42.4"));
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Tab, Qt::ShiftModifier);
+        QCOMPARE(panel.focusWidget(), edit->findChild<QLineEdit *>("ipv4Octet2"));
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Tab);
+        QCOMPARE(panel.focusWidget(), edit->findChild<QLineEdit *>("ipv4Octet3"));
+        for (int index = 0; index < 4; ++index)
+        {
+            const auto *octet = edit->findChild<QLineEdit *>(QString("ipv4Octet%1").arg(index));
+            QCOMPARE(octet->alignment(), Qt::AlignCenter);
+            QVERIFY(octet->width() >= octet->fontMetrics().horizontalAdvance("000") + 20);
+            if (index < 3)
+            {
+                const auto *following = edit->findChild<QLineEdit *>(QString("ipv4Octet%1").arg(index + 1));
+                QVERIFY(following->geometry().left() > octet->geometry().right() + 6);
+            }
+        }
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Tab);
+        QTRY_COMPARE(panel.focusWidget(), next);
+        edit->setFocus();
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Tab, Qt::ShiftModifier);
+        QTRY_COMPARE(panel.focusWidget(), next);
+        edit->setFocus();
+        edit->selectAll();
+        QApplication::clipboard()->setText("100.87.60.58");
+        QTest::keyClick(panel.focusWidget(), Qt::Key_V, Qt::ControlModifier);
+        QCOMPARE(edit->address(), QString("100.87.60.58"));
+        edit->selectAll();
+        QTest::keyClick(panel.focusWidget(), Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QApplication::clipboard()->text(), QString("100.87.60.58"));
+        QTest::keyClick(panel.focusWidget(), Qt::Key_X, Qt::ControlModifier);
+        QCOMPARE(QApplication::clipboard()->text(), QString("100.87.60.58"));
+        QVERIFY(edit->address().isEmpty());
+        edit->setText("10.11.42.4");
+        QTest::keyClick(panel.focusWidget(), Qt::Key_A, Qt::ControlModifier);
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Delete);
+        QVERIFY(edit->address().isEmpty());
+        edit->setText("10.11.42.4");
+        QTest::keyClick(panel.focusWidget(), Qt::Key_A, Qt::ControlModifier);
+        for (const auto digit : QString("1921681424"))
+            QTest::keyClicks(panel.focusWidget(), QString(digit));
+        QCOMPARE(edit->address(), QString("192.168.142.4"));
+        edit->setText("010.011.042.004");
+        QCOMPARE(edit->address(), QString("10.11.42.4"));
+        edit->clear();
+        QVERIFY(edit->address().isEmpty());
+    }
+
+    void ipv4EntryPastesDigitsAcrossSegments_data()
+    {
+        QTest::addColumn<QString>("clipboard");
+        QTest::addColumn<bool>("selectWholeAddress");
+        QTest::addColumn<QString>("expected");
+        QTest::newRow("replace-whole-short") << "192" << true << "192...";
+        QTest::newRow("replace-whole-compact") << "192168001002" << true << "192.168.1.2";
+        QTest::newRow("paste-across-segments") << "168001002" << false << "10.168.1.2";
+        QTest::newRow("replace-one-segment") << "87" << false << "10.87.42.4";
+        QTest::newRow("invalid-paste-preserves-address") << "invalid" << true << "10.11.42.4";
+    }
+
+    void ipv4EntryPastesDigitsAcrossSegments()
+    {
+        QFETCH(QString, clipboard);
+        QFETCH(bool, selectWholeAddress);
+        QFETCH(QString, expected);
+        Ipv4AddressEdit edit;
+        edit.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&edit));
+        edit.setText("10.11.42.4");
+        auto *octet = edit.findChild<QLineEdit *>("ipv4Octet1");
+        octet->setFocus();
+        octet->selectAll();
+        if (selectWholeAddress) QTest::keyClick(octet, Qt::Key_A, Qt::ControlModifier);
+        QTRY_VERIFY([&] {
+            QApplication::clipboard()->setText(clipboard);
+            return QApplication::clipboard()->text() == clipboard;
+        }());
+        QTest::keyClick(octet, Qt::Key_V, Qt::ControlModifier);
+        QCOMPARE(edit.address(), expected);
+    }
+
+    void startupNetworkHistorySelectsPeerWithoutVerification()
+    {
+        QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+        settings.clear();
+#ifdef Q_OS_WIN
+        const QString key = "networkSetup/linuxAddress";
+#else
+        const QString key = "networkSetup/windowsAddress";
+#endif
+        const QString peer = "100.94.123.45";
+        QVERIFY(!zjdesk::NetworkSetup::localAddresses().contains(peer));
+        settings.setValue(key, peer); // Migrate a successful address saved by the old version.
+        settings.setValue(key + "History", QStringList{peer, peer, "invalid", "127.0.0.1"});
+        MainWindow window({}, {}, "Network history");
+        window.enableNetworkSetup();
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto *history = window.networkPeer_->findChild<QMenu *>();
+        QCOMPARE(history->actions().size(), 1);
+        QVERIFY(history->actions().first()->text().contains("Tailscale"));
+        QCOMPARE(history->actions().first()->data().toString(), peer);
+        window.networkPeer_->clear();
+        window.networkPeer_->setFocus();
+        QTest::keyClicks(window.focusWidget(), "10");
+        QTest::keyClick(window.focusWidget(), Qt::Key_Tab);
+        QCOMPARE(window.focusWidget(), window.networkPeer_->findChild<QLineEdit *>("ipv4Octet1"));
+        window.networkPeer_->clear();
+        QVERIFY(window.networkPeer_->width() < window.width() / 2);
+        window.networkPeer_->setText("10.11.42.4");
+        QVERIFY(QDir().mkpath("output"));
+        QVERIFY(window.grab().save("output/ui-ip-entry-compact.png"));
+        QVERIFY(window.networkPeer_->grab().save("output/ui-ip-entry-segments.png"));
+        window.networkPeer_->clear();
+        auto *historyButton = window.networkPeer_->findChild<QToolButton *>("ipv4History");
+        QVERIFY(historyButton);
+        // An instant-popup tool button runs a nested event loop until the menu closes.
+        QTimer::singleShot(100, history, [history] {
+            QTest::mouseMove(history, history->actionGeometry(history->actions().first()).center());
+            QTest::mouseClick(history, Qt::LeftButton, Qt::NoModifier,
+                history->actionGeometry(history->actions().first()).center());
+        });
+        QTest::mouseClick(historyButton, Qt::LeftButton);
+        QCOMPARE(window.networkPeer_->address(), peer);
+        QVERIFY(!window.networkSetup_.verified());
+        QCOMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
+        QVERIFY(window.joinButton_->isEnabled());
+        QVERIFY(!window.meetingJoinButton_->isEnabled());
+        const QSignalSpy edits(window.networkPeer_, &Ipv4AddressEdit::textChanged);
+        window.refreshNetworkPeerHistory();
+        QCOMPARE(edits.count(), 0);
+        QCOMPARE(window.networkPeer_->address(), peer);
+        window.networkPeer_->setFocus();
+        QTest::keyClick(window.focusWidget(), Qt::Key_F4);
+        QTRY_VERIFY(history->isVisible());
+        history->close();
+        QCOMPARE(window.networkPeer_->address(), peer);
+        QCOMPARE(edits.count(), 0);
     }
 
     void startupNetworkPersistsInputsButRequiresNewVerification()
@@ -1039,11 +1244,12 @@ private slots:
 #else
         const QString peerKey = "windowsAddress";
 #endif
-        auto *peer = window.findChild<QLineEdit *>("networkPeerAddress");
+        auto *peer = window.findChild<Ipv4AddressEdit *>("networkPeerAddress");
         peer->setText("203.0.113.9");
         window.joinButton_->click();
         QTRY_VERIFY2(window.networkSetup_.verified(),
             qPrintable(window.findChild<QLabel *>("networkStatus")->toolTip()));
+        QCOMPARE(settings.value("networkSetup/" + peerKey + "History").toStringList(), QStringList{"203.0.113.9"});
         QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
         QVERIFY(window.remoteCodeLabel_->isHidden());
         QVERIFY(window.remoteHistory_->isHidden());
@@ -1098,7 +1304,7 @@ private slots:
         QVERIFY(!remote->isEnabled());
         MainWindow restarted(url, {}, "Network test");
         restarted.enableNetworkSetup();
-        QCOMPARE(restarted.networkPeer_->text(), QString("203.0.113.9"));
+        QCOMPARE(restarted.networkPeer_->address(), QString("203.0.113.9"));
         QVERIFY(!restarted.networkSetup_.verified());
         QVERIFY(!restarted.meetingJoinButton_->isEnabled());
     }

@@ -28,6 +28,7 @@ public:
     explicit NetworkSetup(QObject *parent = nullptr);
     ~NetworkSetup() override;
     static QStringList localAddresses();
+    static QStringList suggestedPeerAddresses(const QStringList &history);
     static NetworkConfiguration configurationForPeer(const QString &peerAddress, const QUrl &serverUrl = {});
     static QString configurationError(const NetworkConfiguration &configuration);
     void verifyPeer(const QString &peerAddress, const QUrl &serverUrl = {});
