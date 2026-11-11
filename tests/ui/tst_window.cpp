@@ -1038,6 +1038,40 @@ private slots:
         }
     }
 
+    void ipv4EntryReplacesAliasWithCompactAddress_data()
+    {
+        QTest::addColumn<bool>("paste");
+        QTest::addColumn<bool>("deleteFirst");
+        QTest::newRow("paste-over-alias") << true << false;
+        QTest::newRow("type-over-alias") << false << false;
+        QTest::newRow("paste-after-deleting-alias") << true << true;
+        QTest::newRow("type-after-deleting-alias") << false << true;
+    }
+
+    void ipv4EntryReplacesAliasWithCompactAddress()
+    {
+        QFETCH(bool, paste);
+        QFETCH(bool, deleteFirst);
+        Ipv4AddressEdit edit;
+        edit.setAlias("linux-wzj");
+        edit.setText("linux-wzj");
+        edit.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&edit));
+        edit.setFocus();
+        QTest::keyClick(edit.focusWidget(), Qt::Key_A, Qt::ControlModifier);
+        if (deleteFirst) QTest::keyClick(edit.focusWidget(), Qt::Key_Backspace);
+        if (paste)
+        {
+            QApplication::clipboard()->setText("192168001002");
+            QTest::keyClick(edit.focusWidget(), Qt::Key_V, Qt::ControlModifier);
+        }
+        else
+            for (const auto digit : QString("192168001002"))
+                QTest::keyClicks(edit.focusWidget(), QString(digit));
+        QCOMPARE(edit.address(), QString("192.168.1.2"));
+        QVERIFY(edit.findChild<QLineEdit *>("ipv4Octet0")->isVisible());
+    }
+
     void ipv4EntryAdvancesAndPastesWithoutSeparators()
     {
         QWidget panel;

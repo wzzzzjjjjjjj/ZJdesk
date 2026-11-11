@@ -6,6 +6,8 @@
 
 Windows Release 已构建部署，25 项真实桌面 UI 回归全部通过（12.844 秒），包括别名键入、粘贴、历史菜单切换和 IPv4 分段输入。7 组非 GUI 回归均取得通过结果。首轮媒体组 `temporaryStartupDisplayDelayKeepsNativeFrameRate` 断言目标帧率 60、实际 50，单用例复测通过（21.441 秒），随后完整媒体组独立复测通过（168.84 秒，5 项平台限定跳过），媒体代码未改动。日志为 `build/merge-build.log`、`build/merge-ui.log`、`build/merge-tests.log`、`build/merge-media-retry.log` 和 `build/merge-media.log`。Ubuntu 构建、真实双机音视频、远控及迁网恢复未在本次合并中验证。
 
+集中审查发现从别名模式全选替换或清空后输入紧凑 IPv4 时，数字仍停留在别名输入框。键入与粘贴共 4 条路径先复现失败，修复后复用四段 IPv4 的现有输入处理。Windows Release 重新构建部署通过，29 项真实桌面 UI 回归全部通过（11.780 秒，无跳过）。日志为 `build/merge-review-build.log`、`build/merge-review-repro.log`、`build/merge-review-ui.log`；本次仅调整输入控件，非 GUI 回归沿用上述合并验证结果。
+
 ## 2026-11-11 应用内别名与自动线路切换
 
 设置新增一个对端别名（例如 `linux-wzj`）、局域网 IPv4、Tailscale IPv4 和启动后自动连接选项，保存在 `ZJdesk/network` 的 `peer/*` 配置。独立线程同时维护两条探测长连接，每 5 秒发送心跳、3 秒无响应判定失败，局域网优先，故障切换到 Tailscale，局域网恢复后切回。名称解析及探测均在应用内完成。

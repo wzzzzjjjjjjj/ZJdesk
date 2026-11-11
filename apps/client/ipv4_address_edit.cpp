@@ -184,6 +184,18 @@ bool Ipv4AddressEdit::eventFilter(QObject *watched, QEvent *event)
     }
     if (watched == aliasEdit_)
     {
+        const auto pasted = key->matches(QKeySequence::Paste) ? QApplication::clipboard()->text().trimmed() : QString();
+        const bool compactPaste = QRegularExpression("^[0-9]{1,12}$").match(pasted).hasMatch() && pasted != alias_;
+        const bool replaceWithDigit = !key->text().isEmpty() && key->text().at(0).isDigit()
+            && !(key->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier))
+            && aliasEdit_->selectedText() == aliasEdit_->text();
+        if (compactPaste || replaceWithDigit)
+        {
+            clear();
+            octets_[0]->setFocus();
+            QApplication::sendEvent(octets_[0], event);
+            return true;
+        }
         if (key->matches(QKeySequence::Paste) && QApplication::clipboard()->text().contains('.'))
         {
             setText(QApplication::clipboard()->text().trimmed());
