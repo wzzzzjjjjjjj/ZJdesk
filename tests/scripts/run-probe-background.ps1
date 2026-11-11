@@ -3,7 +3,9 @@
 # Example:
 #   tests\scripts\run-probe-background.ps1 -Arguments "--server ws://100.87.60.58:8765 --peer 100.87.60.58 --media-only --present --seconds 300 --output output/wan.jsonl"
 param([Parameter(Mandatory = $true)][string]$Arguments,
-    [ValidateSet('windows-release', 'windows-debug')][string]$Preset = 'windows-release')
+    [ValidateSet('windows-release', 'windows-debug')][string]$Preset = 'windows-release',
+    [ValidateSet('zjdesk-control-probe', 'zjdesk-latency-probe', 'zjdesk-ui-tests')][string]$Executable = 'zjdesk-control-probe',
+    [ValidateRange(1, 7500)][int]$TimeoutSeconds = 3900)
 $ErrorActionPreference = 'Stop'
 $taskQt = 'F:/Qt6/6.8.3/msvc2022_64'
 $taskGst = 'F:/gstreamer/1.26.11/PFiles64/gstreamer/1.0/msvc_x86_64'
@@ -34,9 +36,9 @@ public static class ZjdeskBackgroundDesktop {
  [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr desktop);
  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
  static extern bool CreateProcessW(string application,StringBuilder command,IntPtr ps,IntPtr ts,bool inherit,int flags,IntPtr environment,string directory,ref StartupInfo startup,out ProcessInfo process);
- [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
- [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr handle,out uint code);
- [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr handle,uint code);
+ [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
+ [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr handle,out uint code);
+ [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr handle,uint code);
  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
  public static int Run(string executable,string arguments,string directory,uint timeout) {
   string name="ZJdeskProbe-"+Guid.NewGuid().ToString("N");
@@ -46,7 +48,15 @@ public static class ZjdeskBackgroundDesktop {
   try {
    StartupInfo startup=new StartupInfo(); startup.cb=Marshal.SizeOf(startup); startup.desktop=name;
    if(!CreateProcessW(executable,new StringBuilder("\""+executable+"\" "+arguments),IntPtr.Zero,IntPtr.Zero,false,0x08000000,IntPtr.Zero,directory,ref startup,out process)) throw new Win32Exception();
-   if(WaitForSingleObject(process.process,timeout)!=0) { TerminateProcess(process.process,124); return 124; }
+   Console.WriteLine("NativePid="+process.processId+" Desktop="+name);
+   uint wait=WaitForSingleObject(process.process,timeout);
+   if(wait!=0) {
+    int error=Marshal.GetLastWin32Error();
+    if(!TerminateProcess(process.process,124)) throw new Win32Exception();
+    if(WaitForSingleObject(process.process,10000)!=0) throw new Win32Exception();
+    if(wait==0xFFFFFFFF) throw new Win32Exception(error);
+    return 124;
+   }
    uint code; if(!GetExitCodeProcess(process.process,out code)) throw new Win32Exception();
    return (int)code;
   } finally {
@@ -58,7 +68,7 @@ public static class ZjdeskBackgroundDesktop {
 }
 '@
 }
-$taskExe = Join-Path $buildRoot 'bin/zjdesk-control-probe.exe'
-$taskExit = [ZjdeskBackgroundDesktop]::Run($taskExe, $Arguments, $buildRoot, 900000)
+$taskExe = Join-Path $buildRoot "bin/$Executable.exe"
+$taskExit = [ZjdeskBackgroundDesktop]::Run($taskExe, $Arguments, $buildRoot, [uint32]($TimeoutSeconds * 1000))
 Write-Output "NativeExit=$taskExit"
-exit 0
+exit $taskExit

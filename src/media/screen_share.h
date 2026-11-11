@@ -5,6 +5,7 @@
 #include "frame_timing.h"
 #include <QElapsedTimer>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <memory>
 
 namespace zjdesk
@@ -73,6 +74,13 @@ struct ShareStats
     VideoPresentationStats presentation;
     quint64 deliveredFrameId = 0; // Local appsink publication sequence within this stream.
     quint64 unmatchedCodecOutputs = 0;
+    int requestedLatencyMs = -1;
+    int actualLatencyMs = -1;
+    bool sinkSync = false;
+    QJsonArray jitterBufferLatenciesMs;
+    double pullPlayoutOffsetMs = 0; // Signed local running time minus segment-mapped PTS, not video age.
+    quint64 pullPlayoutSamples = 0;
+    FrameTimingSummary pullPlayoutLateness;
 
     QJsonObject timingDiagnostics() const;
 };

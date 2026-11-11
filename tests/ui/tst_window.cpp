@@ -3295,6 +3295,7 @@ sys.stdout.buffer.write(data)
     void presentationCountsSwapsAndIgnoresCursorOnlyRedraws()
     {
         VideoSurface surface;
+        QSignalSpy presented(&surface, &VideoSurface::framePresented);
         surface.resize(640, 480);
         surface.show();
         QVERIFY(QTest::qWaitForWindowExposed(&surface));
@@ -3303,12 +3304,16 @@ sys.stdout.buffer.write(data)
         surface.setFrame(frame);
         QCOMPARE(surface.presentedFrames(), quint64(0));
         QTRY_COMPARE(surface.presentedFrames(), quint64(1));
+        QCOMPARE(presented.size(), 1);
+        QCOMPARE(presented.first().at(0).toULongLong(), quint64(1));
+        QVERIFY(presented.first().at(1).toLongLong() > 0);
         for (int i = 0; i < 3; ++i)
         {
             surface.update();
             waitForPresentation(30);
         }
         QCOMPARE(surface.presentedFrames(), quint64(1));
+        QCOMPARE(presented.size(), 1);
         surface.setFrame(frame);
         QTRY_COMPARE(surface.presentedFrames(), quint64(2));
         QVERIFY(surface.takePresentationGapMaxMs() > 0);

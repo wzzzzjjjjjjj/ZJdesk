@@ -22,7 +22,8 @@ VideoSurface::VideoSurface(QWidget *parent) : QOpenGLWidget(parent)
         awaitingSwap_ = false;
         ++presentedFrames_;
         lastPresentedFrameId_ = awaitingFrameId_;
-        receiveToSwap_.record((zjdesk::FrameTiming::nowNs() - awaitingReceivedNs_) / 1e6);
+        const auto swappedNs = zjdesk::FrameTiming::nowNs();
+        receiveToSwap_.record((swappedNs - awaitingReceivedNs_) / 1e6);
         if (presentationClock_.isValid())
         {
             const double gapMs = presentationClock_.nsecsElapsed() / 1000000.0;
@@ -30,6 +31,7 @@ VideoSurface::VideoSurface(QWidget *parent) : QOpenGLWidget(parent)
             presentationGaps_.record(gapMs);
         }
         presentationClock_.restart();
+        emit framePresented(lastPresentedFrameId_, swappedNs);
     });
 }
 

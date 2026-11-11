@@ -48,6 +48,9 @@ int main(int argc, char **argv)
         {"media-only", "Skip the host test window and remote input."},
         {"seconds", "Test duration.", "seconds", "45"}});
     parser.process(app);
+    bool durationValid = false;
+    const int seconds = parser.value("seconds").toInt(&durationValid);
+    if (!durationValid || seconds < 10 || seconds > 7200) return 2;
     QFile output(parser.value("output"));
     if (!output.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 2;
     const auto record = [&](QJsonObject event) {
@@ -126,10 +129,13 @@ int main(int argc, char **argv)
             const double presentedFps = 1000.0 * (presented - previousPresented)
                 / qMax<qint64>(1, presentationClock.restart());
             previousPresented = presented;
-            if (present) session.reportSharePresentation(presented);
+            const double gapMaxMs = present ? surface.takePresentationGapMaxMs() : -1;
+            const auto presentation = surface.presentationStatistics();
+            if (present) session.reportSharePresentation(presented, true, gapMaxMs, presentation);
             record({{"event", "stats"}, {"frames", frames}, {"width", stats.size.width()},
                 {"presentedFps", present ? presentedFps : -1},
-                {"presentationGapMaxMs", present ? surface.takePresentationGapMaxMs() : -1},
+                {"presentationGapMaxMs", gapMaxMs}, {"presentation", presentation.toJson()},
+                {"intervalSeconds", stats.intervalSeconds},
                 {"height", stats.size.height()}, {"fps", stats.deliveredFps}, {"targetFps", stats.targetFps},
                 {"mbps", stats.networkMbps}, {"codec", stats.codec}, {"transport", stats.transport},
                 {"processedFps", stats.processedFps}, {"packetsLost", stats.packetsLost},
@@ -149,7 +155,7 @@ int main(int argc, char **argv)
                 session.sendRemoteInput({{"kind", "button"}, {"button", 1}, {"pressed", false}, {"x", 0.5}, {"y", 0.5}});
             });
         });
-    QTimer::singleShot(qBound(10, parser.value("seconds").toInt(), 300) * 1000, &app, [&] {
+    QTimer::singleShot(seconds * 1000, Qt::PreciseTimer, &app, [&] {
         const bool ok = mediaOnly ? frames >= 30
             : host ? target.moves > 0 && target.presses == 1 && target.releases == 1
                              : frames >= 30 && accepted == 3;

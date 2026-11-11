@@ -140,6 +140,11 @@ if(BUILD_TESTING)
                 apps/client/annotation_layer.cpp apps/client/annotation_layer.h)
             target_include_directories(zjdesk-control-probe PRIVATE apps/client)
             target_link_libraries(zjdesk-control-probe PRIVATE zjdesk_client_core Qt6::Widgets Qt6::OpenGLWidgets)
+            qt_add_executable(zjdesk-latency-probe tests/manual/latency_probe.cpp
+                apps/client/video_surface.cpp apps/client/video_surface.h
+                apps/client/annotation_layer.cpp apps/client/annotation_layer.h)
+            target_include_directories(zjdesk-latency-probe PRIVATE apps/client)
+            target_link_libraries(zjdesk-latency-probe PRIVATE zjdesk_client_core zjdesk_signaling Qt6::Widgets Qt6::OpenGLWidgets)
         endif()
         add_test(NAME media COMMAND zjdesk-media-tests -o "${CMAKE_BINARY_DIR}/test-results/media.xml,junitxml")
         set_tests_properties(media PROPERTIES TIMEOUT 180)
@@ -164,7 +169,7 @@ endif()
 # at low integrity, where Windows denies camera access despite enabled consent.
 if(WIN32)
     find_program(ZJDESK_POWERSHELL NAMES powershell REQUIRED)
-    foreach(runtime_target zjdesk zjdesk-unit-tests zjdesk-file-tests zjdesk-integration-tests zjdesk-network-tests zjdesk-network-ping-stub zjdesk-media-tests zjdesk-ui-tests zjdesk-meeting-probe zjdesk-control-probe)
+    foreach(runtime_target zjdesk zjdesk-unit-tests zjdesk-file-tests zjdesk-integration-tests zjdesk-network-tests zjdesk-network-ping-stub zjdesk-media-tests zjdesk-ui-tests zjdesk-meeting-probe zjdesk-control-probe zjdesk-latency-probe)
         if(TARGET ${runtime_target})
             add_custom_command(TARGET ${runtime_target} POST_BUILD
                 COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath

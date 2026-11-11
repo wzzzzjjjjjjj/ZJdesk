@@ -1,6 +1,7 @@
 #include "screen_share.h"
 #include "share_quality.h"
 #include "congestion_budget.h"
+#include "test_frame_marker.h"
 #include <QElapsedTimer>
 #include <QMutexLocker>
 #include <QGuiApplication>
@@ -36,6 +37,10 @@ QJsonObject ShareStats::timingDiagnostics() const
     return {{"scope", "stream-cumulative"}, {"percentileResolutionMs", 0.1},
         {"percentileOverflowAboveMs", 100}, {"percentileOverflowUsesMax", true},
         {"decoder", decoder}, {"hardwareDecoder", hardwareDecoder}, {"codecProfile", codecProfile},
+        {"playout", QJsonObject{{"requestedLatencyMs", requestedLatencyMs},
+            {"webrtcLatencyReadbackMs", actualLatencyMs}, {"jitterBufferLatenciesMs", jitterBufferLatenciesMs},
+            {"sinkSync", sinkSync}, {"pullOffsetMs", pullPlayoutOffsetMs},
+            {"samples", qint64(pullPlayoutSamples)}, {"pullLateness", pullPlayoutLateness.toJson()}}},
         {"codecOutputFormat", codecOutputFormat}, {"codecOutputMemory", codecOutputMemory},
         {"congestion", QJsonObject{{"minimumBitrate", congestionMinimumBitrate},
             {"maximumBitrate", congestionMaximumBitrate}, {"estimatedBitrate", congestionBitrate},
@@ -95,6 +100,12 @@ public:
             guard_->epoch = epoch;
         }
         sender_ = sender;
+        markerSource_ = sender && source == "test-latency";
+        markerValue_ = 0;
+        requestedLatencyMs_ = -1;
+        pullPlayoutOffsetMs_ = 0;
+        pullPlayoutSamples_ = 0;
+        pullPlayoutLateness_ = {};
         automatic_ = targetFps == 0;
         const bool conservative = qEnvironmentVariable("ZJDESK_SHARE_LOW_BANDWIDTH") == "1";
         const QHostAddress verifiedLocal(qEnvironmentVariable("ZJDESK_WEBRTC_LOCAL_ADDRESS"));
@@ -187,7 +198,7 @@ public:
         {
             selectEncoder();
             QString capture;
-            if (source == "test" || source == "test-hd")
+            if (source == "test" || source == "test-hd" || markerSource_)
                 capture = QString("videotestsrc name=desktopcapture is-live=true pattern=ball ! "
                     "video/x-raw,width=%1,height=%2 ! ").arg(nativeSize.width()).arg(nativeSize.height());
 #ifdef Q_OS_WIN
@@ -209,7 +220,7 @@ public:
             description = capture + QString("videoscale add-borders=false ! "
                 "capsfilter name=quality caps=\"video/x-raw,width=%1,height=%2,framerate=%3/1,pixel-aspect-ratio=1/1%4\" ! ")
                 .arg(profile_.size.width()).arg(profile_.size.height()).arg(targetFps_)
-                .arg(hardwareEncoder_ ? ",format=RGB" : "") + "tee name=split "
+                .arg(hardwareEncoder_ || markerSource_ ? ",format=RGB" : "") + "tee name=split "
                 "split. ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! "
                 "videoconvert ! video/x-raw,format=RGB ! "
                 "appsink name=frames max-buffers=1 drop=true sync=false wait-on-eos=false "
@@ -227,6 +238,7 @@ public:
             const int latency = configured && (requested == 30 || requested == 50
                 || requested == 100 || requested == 150 || requested == 200 || requested == 400)
                 ? requested : defaultLatency;
+            requestedLatencyMs_ = latency;
             description = QString("webrtcbin name=rtc bundle-policy=max-bundle latency=%1 "
                 "rtpvp9depay name=incoming request-keyframe=true wait-for-keyframe=true ! "
                 "video/x-vp9,colorimetry=1:3:5:1 ! "
@@ -320,6 +332,34 @@ public:
             g_array_unref(transceivers);
         }
         sink_ = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline_), "frames"));
+        if (markerSource_)
+        {
+            auto *quality = gst_bin_get_by_name(GST_BIN(pipeline_), "quality");
+            auto *pad = gst_element_get_static_pad(quality, "src");
+            gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                [](GstPad *pad, GstPadProbeInfo *probe, gpointer data) {
+                    const auto value = static_cast<ScreenShareWorker *>(data)->markerValue_.load();
+                    if (!value) return GST_PAD_PROBE_OK;
+                    auto *buffer = gst_buffer_make_writable(GST_PAD_PROBE_INFO_BUFFER(probe));
+                    GST_PAD_PROBE_INFO_DATA(probe) = buffer;
+                    auto *caps = gst_pad_get_current_caps(pad);
+                    GstVideoInfo info;
+                    GstVideoFrame frame;
+                    if (caps && gst_video_info_from_caps(&info, caps)
+                        && GST_VIDEO_INFO_FORMAT(&info) == GST_VIDEO_FORMAT_RGB
+                        && gst_video_frame_map(&frame, &info, buffer, GST_MAP_WRITE))
+                    {
+                        QImage image(static_cast<uchar *>(GST_VIDEO_FRAME_PLANE_DATA(&frame, 0)),
+                            info.width, info.height, GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0), QImage::Format_RGB888);
+                        TestFrameMarker::draw(image, {quint32(value >> 32), quint32(value)});
+                        gst_video_frame_unmap(&frame);
+                    }
+                    if (caps) gst_caps_unref(caps);
+                    return GST_PAD_PROBE_OK;
+                }, this, nullptr);
+            gst_object_unref(pad);
+            gst_object_unref(quality);
+        }
         bus_ = gst_element_get_bus(pipeline_);
         auto *codec = gst_bin_get_by_name(GST_BIN(pipeline_), sender ? "encoder" : "decoder");
         if (!sender)
@@ -776,6 +816,18 @@ private:
             if (object.contains("_zjdeskProbe"))
             {
                 worker->receiveProbe(object);
+                return;
+            }
+            if (object.contains("_zjdeskLatencyMarker"))
+            {
+                bool epochValid = false, sequenceValid = false;
+                const auto epoch = object.value("epoch").toString().toUInt(&epochValid);
+                const auto sequence = object.value("sequence").toString().toUInt(&sequenceValid);
+                if (worker->markerSource_ && epochValid && sequenceValid && epoch && sequence)
+                {
+                    worker->markerValue_ = (quint64(epoch) << 32) | sequence;
+                    emit worker->controlReceived(worker->epoch_, object);
+                }
                 return;
             }
             emit worker->controlReceived(worker->epoch_, object);
@@ -1340,6 +1392,26 @@ private:
         if (auto *sample = gst_app_sink_try_pull_sample(sink_, 0))
         {
             const auto sinkNs = FrameTiming::nowNs();
+            if (!sender_)
+            {
+                const auto *segment = gst_sample_get_segment(sample);
+                const auto pts = GST_BUFFER_PTS(gst_sample_get_buffer(sample));
+                const auto runningPts = segment && segment->format == GST_FORMAT_TIME
+                    && GST_CLOCK_TIME_IS_VALID(pts)
+                    ? gst_segment_to_running_time(segment, GST_FORMAT_TIME, pts) : GST_CLOCK_TIME_NONE;
+                auto *clock = gst_element_get_clock(pipeline_);
+                const auto base = gst_element_get_base_time(pipeline_);
+                const auto now = clock ? gst_clock_get_time(clock) : GST_CLOCK_TIME_NONE;
+                if (GST_CLOCK_TIME_IS_VALID(runningPts) && GST_CLOCK_TIME_IS_VALID(base)
+                    && GST_CLOCK_TIME_IS_VALID(now) && now >= base)
+                {
+                    // Cast before subtraction so early frames keep a negative offset.
+                    pullPlayoutOffsetMs_ = (double(now - base) - double(runningPts)) / GST_MSECOND;
+                    ++pullPlayoutSamples_;
+                    pullPlayoutLateness_.record(qMax(0.0, pullPlayoutOffsetMs_));
+                }
+                if (clock) gst_object_unref(clock);
+            }
             {
                 QMutexLocker lock(&codecMutex_);
                 const auto arrived = sinkArrivals_.find(GST_BUFFER_PTS(gst_sample_get_buffer(sample)));
@@ -1444,6 +1516,38 @@ private:
                 stats.workerPollGapTiming = workerPollGapTiming_.summary();
                 stats.decoder = decoder_;
                 stats.hardwareDecoder = hardwareDecoder_;
+                stats.requestedLatencyMs = requestedLatencyMs_;
+                stats.pullPlayoutOffsetMs = pullPlayoutOffsetMs_;
+                stats.pullPlayoutSamples = pullPlayoutSamples_;
+                stats.pullPlayoutLateness = pullPlayoutLateness_.summary();
+                if (!sender_)
+                {
+                    guint latency = 0;
+                    gboolean sync = FALSE;
+                    g_object_get(rtc_, "latency", &latency, nullptr);
+                    g_object_get(sink_, "sync", &sync, nullptr);
+                    stats.actualLatencyMs = int(latency);
+                    stats.sinkSync = sync;
+                    auto *iterator = gst_bin_iterate_recurse(GST_BIN(rtc_));
+                    GValue item = G_VALUE_INIT;
+                    GstIteratorResult result;
+                    while ((result = gst_iterator_next(iterator, &item)) != GST_ITERATOR_DONE)
+                    {
+                        if (result == GST_ITERATOR_RESYNC) { gst_iterator_resync(iterator); continue; }
+                        if (result != GST_ITERATOR_OK) break;
+                        auto *element = GST_ELEMENT(g_value_get_object(&item));
+                        auto *factory = gst_element_get_factory(element);
+                        if (factory && !g_strcmp0(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)), "rtpjitterbuffer"))
+                        {
+                            guint value = 0;
+                            g_object_get(element, "latency", &value, nullptr);
+                            stats.jitterBufferLatenciesMs.append(int(value));
+                        }
+                        g_value_reset(&item);
+                    }
+                    if (G_IS_VALUE(&item)) g_value_unset(&item);
+                    gst_iterator_free(iterator);
+                }
                 stats.overwrittenFrames = mailbox_->stats.overwrittenFrames;
                 stats.copyMaxMs = copyMaxMs_;
                 stats.encoderBitrate = sender_ ? encoderBudget() : 0;
@@ -1568,6 +1672,12 @@ private:
     ShareProfile profile_;
     bool automatic_ = true;
     bool lowBandwidth_ = false;
+    bool markerSource_ = false;
+    std::atomic<quint64> markerValue_{0};
+    int requestedLatencyMs_ = -1;
+    double pullPlayoutOffsetMs_ = 0;
+    quint64 pullPlayoutSamples_ = 0;
+    FrameTiming pullPlayoutLateness_;
     int revision_ = 1;
     double peerFps_ = -1;
     QElapsedTimer profileClock_;
@@ -1662,9 +1772,9 @@ int ScreenShare::displayMaximumFps()
 void ScreenShare::start(bool sender, const QString &source, quint64 epoch, int targetFps, int peerMaximumFps)
 {
     presentationClock_.invalidate();
-    QSize nativeSize = source == "test-hd" ? QSize(1920, 1080) : QSize(640, 480);
+    QSize nativeSize = source == "test-hd" || source == "test-latency" ? QSize(1920, 1080) : QSize(640, 480);
     int maximumFps = 60;
-    if (source != "test" && source != "test-hd")
+    if (source != "test" && source != "test-hd" && source != "test-latency")
     {
         nativeSize = QSize(1920, 1080);
         if (qobject_cast<QGuiApplication *>(QCoreApplication::instance()))

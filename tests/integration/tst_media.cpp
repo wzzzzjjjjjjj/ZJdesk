@@ -1,6 +1,7 @@
 #include "session/session_coordinator.h"
 #include "signaling/room_server.h"
 #include "media/share_quality.h"
+#include "media/test_frame_marker.h"
 #include "session/network_setup.h"
 #include <QDir>
 #include <QFile>
@@ -16,6 +17,43 @@ class MediaTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void latencyMarkerCrossesVp9AndReportsReceiverLatency()
+    {
+        QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
+        const auto original = qgetenv("ZJDESK_WEBRTC_LATENCY_MS");
+        const auto restore = qScopeGuard([original] {
+            if (original.isNull()) qunsetenv("ZJDESK_WEBRTC_LATENCY_MS");
+            else qputenv("ZJDESK_WEBRTC_LATENCY_MS", original);
+        });
+        qputenv("ZJDESK_WEBRTC_LATENCY_MS", "150");
+        zjdesk::ScreenShare sender, receiver;
+        connect(&sender, &zjdesk::ScreenShare::negotiationReady, &receiver,
+            [&](quint64 epoch, const QString &type, const QJsonObject &payload) { receiver.negotiate(type, payload, epoch); });
+        connect(&receiver, &zjdesk::ScreenShare::negotiationReady, &sender,
+            [&](quint64 epoch, const QString &type, const QJsonObject &payload) { sender.negotiate(type, payload, epoch); });
+        connect(&receiver, &zjdesk::ScreenShare::controlChannelChanged, this, [&](quint64 epoch, bool ready) {
+            if (ready) receiver.sendControl({{"_zjdeskLatencyMarker", true}, {"epoch", "123"}, {"sequence", "456"}}, epoch);
+        });
+        bool received = false;
+        connect(&receiver, &zjdesk::ScreenShare::frameReady, this, [&](quint64, const QImage &frame) {
+            const auto marker = zjdesk::TestFrameMarker::read(frame);
+            received |= marker && marker->epoch == 123 && marker->sequence == 456;
+        });
+        zjdesk::ShareStats stats;
+        connect(&receiver, &zjdesk::ScreenShare::statisticsReady, this,
+            [&](quint64, const zjdesk::ShareStats &value) { stats = value; });
+        receiver.start(false, "test-latency", 17, 30, 30);
+        sender.start(true, "test-latency", 17, 30, 30);
+        QTRY_VERIFY_WITH_TIMEOUT(received, 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(stats.pullPlayoutSamples > 0, 5000);
+        QCOMPARE(stats.requestedLatencyMs, 150);
+        QCOMPARE(stats.actualLatencyMs, 150);
+        QVERIFY(!stats.jitterBufferLatenciesMs.isEmpty());
+        for (const auto value : stats.jitterBufferLatenciesMs) QCOMPARE(value.toInt(), 150);
+        sender.stop(18);
+        receiver.stop(18);
+    }
+
     void conferenceUsesSelectedLocalAddress()
     {
         QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
