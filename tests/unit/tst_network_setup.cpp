@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QNetworkProxy>
+#include <QNetworkInterface>
 #include <QTemporaryDir>
 #include <QWebSocketServer>
 #include <QtTest>
@@ -31,6 +32,37 @@ class NetworkSetupTests : public QObject
     }
 
 private slots:
+    void peerSuggestionsFilterAndDeduplicateHistory()
+    {
+        const QString peer = "100.94.123.45";
+        QVERIFY(!zjdesk::NetworkSetup::localAddresses().contains(peer));
+        auto history = zjdesk::NetworkSetup::localAddresses();
+        history.append({peer, peer, "invalid", "127.0.0.1", "169.254.1.2", "255.255.255.255"});
+        QCOMPARE(zjdesk::NetworkSetup::suggestedPeerAddresses(history), QStringList{peer});
+    }
+
+    void peerSuggestionsIncludeCurrentLanSubnet()
+    {
+        for (const auto &interface : QNetworkInterface::allInterfaces())
+        {
+            if (!(interface.flags() & QNetworkInterface::IsUp)
+                || !(interface.flags() & QNetworkInterface::IsRunning)
+                || (interface.type() != QNetworkInterface::Ethernet
+                    && interface.type() != QNetworkInterface::Ieee80211)) continue;
+            for (const auto &entry : interface.addressEntries())
+            {
+                if (entry.ip().protocol() != QAbstractSocket::IPv4Protocol
+                    || entry.ip().isLoopback() || entry.prefixLength() < 1 || entry.prefixLength() > 30) continue;
+                const quint32 network = entry.ip().toIPv4Address() & entry.netmask().toIPv4Address();
+                const auto candidate = QHostAddress(network + (entry.ip().toIPv4Address() == network + 1 ? 2 : 1)).toString();
+                if (zjdesk::NetworkSetup::localAddresses().contains(candidate)) continue;
+                QCOMPARE(zjdesk::NetworkSetup::suggestedPeerAddresses({candidate}), QStringList{candidate});
+                return;
+            }
+        }
+        QSKIP("No active LAN IPv4 subnet");
+    }
+
     void peerAddressSelectsLocalRouteAndLinuxService()
     {
         const auto configuration = zjdesk::NetworkSetup::configurationForPeer("203.0.113.9");

@@ -190,6 +190,10 @@ QComboBox::drop-down { width: 26px; border: none; }
 QComboBox#recentRemoteCodes { padding-right: 10px; }
 QComboBox#recentRemoteCodes::drop-down { width: 0px; }
 QComboBox#recentRemoteCodes QLineEdit { border: none; background: transparent; padding: 0px; }
+QFrame#networkPeerAddress { background: #fbfcfe; border: 1px solid #dde5ee; border-radius: 9px; }
+QFrame#networkPeerAddress QToolButton { border: none; background: transparent; padding: 2px; }
+QFrame#networkPeerAddress QToolButton::menu-indicator { image: none; }
+QLabel#ipv4Separator { border: none; background: transparent; padding: 0px; }
 QComboBox QAbstractItemView {
     background: #ffffff;
     border: 1px solid #dde5ee;

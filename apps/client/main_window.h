@@ -19,6 +19,7 @@ class QGridLayout;
 class QPropertyAnimation;
 class VideoSurface;
 class AnnotationLayer;
+class Ipv4AddressEdit;
 
 class MainWindow final : public QMainWindow
 {
@@ -48,6 +49,7 @@ private:
     void rememberRemotePeer(const QString &code, const QString &name);
     void verifyStartupPeer();
     void invalidateNetworkSetup();
+    void refreshNetworkPeerHistory();
     void refreshMeetingParticipants();
     void setMeetingRoster(const QStringList &names);
     void expandVideo(bool expanded);
@@ -79,7 +81,7 @@ private:
     zjdesk::SessionCoordinator session_;
     zjdesk::NetworkSetup networkSetup_;
     QUrl networkServerOverride_;
-    QLineEdit *networkPeer_ = nullptr;
+    Ipv4AddressEdit *networkPeer_ = nullptr;
     QString networkPeerKey_;
     bool networkVerifying_ = false;
     QLabel *networkStatus_ = nullptr;
