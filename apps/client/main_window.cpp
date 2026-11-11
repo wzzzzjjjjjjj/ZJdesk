@@ -36,6 +36,8 @@
 #include <QUuid>
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <QWindow>
+#include <qpa/qplatformwindow_p.h>
 #endif
 
 namespace
@@ -1766,6 +1768,17 @@ void MainWindow::refreshAnnotations()
     if (desktopSharing) desktopAnnotationTools_->raise();
 }
 
+void MainWindow::showVideoFullScreen()
+{
+#ifdef Q_OS_WIN
+    // Keep OpenGL fullscreen composed by DWM to avoid display mode transitions.
+    winId(); // Create the native window when expansion precedes the first show.
+    if (auto *native = windowHandle()->nativeInterface<QNativeInterface::Private::QWindowsWindow>())
+        native->setHasBorderInFullScreen(true);
+#endif
+    showFullScreen();
+}
+
 void MainWindow::expandVideo(bool expanded)
 {
     session_.sendRemoteInput({{"kind", "release"}});
@@ -1778,7 +1791,7 @@ void MainWindow::expandVideo(bool expanded)
     {
         normalWindowState_ = windowState();
         normalWindowGeometry_ = geometry();
-        showFullScreen();
+        showVideoFullScreen();
     }
     else
     {
@@ -1815,7 +1828,7 @@ void MainWindow::expandMeetingVideo(VideoSurface *surface)
         meetingParticipantLayout_->setStretch(index, meetingParticipantLayout_->itemAt(index)->widget() == surface ? 1 : 0);
     }
     refreshExpandedMeetingVideo();
-    showFullScreen();
+    showVideoFullScreen();
     surface->setFocus();
 }
 

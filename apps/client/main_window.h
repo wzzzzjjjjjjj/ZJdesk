@@ -51,6 +51,7 @@ private:
     void refreshMeetingParticipants();
     void setMeetingRoster(const QStringList &names);
     void expandVideo(bool expanded);
+    void showVideoFullScreen();
     void expandMeetingVideo(VideoSurface *surface);
     void restoreMeetingVideo();
     void refreshExpandedMeetingVideo();

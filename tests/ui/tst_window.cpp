@@ -2956,6 +2956,72 @@ sys.stdout.buffer.write(data)
         }
     }
 
+    void expandedVideoCreatesNativeWindowBeforeFirstShow()
+    {
+        MainWindow window("ws://127.0.0.1:8765", "demo", "Viewer");
+        QVERIFY(!window.windowHandle());
+        auto *expand = window.findChild<QPushButton *>("expandVideoButton");
+        expand->setChecked(true);
+        QTRY_VERIFY(window.isFullScreen());
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+#ifdef Q_OS_WIN
+        const auto handle = reinterpret_cast<HWND>(window.winId());
+        QVERIFY(GetWindowLongPtr(handle, GWL_STYLE) & WS_BORDER);
+#endif
+        expand->setChecked(false);
+        QTRY_VERIFY(!window.isFullScreen());
+    }
+
+    void expandedVideoKeepsComposedWindowWhileStreaming()
+    {
+        MainWindow window("ws://127.0.0.1:8765", "demo", "Viewer");
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto *surface = window.findChild<VideoSurface *>("videoSurface");
+        auto *expand = window.findChild<QPushButton *>("expandVideoButton");
+        QVERIFY(surface && expand);
+        QImage frame(1920, 1080, QImage::Format_RGB32);
+        frame.fill(QColor("#176ee8"));
+        surface->setFrame(frame);
+        QTRY_VERIFY(surface->presentedFrames() > 0);
+        auto *context = surface->context();
+        const auto normalGeometry = window.geometry();
+        QTimer stream;
+        stream.setInterval(33);
+        connect(&stream, &QTimer::timeout, surface, [surface, frame] { surface->setFrame(frame); });
+        stream.start();
+        for (int i = 0; i < 4; ++i)
+        {
+            expand->setChecked(true);
+            QTRY_VERIFY(window.isFullScreen());
+#ifdef Q_OS_WIN
+            // A border prevents a screen-sized OpenGL popup from bypassing composition.
+            const auto handle = reinterpret_cast<HWND>(window.winId());
+            QVERIFY(GetWindowLongPtr(handle, GWL_STYLE) & WS_BORDER);
+#endif
+            const auto presented = surface->presentedFrames();
+            QTRY_VERIFY(surface->presentedFrames() > presented);
+            QCOMPARE(surface->context(), context);
+            const auto expanded = surface->grabFramebuffer();
+            QCOMPARE(expanded.pixelColor(expanded.rect().center()), QColor("#176ee8"));
+            QTest::keyClick(surface, Qt::Key_Escape);
+            QTRY_VERIFY(!window.isFullScreen());
+            QTRY_COMPARE(window.geometry(), normalGeometry);
+            const auto restored = surface->presentedFrames();
+            QTRY_VERIFY(surface->presentedFrames() > restored);
+            QCOMPARE(surface->context(), context);
+            const auto image = surface->grabFramebuffer();
+            QCOMPARE(image.pixelColor(image.rect().center()), QColor("#176ee8"));
+            window.resize(normalGeometry.size() - QSize(64, 32));
+            const auto resized = surface->presentedFrames();
+            QTRY_VERIFY(surface->presentedFrames() > resized);
+            QCOMPARE(surface->context(), context);
+            const auto resizedImage = surface->grabFramebuffer();
+            QCOMPARE(resizedImage.pixelColor(resizedImage.rect().center()), QColor("#176ee8"));
+            window.setGeometry(normalGeometry);
+        }
+    }
+
     void expandedVideoKeepsSurfaceAndRestoresWindow()
     {
         MainWindow window("ws://127.0.0.1:8765", "demo", "Viewer");
@@ -2995,12 +3061,27 @@ sys.stdout.buffer.write(data)
         const auto click = input.at(input.size() - 2).at(0).toJsonObject();
         QVERIFY(qAbs(click.value("x").toDouble() - 0.5) < 0.005);
         QVERIFY(qAbs(click.value("y").toDouble() - 0.5) < 0.005);
-        QTRY_COMPARE_WITH_TIMEOUT(surface->grabFramebuffer().size(),
-            window.screen()->size() * window.screen()->devicePixelRatio(), 5000);
+        // Match the client area, including the Windows fullscreen composition border.
+        frame = frame.copy(QRect(QPoint(), surface->size() * surface->devicePixelRatioF()));
+        surface->setFrame(frame);
+        QTRY_COMPARE_WITH_TIMEOUT(surface->grabFramebuffer().size(), frame.size(), 5000);
         const auto displayed = surface->grabFramebuffer();
         auto displayedDetail = displayed.copy(detail).convertToFormat(QImage::Format_RGB32);
         displayedDetail.setDevicePixelRatio(frame.devicePixelRatio());
+#ifdef Q_OS_WIN
+        // Fractional DPI and the one-pixel border can resample the fine stripes.
+        int darkest = 255;
+        int lightest = 0;
+        for (int x = 2; x < displayedDetail.width() - 2; ++x)
+        {
+            const int value = qGray(displayedDetail.pixel(x, displayedDetail.height() / 2));
+            darkest = qMin(darkest, value);
+            lightest = qMax(lightest, value);
+        }
+        QVERIFY2(lightest - darkest > 100, "Fine video detail lost contrast after expansion");
+#else
         QCOMPARE(displayedDetail, frame.copy(detail));
+#endif
         QCOMPARE(displayed.pixelColor(displayed.rect().center()), QColor("#176ee8"));
         QVERIFY(QDir().mkpath("output"));
         QVERIFY(window.grab().save("output/ui-expanded-video.png"));
