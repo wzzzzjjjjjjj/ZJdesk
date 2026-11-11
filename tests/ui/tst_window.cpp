@@ -1143,6 +1143,77 @@ private slots:
         QVERIFY(edit->address().isEmpty());
     }
 
+    void ipv4BackspaceReturnsToPreviousSegment()
+    {
+        QWidget panel;
+        auto *layout = new QVBoxLayout(&panel);
+        auto *edit = new Ipv4AddressEdit;
+        layout->addWidget(edit);
+        panel.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&panel));
+        edit->setFocus();
+        for (const auto digit : QString("192168"))
+            QTest::keyClicks(panel.focusWidget(), QString(digit));
+        QCOMPARE(edit->address(), QString("192.168.."));
+        auto *second = edit->findChild<QLineEdit *>("ipv4Octet1");
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Backspace);
+        QCOMPARE(panel.focusWidget(), second);
+        QCOMPARE(second->text(), QString("16"));
+        QCOMPARE(second->cursorPosition(), 2);
+        QCOMPARE(edit->address(), QString("192.16.."));
+        QTest::keyClicks(panel.focusWidget(), "5");
+        QCOMPARE(edit->address(), QString("192.165.."));
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Backspace);
+        QCOMPARE(edit->address(), QString("192.16.."));
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Backspace);
+        QCOMPARE(edit->address(), QString("192.1.."));
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Backspace);
+        QCOMPARE(edit->address(), QString("192..."));
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Backspace);
+        QCOMPARE(edit->address(), QString("19..."));
+        QCOMPARE(panel.focusWidget(), edit->findChild<QLineEdit *>("ipv4Octet0"));
+    }
+
+    void ipv4ArrowKeysStepThroughDigits()
+    {
+        QWidget panel;
+        auto *layout = new QVBoxLayout(&panel);
+        auto *edit = new Ipv4AddressEdit;
+        layout->addWidget(edit);
+        panel.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&panel));
+        edit->setText("12.34.56.78");
+        edit->setFocus();
+        auto *first = edit->findChild<QLineEdit *>("ipv4Octet0");
+        auto *second = edit->findChild<QLineEdit *>("ipv4Octet1");
+        auto *last = edit->findChild<QLineEdit *>("ipv4Octet3");
+        first->setFocus();
+        first->setCursorPosition(0);
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Right);
+        QCOMPARE(panel.focusWidget(), first);
+        QCOMPARE(first->cursorPosition(), 1);
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Right);
+        QCOMPARE(first->cursorPosition(), 2);
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Right);
+        QCOMPARE(panel.focusWidget(), second);
+        QCOMPARE(second->cursorPosition(), 0);
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Right);
+        QCOMPARE(second->cursorPosition(), 1);
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Left);
+        QCOMPARE(panel.focusWidget(), second);
+        QCOMPARE(second->cursorPosition(), 0);
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Left);
+        QCOMPARE(panel.focusWidget(), first);
+        QCOMPARE(first->cursorPosition(), 2);
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Left);
+        QCOMPARE(first->cursorPosition(), 1);
+        last->setFocus();
+        last->setCursorPosition(2);
+        QTest::keyClick(panel.focusWidget(), Qt::Key_Right);
+        QCOMPARE(panel.focusWidget(), last);
+        QCOMPARE(last->cursorPosition(), 2);
+    }
+
     void ipv4EntryPastesDigitsAcrossSegments_data()
     {
         QTest::addColumn<QString>("clipboard");

@@ -91,7 +91,7 @@ Ipv4AddressEdit::Ipv4AddressEdit(QWidget *parent) : QFrame(parent)
     setFocusProxy(octets_[0]);
     setFocusPolicy(Qt::StrongFocus);
     setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    setToolTip(QStringLiteral("每段输入三位后自动跳转；Tab / Shift+Tab 切换，也可粘贴完整 IPv4 地址"));
+    setToolTip(QStringLiteral("每段输入三位后自动跳转；← / → 或空段按 Backspace 跨段移动；Tab / Shift+Tab 切换，也可粘贴完整 IPv4 地址"));
 }
 
 QString Ipv4AddressEdit::address() const
@@ -216,6 +216,33 @@ bool Ipv4AddressEdit::eventFilter(QObject *watched, QEvent *event)
     {
         clear();
         return true;
+    }
+    if (key->key() == Qt::Key_Backspace && index > 0 && octet->text().isEmpty())
+    {
+        // 本段已删空时回到上一段末尾继续删除，避免在空段上按 Backspace 无响应。
+        auto *previous = octets_[index - 1];
+        previous->deselect();
+        previous->setFocus(Qt::BacktabFocusReason);
+        previous->setCursorPosition(previous->text().size());
+        if (!previous->text().isEmpty()) previous->backspace();
+        return true;
+    }
+    if ((key->key() == Qt::Key_Left || key->key() == Qt::Key_Right)
+        && !octet->hasSelectedText()
+        && !(key->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier | Qt::MetaModifier)))
+    {
+        // 光标在本段首尾时用左右键切换到相邻段。
+        const bool forward = key->key() == Qt::Key_Right;
+        const int destination = index + (forward ? 1 : -1);
+        if (destination >= 0 && destination < 4
+            && octet->cursorPosition() == (forward ? octet->text().size() : 0))
+        {
+            auto *target = octets_[destination];
+            target->deselect();
+            target->setFocus(forward ? Qt::TabFocusReason : Qt::BacktabFocusReason);
+            target->setCursorPosition(forward ? 0 : target->text().size());
+            return true;
+        }
     }
     if (key->matches(QKeySequence::Paste))
     {
