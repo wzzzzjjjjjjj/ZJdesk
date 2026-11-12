@@ -29,6 +29,7 @@ public:
     ~NetworkSetup() override;
     static QStringList localAddresses();
     static QStringList suggestedPeerAddresses(const QStringList &history);
+    static QStringList lanPeerAddresses(const QStringList &addresses);
     static NetworkConfiguration configurationForPeer(const QString &peerAddress, const QUrl &serverUrl = {});
     static QString configurationError(const NetworkConfiguration &configuration);
     void verifyPeer(const QString &peerAddress, const QUrl &serverUrl = {});
@@ -42,6 +43,7 @@ public:
 signals:
     void progress(const QString &message);
     void finished(bool success, const QString &message);
+    void peerNetworkDiscovered(const QString &tailscaleAddress, const QStringList &addresses, const QString &deviceName = {});
 
 private:
     friend class ::NetworkSetupTests;
@@ -51,6 +53,8 @@ private:
     QProcess *ping_ = nullptr;
     QWebSocket *socket_ = nullptr;
     RoomServer *server_ = nullptr;
+    QWebSocket *discoveryWatcher_ = nullptr;
+    QTimer discoveryRetry_;
     QTimer deadline_;
     bool busy_ = false;
     bool verified_ = false;

@@ -19,6 +19,8 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
     peerRetry_.setInterval(5000);
     connect(&peerRetry_, &QTimer::timeout, this, &SessionCoordinator::retryPeerSession);
     connect(&peerConnection_, &PeerConnection::routeChanged, this, &SessionCoordinator::changePeerRoute);
+    connect(&peerConnection_, &PeerConnection::networkDiscovered, this, &SessionCoordinator::peerNetworkDiscovered);
+    connect(&peerConnection_, &PeerConnection::discoveryStatus, this, &SessionCoordinator::peerDiscoveryStatus);
     connect(&peerConnection_, &PeerConnection::unavailable, this, [this] {
         changePeerRoute({});
     });

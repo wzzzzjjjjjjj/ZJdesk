@@ -1,5 +1,27 @@
 # ZJdesk 项目交接
 
+## 2026-11-12 首次必填与多设备名称历史
+
+没有有效配置时，客户端入口打开必填 Tailscale IPv4 配置窗口，空输入和普通局域网 IPv4 会保留窗口并提示。仅需一端填写，空白端可通过经过源地址校验的发现信息自动保存对端并关闭窗口。首次保存默认开启启动自动连接，内部别名为 `peer`。
+
+主界面改为设备名称下拉框和「添加设备」，最多保存最近 20 台设备，以稳定 Tailscale 地址去重，每台独立保存局域网清单、设备名称与 SSH 用户。名称来自两端 `network_info` 的主机名称，同名加序号，尚未取得名称时显示「待识别设备」。选中已有名称立即通过协调层撤销旧连接并开始新探测，同一条记录再次选择也能连接。地址更新时保留正在添加其他设备的窗口，显式停止的既有连接不会因后台发现而重启。
+
+自动模式每次启动或切换设备先探测 Tailscale，取得有效清单或成功的 Tailscale SSH 查询后才启用局域网候选，保存的旧局域网缓存不能抢先放行。之后沿用局域网优先、Tailscale 回退和 DHCP 地址持续更新。旧单设备设置迁移为历史记录，手动配置继续兼容。
+
+Windows Release 构建部署成功，7 组非 GUI 回归全部通过（206.37 秒，媒体组有 5 项平台限定跳过）。最后补充名称转发断言和调整引导用例后，网络及对端连接两组复测通过（44.80 秒）。最终 29 项真实桌面 UI 回归全部通过（11.795 秒，无跳过），覆盖首次必填、空白端自动完成、名称历史与切换、独立缓存、重命名、旧设置迁移及原远控恢复。首轮一条原有粘贴用例遇到 Windows 剪贴板占用，完整复测通过。已检查首次弹窗与设备选择框截图。
+
+日志为 `build/device-build.log`、`build/device-tests.log`、`build/device-focused.log` 和 `build/device-ui.log`，桌面结果为 `build/windows-release/test-results/device-ui.xml`。部署与构建 EXE 的 SHA256 均为 `C8E451C1EDE73CDCD59B541EE1F31399155518A92432B310E24895D9497EB3A8`。所有操作位于本聊天 worktree，尚未提交。Ubuntu 构建、真实双机首次互配与线路切换、实际 SSH 登录、音视频和键鼠恢复仍待实机验证。
+
+## 2026-11-12 Tailscale 首次连接与局域网地址自动更新
+
+首次只需在一端填写对端 Tailscale IPv4。客户端通过 `network_info` 交换当前活动网卡地址，服务端仅在实际连接源属于 Tailscale 且清单包含该源地址时通知本机客户端。另一端没有既有对端配置时自动保存并连接，默认别名 `peer`，首次自动保存默认开启启动后自动连接。既有对端、用户关闭的自动连接、主动断开及清空配置均有回归覆盖。已由独立服务占用端口时，通过仅限回环连接的 `network_watch` 转发发现结果。
+
+探测线程每 5 秒刷新地址，使用缓存和当前同网段地址优先探测局域网，通过稳定的 Tailscale IPv4 更新 DHCP 地址。自动模式下，局域网服务须返回包含预期 Tailscale 与当前局域网地址的清单。程序交换超时后才尝试备用 SSH，免交互执行 Linux 的 `ip -4 -o addr show up scope global`，保留主机信任检查，每次最多 7 秒、最多每 30 秒尝试一次。SSH 确认预期 Tailscale 地址后也可探测不支持新协议的旧服务。SSH 用户可在设置中填写，留空沿用现有 SSH 配置。
+
+Windows Release 已构建部署，7 组非 GUI 测试全部通过（204.92 秒）。最后修复发现监听器重新初始化时的重复定时器连接后，网络组复测通过（10.30 秒）。31 项真实桌面 UI 回归通过（11.158 秒，无失败、无跳过）。首轮 UI 中两条旧断言仍要求 Tailscale 输入走手动验证，已调整为检查自动发现配置及服务端口；另一次粘贴测试出现 Windows `OpenClipboard` 占用，完整复测通过。SSH 旧服务与服务未启动两种场景均使用测试替身验证，首次复现了 SSH 获取地址后无法选用旧版局域网服务的问题，修复后通过。
+
+日志为 `build/discovery-build.log`、`build/discovery-tests.log`、`build/discovery-network.log`、`build/discovery-ui.log` 和 `build/discovery-ssh-repro.log`。部署入口为 `dist/windows-release/bin/zjdesk.exe`，与构建目录 EXE 的 SHA256 一致。Ubuntu 构建、实际 SSH 信任和免密认证、真实双机 DHCP 迁移及音视频、键鼠与共享恢复仍待验收。Linux 客户端需另外构建部署。
+
 ## 2026-11-11 打包入口：一键生成 EXE 与 AppImage
 
 新增根目录 `package-release.ps1` 和 `打包可执行程序.bat`。一次运行先打包 Windows 自解压 EXE，再通过 SSH 把当前源码同步到 Linux 构建机生成 AppImage，两端都成功后才替换 `可执行程序` 内的旧文件，每种产物只保留最新一份。AppImage 无法在 Windows 生成（依赖 `ldd`、`dpkg-query`、`mksquashfs` 和 appimagetool），appimagetool 与 type2 runtime 缓存在 `build/packaging-tools/` 并随每次打包上传远端。

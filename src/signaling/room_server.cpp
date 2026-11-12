@@ -9,9 +9,32 @@
 #include <QDir>
 #include <QStandardPaths>
 #include <QPointer>
+#include <QNetworkInterface>
+#include <QHostInfo>
 
 namespace zjdesk
 {
+QStringList RoomServer::networkAddresses()
+{
+    QStringList addresses;
+    for (const auto &interface : QNetworkInterface::allInterfaces())
+    {
+        if (!(interface.flags() & QNetworkInterface::IsUp)
+            || !(interface.flags() & QNetworkInterface::IsRunning)) continue;
+        const bool lan = interface.type() == QNetworkInterface::Ethernet || interface.type() == QNetworkInterface::Ieee80211;
+        for (const auto &entry : interface.addressEntries())
+        {
+            const auto address = entry.ip();
+            if (address.protocol() != QAbstractSocket::IPv4Protocol || address.isLoopback()
+                || address.toIPv4Address() < 0x01000000 || address.toIPv4Address() >= 0xe0000000
+                || address.isInSubnet(QHostAddress("169.254.0.0"), 16)) continue;
+            if (lan || address.isInSubnet(QHostAddress("100.64.0.0"), 10)) addresses.append(address.toString());
+        }
+    }
+    addresses.removeDuplicates();
+    return addresses.mid(0, 64);
+}
+
 RoomServer::RoomServer(QObject *parent, const QString &remoteRegistryFile)
     : QObject(parent), server_("ZJdesk signaling", QWebSocketServer::NonSecureMode),
       remoteRegistry_(remoteRegistryFile.isEmpty()
@@ -63,6 +86,7 @@ void RoomServer::close()
         socket->deleteLater();
     }
     peers_.clear();
+    networkWatchers_.clear();
     rooms_.clear();
     sharedScreens_.clear();
     annotationGrants_.clear();
@@ -88,6 +112,7 @@ void RoomServer::acceptConnection()
                 peers_[socket].lastPong = clock_.elapsed();
         });
         connect(socket, &QWebSocket::disconnected, this, [this, socket] {
+            networkWatchers_.remove(socket);
             remoteCodes_.remove(peers_.value(socket).remoteCode);
             leave(socket);
             peers_.remove(socket);
@@ -342,6 +367,39 @@ void RoomServer::receive(QWebSocket *socket, const QString &text)
     if (!message)
     {
         reject(socket, error);
+        return;
+    }
+    if (message->type == "network_watch")
+    {
+        if (!socket->peerAddress().isLoopback()) return reject(socket, "local_network_watch_only");
+        networkWatchers_.insert(socket);
+        return;
+    }
+    if (message->type == "network_info")
+    {
+        const auto requestId = message->payload.value("requestId").toString();
+        const auto inventory = message->payload.value("addresses").toArray();
+        if (requestId.isEmpty() || requestId.size() > 32 || inventory.size() > 64)
+            return reject(socket, "invalid_network_info");
+        QStringList addresses;
+        for (const auto &value : inventory)
+        {
+            const auto address = value.toString();
+            if (QHostAddress(address).protocol() != QAbstractSocket::IPv4Protocol || QHostAddress(address).toString() != address)
+                return reject(socket, "invalid_network_info");
+            addresses.append(address);
+        }
+        send(socket, {"network_info", {{"requestId", requestId},
+            {"addresses", QJsonArray::fromStringList(networkAddresses())}, {"deviceName", QHostInfo::localHostName().left(128)}}});
+        const auto observed = QHostAddress(socket->peerAddress().toIPv4Address());
+        if (observed.isInSubnet(QHostAddress("100.64.0.0"), 10) && addresses.contains(observed.toString()))
+        {
+            const auto deviceName = message->payload.value("deviceName").toString().trimmed().left(128);
+            emit peerNetworkDiscovered(observed.toString(), addresses, deviceName);
+            for (auto *watcher : networkWatchers_.values())
+                send(watcher, {"peer_network", {{"tailscaleAddress", observed.toString()},
+                    {"addresses", QJsonArray::fromStringList(addresses)}, {"deviceName", deviceName}}});
+        }
         return;
     }
     if (message->type == "annotation")

@@ -9,6 +9,7 @@
 #include <QSettings>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QHostInfo>
 
 using State = zjdesk::SessionCoordinator::State;
 
@@ -16,6 +17,35 @@ class SignalingTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void networkInventoryIsAvailableBeforeRegistrationAndDoesNotTrustLanAdvertisements()
+    {
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        QWebSocket socket;
+        socket.setProxy(QNetworkProxy::NoProxy);
+        QSignalSpy replies(&socket, &QWebSocket::textMessageReceived);
+        QSignalSpy discovered(&server, &zjdesk::RoomServer::peerNetworkDiscovered);
+        socket.open(QUrl(QString("ws://127.0.0.1:%1").arg(server.port())));
+        QTRY_COMPARE(socket.state(), QAbstractSocket::ConnectedState);
+        socket.sendTextMessage(zjdesk::protocol::encode({"network_info", {{"requestId", "probe1"},
+            {"addresses", QJsonArray{"100.94.123.45", "192.168.1.20"}}}}));
+        QTRY_COMPARE(replies.size(), 1);
+        const auto reply = zjdesk::protocol::decode(replies.first().at(0).toString());
+        QVERIFY(reply);
+        QCOMPARE(reply->type, QString("network_info"));
+        QCOMPARE(reply->payload.value("requestId").toString(), QString("probe1"));
+        QCOMPARE(reply->payload.value("deviceName").toString(), QHostInfo::localHostName().left(128));
+        QCOMPARE(reply->payload.value("addresses").toArray(), QJsonArray::fromStringList(zjdesk::RoomServer::networkAddresses()));
+        QVERIFY(discovered.isEmpty());
+        QCOMPARE(server.roomCount(), 0);
+        socket.sendTextMessage(zjdesk::protocol::encode({"network_info", {{"requestId", "probe2"},
+            {"addresses", QJsonArray{"invalid"}}}}));
+        QTRY_COMPARE(replies.size(), 2);
+        const auto error = zjdesk::protocol::decode(replies.last().at(0).toString());
+        QVERIFY(error);
+        QCOMPARE(error->payload.value("code").toString(), QString("invalid_network_info"));
+    }
+
     void remoteReadyDistinguishesTransportLossFromExplicitEnd()
     {
         zjdesk::RoomServer server;

@@ -6,6 +6,11 @@
 
 int main()
 {
+    if (const auto *addresses = std::getenv("ZJDESK_TEST_SSH_ADDRESSES"))
+    {
+        std::cout << addresses;
+        return 0;
+    }
     const auto *environment = std::getenv("ZJDESK_TEST_PING");
     const std::string mode = environment ? environment : "ok";
     if (mode == "slow") std::this_thread::sleep_for(std::chrono::seconds(30));

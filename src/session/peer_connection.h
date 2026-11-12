@@ -13,6 +13,10 @@ struct PeerProfile
     QString alias;
     QString lanAddress;
     QString tailscaleAddress;
+    bool autoDiscover = false;
+    QStringList lanAddresses;
+    QString sshUser;
+    QString deviceName;
     QString error() const;
 };
 
@@ -29,10 +33,13 @@ public:
 signals:
     void routeChanged(const zjdesk::NetworkConfiguration &configuration);
     void unavailable();
+    void networkDiscovered(const QString &tailscaleAddress, const QStringList &addresses, const QString &deviceName = {});
+    void discoveryStatus(const QString &message);
 
 private:
     friend class ::PeerConnectionTests;
     std::function<NetworkConfiguration(const QString &, const QUrl &, bool)> resolve_;
+    std::function<QStringList(const QStringList &)> matchLan_;
     QThread thread_;
     QObject *worker_ = nullptr;
     quint64 generation_ = 0;

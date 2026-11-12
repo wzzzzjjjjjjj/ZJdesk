@@ -5,6 +5,7 @@
 #include "signaling/room_server.h"
 #include "platform/platform_info.h"
 #include <QDir>
+#include <QDialog>
 #include <QEventLoop>
 #include <QFile>
 #include <QImage>
@@ -788,6 +789,71 @@ private slots:
         session.leave();
     }
 
+    void tailscaleOnlyBootstrapLearnsAndPersistsDhcpAddresses()
+    {
+        QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+        settings.clear();
+        auto cleanup = qScopeGuard([&] { settings.clear(); });
+        {
+            MainWindow window({}, {}, "Auto discovery");
+            window.enableNetworkSetup();
+            window.showPeerSetup();
+            auto *dialog = window.findChild<QDialog *>("peerSetupDialog");
+            QVERIFY(dialog);
+            dialog->findChild<Ipv4AddressEdit *>("firstPeerTailscaleAddress")->setText("100.94.123.45");
+            dialog->findChild<QPushButton *>("confirmPeerDevice")->click();
+            QVERIFY(window.session_.profileEnabled_);
+            QVERIFY(window.peerProfile_.autoDiscover);
+            QCOMPARE(window.peerProfile_.tailscaleAddress, QString("100.94.123.45"));
+            QCOMPARE(window.networkPeer_->currentData().toString(), QString("100.94.123.45"));
+            const QStringList first{"100.94.123.45", "192.168.88.20"};
+            window.session_.peerNetworkDiscovered("100.94.123.45", first, "Linux-A");
+            QCOMPARE(settings.value("peer/lanAddresses").toStringList(), first);
+            QVERIFY(settings.value("peer/autoConnect").toBool());
+            window.findChild<QLineEdit *>("peerTailscaleAddress")->setText("100.94.123.46");
+            const QStringList changed{"100.94.123.45", "192.168.88.30"};
+            window.session_.peerNetworkDiscovered("100.94.123.45", changed);
+            QCOMPARE(settings.value("peer/lanAddresses").toStringList(), changed);
+            QCOMPARE(window.findChild<QLineEdit *>("peerTailscaleAddress")->text(), QString("100.94.123.46"));
+            window.session_.peerNetworkDiscovered("100.94.123.99", {"100.94.123.99"});
+            QCOMPARE(settings.value("peer/tailscaleAddress").toString(), QString("100.94.123.45"));
+            window.session_.clearPeerProfile();
+            window.session_.peerNetworkDiscovered("100.94.123.45", first);
+            QVERIFY(!window.session_.profileEnabled_);
+        }
+        MainWindow restored({}, {}, "Restored discovery");
+        restored.enableNetworkSetup();
+        QVERIFY(restored.peerProfile_.autoDiscover);
+        QVERIFY(restored.peerProfile_.lanAddresses.contains("192.168.88.20"));
+        QVERIFY(restored.session_.profileEnabled_);
+    }
+
+    void incomingDiscoveryConfiguresEmptyPeerAndHonorsExplicitClear()
+    {
+        QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+        settings.clear();
+        auto cleanup = qScopeGuard([&] { settings.clear(); });
+        MainWindow window({}, {}, "Incoming discovery");
+        window.enableNetworkSetup();
+        window.showPeerSetup(true);
+        auto *dialog = window.findChild<QDialog *>("peerSetupDialog");
+        QVERIFY(dialog && dialog->isVisible());
+        window.networkSetup_.peerNetworkDiscovered("100.94.123.45", {"100.94.123.45", "192.168.88.20"});
+        QCOMPARE(settings.value("peer/tailscaleAddress").toString(), QString("100.94.123.45"));
+        QVERIFY(!dialog->isVisible());
+        QVERIFY(window.session_.profileEnabled_);
+        window.findChild<QLineEdit *>("peerAlias")->clear();
+        window.findChild<QLineEdit *>("peerLanAddress")->clear();
+        window.findChild<QLineEdit *>("peerTailscaleAddress")->clear();
+        window.findChild<QCheckBox *>("peerAutoConnect")->setChecked(false);
+        window.findChild<QPushButton *>("savePeerProfile")->click();
+        QVERIFY(window.peerProfile_.alias.isEmpty());
+        QVERIFY(!window.session_.profileEnabled_);
+        window.networkSetup_.peerNetworkDiscovered("100.94.123.45", {"100.94.123.45"});
+        QVERIFY(window.peerProfile_.alias.isEmpty());
+        QVERIFY(!window.session_.profileEnabled_);
+    }
+
     void peerProfileSettingsPersistAndResolveAlias()
     {
         QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
@@ -808,7 +874,7 @@ private slots:
             overlay->setText("100.100.100.100");
             save->click();
             QCOMPARE(settings.value("peer/alias").toString(), QString("linux-wzj"));
-            window.networkPeer_->setText("LINUX-WZJ");
+            QCOMPARE(window.networkPeer_->currentData().toString(), QString("100.100.100.100"));
             window.meetingNameEdit_->setText(QStringLiteral("Invalid") + QChar::Null);
             window.verifyStartupPeer();
             QVERIFY(!window.networkVerifying_);
@@ -819,14 +885,14 @@ private slots:
             window.verifyStartupPeer();
             QVERIFY(window.session_.profileEnabled_);
             QVERIFY(window.session_.profileOnline_);
-            window.networkPeer_->setText("203.0.113.10");
+            window.invalidateNetworkSetup();
             QVERIFY(!window.session_.profileEnabled_);
         }
         settings.setValue("peer/autoConnect", true);
         MainWindow restored({}, {}, "Alias restored");
         QCOMPARE(restored.findChild<QLineEdit *>("peerAlias")->text(), QString("linux-wzj"));
         restored.enableNetworkSetup();
-        QCOMPARE(restored.networkPeer_->address(), QString("linux-wzj"));
+        QCOMPARE(restored.networkPeer_->currentData().toString(), QString("100.100.100.100"));
         QVERIFY(restored.session_.profileEnabled_);
         restored.session_.clearPeerProfile();
     }
@@ -917,86 +983,66 @@ private slots:
     void startupNetworkSwitchesAddressFamily_data()
     {
         QTest::addColumn<QString>("startupUrl");
-        QTest::addColumn<QString>("previousUrl");
-        QTest::addColumn<QString>("peerAddress");
-        QTest::newRow("lan-to-tailscale") << QString() << "ws://10.42.0.9:8765" << "100.89.0.9";
-        QTest::newRow("tailscale-to-lan") << QString() << "ws://100.89.0.9:8765" << "10.42.0.9";
-        QTest::newRow("automatic-custom-port") << "ws://127.0.0.1:18765" << "ws://100.89.0.9:18765" << "10.42.0.9";
-        QTest::newRow("explicit-server") << "ws://192.0.2.10:18765" << "ws://192.0.2.10:18765" << "100.89.0.9";
+        QTest::newRow("automatic") << QString();
+        QTest::newRow("custom-port") << "ws://192.0.2.10:18765";
     }
 
     void startupNetworkSwitchesAddressFamily()
     {
         QFETCH(QString, startupUrl);
-        QFETCH(QString, previousUrl);
-        QFETCH(QString, peerAddress);
+        QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
+        settings.clear();
+        auto cleanup = qScopeGuard([&] { settings.clear(); });
         MainWindow window(startupUrl, {}, "Network switch test");
         window.enableNetworkSetup();
-        // A successful verification replaces the displayed URL with its resolved address.
-        window.serverEdit_->setText(previousUrl);
-        window.networkPeer_->setText(peerAddress);
-        window.verifyStartupPeer();
-        const auto configuration = window.networkSetup_.configuration();
-        QCOMPARE(configuration.peerAddress(), peerAddress);
-        const auto expected = startupUrl == "ws://192.0.2.10:18765" ? QUrl(startupUrl)
-            : QUrl(QString("ws://%1:%2").arg(configuration.linuxAddress)
-                .arg(QUrl(startupUrl).port(8765)));
-        QCOMPARE(configuration.serverUrl, expected);
-        window.networkSetup_.cancel();
+        const auto serverOverride = window.networkServerOverride_;
+        window.showPeerSetup();
+        auto *dialog = window.findChild<QDialog *>("peerSetupDialog");
+        dialog->findChild<Ipv4AddressEdit *>("firstPeerTailscaleAddress")->setText("100.89.0.9");
+        dialog->findChild<QPushButton *>("confirmPeerDevice")->click();
+        QVERIFY(window.session_.profileEnabled_);
+        QVERIFY(window.peerProfile_.autoDiscover);
+        QCOMPARE(window.peerProfile_.tailscaleAddress, QString("100.89.0.9"));
+        QCOMPARE(window.networkServerOverride_, serverOverride);
+        QCOMPARE(serverOverride.port(8765), QUrl(startupUrl).port(8765));
+        QVERIFY(!window.networkSetup_.verified());
     }
 
     void startupNetworkCannotSkipVerification()
     {
         QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
         settings.clear();
-        MainWindow window({}, {}, "Network test");
+        auto cleanup = qScopeGuard([&] { settings.clear(); });
+        MainWindow window({}, {}, "First startup");
         window.enableNetworkSetup();
-        window.setAttribute(Qt::WA_ShowWithoutActivating);
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
-        auto *peer = window.findChild<Ipv4AddressEdit *>("networkPeerAddress");
-        QVERIFY(window.networkPeer_->address().isEmpty());
-        QVERIFY(peer->property("networkInvalid").toBool());
-        QVERIFY(window.networkPeer_->styleSheet().contains("#dc3545"));
+        window.showPeerSetup(true);
+        auto *dialog = window.findChild<QDialog *>("peerSetupDialog");
+        QVERIFY(dialog && dialog->isModal());
+        QVERIFY(QTest::qWaitForWindowExposed(dialog));
+        QVERIFY(QDir().mkpath("output"));
+        QVERIFY(dialog->grab().save("output/ui-first-peer.png"));
         QVERIFY(!window.joinButton_->isEnabled());
         QVERIFY(!window.meetingJoinButton_->isEnabled());
+        auto *confirm = dialog->findChild<QPushButton *>("confirmPeerDevice");
+        auto *address = dialog->findChild<Ipv4AddressEdit *>("firstPeerTailscaleAddress");
+        confirm->click();
+        QVERIFY(dialog->isVisible());
+        QVERIFY(!window.session_.profileEnabled_);
+        address->setText("192.168.1.20");
+        confirm->click();
+        QVERIFY(dialog->isVisible());
+        QVERIFY(dialog->findChild<QLabel *>("firstPeerError")->text().contains("Tailscale"));
         window.startRemoteAccess();
         QCOMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
-        peer->setText("999.1.1.1");
-        window.joinButton_->click();
+        address->setText("100.94.123.45");
+        confirm->click();
+        QVERIFY(!dialog->isVisible());
+        QVERIFY(window.session_.profileEnabled_);
         QVERIFY(!window.networkSetup_.verified());
-        QVERIFY(peer->property("networkInvalid").toBool());
-        QVERIFY(window.joinButton_->isEnabled());
-        QVERIFY(window.findChild<QLabel *>("networkStatus")->toolTip().contains(QStringLiteral("对端")));
-        const auto *panel = window.findChild<QWidget *>("startupNetworkPanel");
-        QCOMPARE(panel->parentWidget(), window.connectionLayout_->parentWidget());
-        QVERIFY(panel->isAncestorOf(window.joinButton_));
-        int visibleButtons = 0;
-        for (const auto *button : panel->findChildren<QPushButton *>())
-            if (button->isVisible()) ++visibleButtons;
-        QCOMPARE(visibleButtons, 1);
-        QCOMPARE(window.joinButton_->text(), QStringLiteral("连接服务"));
-        const auto *help = window.findChild<QLabel *>("networkHelp");
-        QVERIFY(help);
-#ifdef Q_OS_WIN
-        QVERIFY(help->text().contains(QStringLiteral("sh tools/ip-info.sh")));
-#else
-        QVERIFY(help->text().contains(QStringLiteral("tools\\ip-info.cmd")));
-#endif
-        QVERIFY(!window.remoteConnectButton_->isVisible());
-        QVERIFY(!window.networkColumn_->isVisible());
-        QVERIFY(window.remoteHistory_->isHidden());
-        QVERIFY(!window.serverEdit_->isVisible());
-        QVERIFY(!window.findChild<QLineEdit *>("displayName"));
-        for (auto *label : panel->parentWidget()->findChildren<QLabel *>())
-            QVERIFY(!label->isVisible() || label->text() != QStringLiteral("服务地址"));
-        QVERIFY(!window.findChild<QFrame *>("sidebar")->isAncestorOf(panel));
-        for (auto *widget : QApplication::topLevelWidgets())
-            if (qobject_cast<QDialog *>(widget)) QVERIFY(!widget->isVisible());
-        QVERIFY(QDir().mkpath("output"));
-        QVERIFY(window.grab().save("output/ui-startup-network.png"));
-        peer->clear();
-        QVERIFY(peer->property("networkInvalid").toBool());
+        QCOMPARE(settings.value("peer/tailscaleAddress").toString(), QString("100.94.123.45"));
+        QVERIFY(settings.value("peer/autoConnect").toBool());
     }
 
     void ipv4EntryPreservesSavedAlias()
@@ -1251,167 +1297,81 @@ private slots:
     {
         QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
         settings.clear();
-#ifdef Q_OS_WIN
-        const QString key = "networkSetup/linuxAddress";
-#else
-        const QString key = "networkSetup/windowsAddress";
-#endif
-        const QString peer = "100.94.123.45";
-        QVERIFY(!zjdesk::NetworkSetup::localAddresses().contains(peer));
-        settings.setValue(key, peer); // Migrate a successful address saved by the old version.
-        settings.setValue(key + "History", QStringList{peer, peer, "invalid", "127.0.0.1"});
-        MainWindow window({}, {}, "Network history");
-        window.enableNetworkSetup();
-        window.show();
-        QVERIFY(QTest::qWaitForWindowExposed(&window));
-        auto *history = window.networkPeer_->findChild<QMenu *>();
-        QCOMPARE(history->actions().size(), 1);
-        QVERIFY(history->actions().first()->text().contains("Tailscale"));
-        QCOMPARE(history->actions().first()->data().toString(), peer);
-        window.networkPeer_->clear();
-        window.networkPeer_->setFocus();
-        QTest::keyClicks(window.focusWidget(), "10");
-        QTest::keyClick(window.focusWidget(), Qt::Key_Tab);
-        QCOMPARE(window.focusWidget(), window.networkPeer_->findChild<QLineEdit *>("ipv4Octet1"));
-        window.networkPeer_->clear();
-        QVERIFY(window.networkPeer_->width() < window.width() / 2);
-        window.networkPeer_->setText("10.11.42.4");
-        QVERIFY(QDir().mkpath("output"));
-        QVERIFY(window.grab().save("output/ui-ip-entry-compact.png"));
-        QVERIFY(window.networkPeer_->grab().save("output/ui-ip-entry-segments.png"));
-        window.networkPeer_->clear();
-        auto *historyButton = window.networkPeer_->findChild<QToolButton *>("ipv4History");
-        QVERIFY(historyButton);
-        // An instant-popup tool button runs a nested event loop until the menu closes.
-        QTimer::singleShot(100, history, [history] {
-            QTest::mouseMove(history, history->actionGeometry(history->actions().first()).center());
-            QTest::mouseClick(history, Qt::LeftButton, Qt::NoModifier,
-                history->actionGeometry(history->actions().first()).center());
-        });
-        QTest::mouseClick(historyButton, Qt::LeftButton);
-        QCOMPARE(window.networkPeer_->address(), peer);
-        QVERIFY(!window.networkSetup_.verified());
-        QCOMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
-        QVERIFY(window.joinButton_->isEnabled());
-        QVERIFY(!window.meetingJoinButton_->isEnabled());
-        const QSignalSpy edits(window.networkPeer_, &Ipv4AddressEdit::textChanged);
-        window.refreshNetworkPeerHistory();
-        QCOMPARE(edits.count(), 0);
-        QCOMPARE(window.networkPeer_->address(), peer);
-        window.networkPeer_->setFocus();
-        QTest::keyClick(window.focusWidget(), Qt::Key_F4);
-        QTRY_VERIFY(history->isVisible());
-        history->close();
-        QCOMPARE(window.networkPeer_->address(), peer);
-        QCOMPARE(edits.count(), 0);
+        auto cleanup = qScopeGuard([&] { settings.clear(); });
+        {
+            MainWindow window({}, {}, "Device history");
+            window.enableNetworkSetup();
+            window.networkSetup_.peerNetworkDiscovered("100.94.123.45", {"100.94.123.45", "192.168.88.20"}, "Linux-A");
+            QCOMPARE(window.networkPeer_->currentText(), QString("Linux-A"));
+            window.session_.peerNetworkDiscovered("100.94.123.45", {"100.94.123.45", "192.168.88.30"}, "Linux-A");
+            QCOMPARE(window.networkPeer_->count(), 1);
+            window.showPeerSetup();
+            auto *dialog = window.findChild<QDialog *>("peerSetupDialog");
+            window.session_.peerNetworkDiscovered("100.94.123.45", {"100.94.123.45", "192.168.88.31"}, "Linux-A");
+            QVERIFY(dialog->isVisible());
+            dialog->findChild<Ipv4AddressEdit *>("firstPeerTailscaleAddress")->setText("100.94.123.46");
+            dialog->findChild<QPushButton *>("confirmPeerDevice")->click();
+            window.session_.peerNetworkDiscovered("100.94.123.46", {"100.94.123.46", "192.168.99.20"}, "Linux-B");
+            QCOMPARE(window.networkPeer_->count(), 2);
+            QCOMPARE(window.networkPeer_->currentText(), QString("Linux-B"));
+            QVERIFY(!window.networkPeer_->isEditable());
+            for (int i = 0; i < window.networkPeer_->count(); ++i)
+            {
+                QVERIFY(!window.networkPeer_->itemText(i).contains("100.94"));
+                QVERIFY(!window.networkPeer_->itemText(i).contains("192.168"));
+            }
+            window.networkPeer_->setCurrentIndex(window.networkPeer_->findData("100.94.123.45"));
+            window.networkPeer_->activated(window.networkPeer_->currentIndex());
+            QCOMPARE(window.peerProfile_.tailscaleAddress, QString("100.94.123.45"));
+            QVERIFY(window.peerProfile_.lanAddresses.contains("192.168.88.31"));
+            QVERIFY(!window.peerProfile_.lanAddresses.contains("192.168.99.20"));
+            QVERIFY(window.session_.profileEnabled_);
+            QVERIFY(!window.networkSetup_.verified());
+            const auto records = settings.value("peer/devices").toList();
+            QCOMPARE(records.size(), 2);
+            QCOMPARE(records.first().toMap().value("deviceName").toString(), QString("Linux-A"));
+            window.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&window));
+            QVERIFY(QDir().mkpath("output"));
+            QVERIFY(window.networkPeer_->grab().save("output/ui-device-selector.png"));
+        }
+        MainWindow restored({}, {}, "Restored devices");
+        restored.enableNetworkSetup();
+        QCOMPARE(restored.networkPeer_->count(), 2);
+        QCOMPARE(restored.networkPeer_->currentText(), QString("Linux-A"));
+        restored.session_.peerNetworkDiscovered("100.94.123.45", {"100.94.123.45"}, "Renamed-PC");
+        QCOMPARE(restored.networkPeer_->currentText(), QString("Renamed-PC"));
+        QCOMPARE(restored.networkPeer_->count(), 2);
+        restored.networkPeer_->setCurrentIndex(restored.networkPeer_->findData("100.94.123.46"));
+        restored.networkPeer_->activated(restored.networkPeer_->currentIndex());
+        QCOMPARE(restored.networkPeer_->currentText(), QString("Linux-B"));
     }
 
     void startupNetworkPersistsInputsButRequiresNewVerification()
     {
-        const auto addresses = zjdesk::NetworkSetup::localAddresses();
-        if (addresses.isEmpty()) QSKIP("No active IPv4 interface");
-        // 与产品逻辑一致：按到对端的路由选择本机地址，避免多网卡 / VPN 机器上
-        // 服务器地址与自动选出的本机地址不一致导致验证被拒。
-        QUdpSocket route;
-        route.connectToHost(QHostAddress("203.0.113.9"), 9);
-        const auto routed = route.localAddress().toString();
-        const auto serverAddress = addresses.contains(routed) ? routed : addresses.first();
-        const auto originalPath = qgetenv("PATH");
-        const auto originalBinding = qgetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
-        const auto originalPing = qgetenv("ZJDESK_TEST_PING");
-        const auto restore = qScopeGuard([=] {
-            qputenv("PATH", originalPath);
-            if (originalBinding.isNull()) qunsetenv("ZJDESK_WEBRTC_LOCAL_ADDRESS");
-            else qputenv("ZJDESK_WEBRTC_LOCAL_ADDRESS", originalBinding);
-            if (originalPing.isNull()) qunsetenv("ZJDESK_TEST_PING");
-            else qputenv("ZJDESK_TEST_PING", originalPing);
-        });
-        QTemporaryDir pingDirectory;
-#ifdef Q_OS_WIN
-        const auto suffix = QStringLiteral(".exe");
-#else
-        const auto suffix = QString();
-#endif
-        const auto destination = pingDirectory.filePath("ping" + suffix);
-        QVERIFY(QFile::copy(QCoreApplication::applicationDirPath() + "/zjdesk-network-ping-stub" + suffix, destination));
-        QFile::setPermissions(destination, QFile::permissions(destination) | QFile::ExeOwner);
-        qputenv("PATH", pingDirectory.path().toUtf8() + QDir::listSeparator().toLatin1() + originalPath);
-        qputenv("ZJDESK_TEST_PING", "ok");
-        zjdesk::RoomServer server(nullptr, pingDirectory.filePath("codes.ini"));
-        QVERIFY(server.listen(QHostAddress(serverAddress), 0));
         QSettings settings(QSettings::IniFormat, QSettings::UserScope, "ZJdesk", "network");
         settings.clear();
-        const auto url = QString("ws://%1:%2").arg(serverAddress).arg(server.port());
-        MainWindow window(url, {}, "Network test");
+        auto cleanup = qScopeGuard([&] { settings.clear(); });
+        settings.setValue("peer/alias", "old-peer");
+        settings.setValue("peer/tailscaleAddress", "100.94.123.45");
+        settings.setValue("peer/lanAddress", "192.168.88.20");
+        settings.setValue("peer/autoConnect", false);
+        MainWindow window({}, {}, "Existing config");
         window.enableNetworkSetup();
-#ifdef Q_OS_WIN
-        const QString peerKey = "linuxAddress";
-#else
-        const QString peerKey = "windowsAddress";
-#endif
-        auto *peer = window.findChild<Ipv4AddressEdit *>("networkPeerAddress");
-        peer->setText("203.0.113.9");
-        window.joinButton_->click();
-        QTRY_VERIFY2(window.networkSetup_.verified(),
-            qPrintable(window.findChild<QLabel *>("networkStatus")->toolTip()));
-        QCOMPARE(settings.value("networkSetup/" + peerKey + "History").toStringList(), QStringList{"203.0.113.9"});
-        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
-        QVERIFY(window.remoteCodeLabel_->isHidden());
-        QVERIFY(window.remoteHistory_->isHidden());
-        QTest::qWait(300);
-        QVERIFY(!window.session_.detail().contains(QStringLiteral("对端未在线")));
-        QVERIFY(!window.session_.remoteConnecting());
-        QCOMPARE(window.session_.remoteState(), zjdesk::SessionCoordinator::RemoteState::Idle);
-        QVERIFY(!window.session_.screenActive());
-        QVERIFY(!window.joinButton_->isEnabled());
-        auto *remote = window.findChild<QPushButton *>("remoteConnectButton");
-        QVERIFY(remote && !remote->isHidden());
-        QVERIFY(remote->isEnabled());
-        QCOMPARE(remote->text(), QStringLiteral("远程控制"));
-        remote->click();
-        // Only the explicit control action attempts to pair with the offline fixture.
-        QTRY_VERIFY2(window.session_.detail().contains(QStringLiteral("对端未在线")),
-            qPrintable(window.session_.detail()));
-        QVERIFY(remote->isEnabled());
-        zjdesk::SessionCoordinator host;
-        QVERIFY(host.setRemoteCodePolicy("startup", {}));
-        QVERIFY(host.startRemoteAccess(QUrl(url), "Host", serverAddress));
-        QTRY_COMPARE(host.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
-        // Re-register the fixture with one real interface for both endpoints, then use the actual button.
-        window.session_.leave();
-        QVERIFY(window.session_.startRemoteAccess(QUrl(url), "Network test", serverAddress));
-        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
-        QTest::qWait(100);
-        QCOMPARE(host.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
-        remote->click();
-        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::PeerAvailable);
-        QTRY_COMPARE(host.state(), zjdesk::SessionCoordinator::State::PeerAvailable);
-        QVERIFY(!remote->isEnabled());
-        if (host.input_.available() && host.mediaEnvironment().ready)
-        {
-            QTRY_COMPARE(host.remoteState(), zjdesk::SessionCoordinator::RemoteState::Pending);
-            QCOMPARE(window.session_.remoteState(), zjdesk::SessionCoordinator::RemoteState::Requesting);
-            QVERIFY(!host.screenActive());
-        }
-        window.session_.disconnectRemote();
-        QTRY_COMPARE(host.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
-        QTRY_COMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::WaitingForPeer);
-        QVERIFY(remote->isEnabled());
-        QCOMPARE(window.serverEdit_->text(), url);
-        QVERIFY(window.meetingJoinButton_->isEnabled());
-        settings.sync();
-        QCOMPARE(settings.value("networkSetup/" + peerKey).toString(), QString("203.0.113.9"));
-        peer->setText("203.0.113.10");
+        window.showPeerSetup(true);
+        QVERIFY(!window.findChild<QDialog *>("peerSetupDialog"));
+        QCOMPARE(window.networkPeer_->count(), 1);
+        QVERIFY(!window.networkPeer_->currentText().contains("100.94"));
+        QVERIFY(!window.session_.profileEnabled_);
         QVERIFY(!window.networkSetup_.verified());
-        QVERIFY(remote->isHidden());
-        QCOMPARE(window.session_.state(), zjdesk::SessionCoordinator::State::Idle);
-        QVERIFY(!window.meetingJoinButton_->isEnabled());
-        QVERIFY(!remote->isEnabled());
-        MainWindow restarted(url, {}, "Network test");
-        restarted.enableNetworkSetup();
-        QCOMPARE(restarted.networkPeer_->address(), QString("203.0.113.9"));
-        QVERIFY(!restarted.networkSetup_.verified());
-        QVERIFY(!restarted.meetingJoinButton_->isEnabled());
+        window.networkPeer_->activated(window.networkPeer_->currentIndex());
+        QVERIFY(window.session_.profileEnabled_);
+        window.session_.peerNetworkDiscovered("100.94.123.45", {"100.94.123.45"}, "Workstation");
+        QCOMPARE(window.networkPeer_->currentText(), QString("Workstation"));
+        QVERIFY(!settings.value("peer/autoConnect").toBool());
+        window.session_.clearPeerProfile();
+        window.session_.peerNetworkDiscovered("100.94.123.45", {"100.94.123.45", "192.168.88.30"}, "Workstation");
+        QVERIFY(!window.session_.profileEnabled_);
     }
 
     void remoteCodeWaitsForPreviousStreamsToStop_data()

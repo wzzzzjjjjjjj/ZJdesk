@@ -137,6 +137,8 @@ signals:
     void membersChanged();
     void peerRouteChanged(const zjdesk::NetworkConfiguration &configuration);
     void peerRouteUnavailable();
+    void peerNetworkDiscovered(const QString &tailscaleAddress, const QStringList &addresses, const QString &deviceName = {});
+    void peerDiscoveryStatus(const QString &message);
     void trafficChanged();
     void negotiationReceived(const zjdesk::protocol::Message &message);
     void devicesChanged();

@@ -3,6 +3,12 @@
 #include <QTcpServer>
 #include <QWebSocketServer>
 #include <QtTest>
+#include "protocol/message.h"
+#include <QJsonArray>
+#include <QTemporaryDir>
+#include <QFile>
+#include <QDir>
+#include <QScopeGuard>
 
 class PeerConnectionTests : public QObject
 {
@@ -31,9 +37,148 @@ class PeerConnectionTests : public QObject
     }
 
 private slots:
+    void cachedLanWaitsForTailscaleBootstrap()
+    {
+        QWebSocketServer lan("LAN", QWebSocketServer::NonSecureMode);
+        QWebSocketServer overlay("Tailscale", QWebSocketServer::NonSecureMode);
+        QVERIFY(lan.listen(QHostAddress("127.0.0.2"), 0));
+        bool overlayConnected = false;
+        bool lanBeforeOverlay = false;
+        int lanConnections = 0;
+        for (auto *server : {&lan, &overlay})
+            connect(server, &QWebSocketServer::newConnection, this, [&, server] {
+                auto *socket = server->nextPendingConnection();
+                socket->setParent(server);
+                if (server == &overlay) overlayConnected = true;
+                else { ++lanConnections; lanBeforeOverlay = !overlayConnected; }
+                connect(socket, &QWebSocket::textMessageReceived, socket, [socket](const QString &text) {
+                    const auto request = zjdesk::protocol::decode(text);
+                    if (!request || request->type != "network_info") return;
+                    socket->sendTextMessage(zjdesk::protocol::encode({"network_info", {
+                        {"requestId", request->payload.value("requestId")},
+                        {"addresses", QJsonArray{"127.0.0.1", "127.0.0.2"}}, {"deviceName", "Test-PC"}}}));
+                });
+            });
+        zjdesk::PeerConnection connection;
+        useLoopbackRoutes(connection);
+        connection.matchLan_ = [](const QStringList &) { return QStringList{"127.0.0.2"}; };
+        zjdesk::PeerProfile profile{"peer", "127.0.0.2", "127.0.0.1"};
+        profile.autoDiscover = true;
+        profile.lanAddresses = {"127.0.0.2"};
+        QSignalSpy routes(&connection, &zjdesk::PeerConnection::routeChanged);
+        QSignalSpy discovered(&connection, &zjdesk::PeerConnection::networkDiscovered);
+        connection.start(profile, QUrl(QString("ws://127.0.0.1:%1").arg(lan.serverPort())));
+        QTest::qWait(150);
+        QCOMPARE(lanConnections, 0);
+        QVERIFY(routes.isEmpty());
+        QVERIFY(overlay.listen(QHostAddress::LocalHost, lan.serverPort()));
+        connection.start(profile, QUrl(QString("ws://127.0.0.1:%1").arg(lan.serverPort())));
+        QTRY_COMPARE_WITH_TIMEOUT(selectedPeer(routes), QString("127.0.0.2"), 8500);
+        QVERIFY(!lanBeforeOverlay);
+        QVERIFY(!discovered.isEmpty());
+        QCOMPARE(discovered.last().at(2).toString(), QString("Test-PC"));
+    }
+
+    void automaticDiscoveryRefreshesDhcpAndRejectsWrongLanPeer()
+    {
+        QWebSocketServer server("Discovery", QWebSocketServer::NonSecureMode);
+        QVERIFY(server.listen(QHostAddress::AnyIPv4, 0));
+        QStringList inventory{"127.0.0.1", "127.0.0.2"};
+        bool wrongLan = false;
+        connect(&server, &QWebSocketServer::newConnection, this, [&] {
+            auto *socket = server.nextPendingConnection();
+            socket->setParent(&server);
+            connect(socket, &QWebSocket::textMessageReceived, socket, [&, socket](const QString &text) {
+                const auto request = zjdesk::protocol::decode(text);
+                if (!request || request->type != "network_info") return;
+                auto addresses = inventory;
+                if (wrongLan && socket->localAddress() == QHostAddress("127.0.0.3")) addresses.removeAll("127.0.0.1");
+                socket->sendTextMessage(zjdesk::protocol::encode({"network_info", {
+                    {"requestId", request->payload.value("requestId")}, {"addresses", QJsonArray::fromStringList(addresses)}}}));
+            });
+        });
+        zjdesk::PeerConnection connection;
+        useLoopbackRoutes(connection);
+        connection.matchLan_ = [](const QStringList &addresses) {
+            auto result = addresses;
+            result.removeAll("127.0.0.1");
+            return result;
+        };
+        QSignalSpy routes(&connection, &zjdesk::PeerConnection::routeChanged);
+        QSignalSpy discovered(&connection, &zjdesk::PeerConnection::networkDiscovered);
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.serverPort()));
+        connection.start({"peer", {}, "127.0.0.1", true}, url);
+        QTRY_COMPARE(selectedPeer(routes), QString("127.0.0.2"));
+        QVERIFY(!discovered.isEmpty());
+        inventory = {"127.0.0.1", "127.0.0.3"};
+        QTRY_COMPARE_WITH_TIMEOUT(selectedPeer(routes), QString("127.0.0.3"), 7500);
+        wrongLan = true;
+        QTRY_COMPARE_WITH_TIMEOUT(selectedPeer(routes), QString("127.0.0.1"), 10000);
+        wrongLan = false;
+        QTRY_COMPARE_WITH_TIMEOUT(selectedPeer(routes), QString("127.0.0.3"), 8500);
+        inventory = {"127.0.0.1"};
+        QTRY_COMPARE_WITH_TIMEOUT(selectedPeer(routes), QString("127.0.0.1"), 7500);
+        connection.stop();
+        const auto count = discovered.size();
+        QTest::qWait(200);
+        QCOMPARE(discovered.size(), count);
+    }
+
+    void sshBackupQueriesAddressesWithoutBlockingOverlay_data()
+    {
+        QTest::addColumn<bool>("overlayAvailable");
+        QTest::newRow("legacy-overlay") << true;
+        QTest::newRow("overlay-service-unavailable") << false;
+    }
+
+    void sshBackupQueriesAddressesWithoutBlockingOverlay()
+    {
+        QFETCH(bool, overlayAvailable);
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+#ifdef Q_OS_WIN
+        const auto suffix = QStringLiteral(".exe");
+#else
+        const auto suffix = QString();
+#endif
+        const auto stub = QCoreApplication::applicationDirPath() + "/zjdesk-network-ping-stub" + suffix;
+        const auto ssh = temporary.filePath("ssh" + suffix);
+        QVERIFY(QFile::copy(stub, ssh));
+        QFile::setPermissions(ssh, QFile::permissions(ssh) | QFile::ExeOwner);
+        const auto originalPath = qgetenv("PATH");
+        auto cleanup = qScopeGuard([&] { qputenv("PATH", originalPath); qunsetenv("ZJDESK_TEST_SSH_ADDRESSES"); });
+        qputenv("PATH", temporary.path().toUtf8() + QDir::listSeparator().toLatin1() + originalPath);
+        qputenv("ZJDESK_TEST_SSH_ADDRESSES", "1: ts inet 127.0.0.1/32 scope global\n2: eth0 inet 127.0.0.2/24 scope global\n");
+        QWebSocketServer server("Old service", QWebSocketServer::NonSecureMode);
+        QVERIFY(server.listen(QHostAddress::AnyIPv4, 0));
+        connect(&server, &QWebSocketServer::newConnection, this, [&] {
+            auto *socket = server.nextPendingConnection();
+            socket->setParent(&server);
+            if (!overlayAvailable && socket->localAddress() == QHostAddress("127.0.0.1")) socket->abort();
+        });
+        zjdesk::PeerConnection connection;
+        useLoopbackRoutes(connection);
+        connection.matchLan_ = [](const QStringList &addresses) {
+            return addresses.contains("127.0.0.2") ? QStringList{"127.0.0.2"} : QStringList{};
+        };
+        QSignalSpy routes(&connection, &zjdesk::PeerConnection::routeChanged);
+        QSignalSpy discovered(&connection, &zjdesk::PeerConnection::networkDiscovered);
+        connection.start({"peer", {}, "127.0.0.1", true}, QUrl(QString("ws://127.0.0.1:%1").arg(server.serverPort())));
+        if (overlayAvailable) QTRY_COMPARE(selectedPeer(routes), QString("127.0.0.1"));
+        QTRY_COMPARE_WITH_TIMEOUT(discovered.size(), 1, 4500);
+        QVERIFY(discovered.first().at(1).toStringList().contains("127.0.0.2"));
+        QTRY_COMPARE_WITH_TIMEOUT(selectedPeer(routes), QString("127.0.0.2"), 4500);
+        connection.stop();
+    }
+
     void profileValidation()
     {
         QVERIFY(zjdesk::PeerProfile({"linux-wzj", "203.0.113.9", "100.100.100.100"}).error().isEmpty());
+        QVERIFY(zjdesk::PeerProfile({"peer", "obsolete DHCP address", "100.100.100.100", true}).error().isEmpty());
+        QVERIFY(!zjdesk::PeerProfile({"peer", "203.0.113.9", {}, true}).error().isEmpty());
+        zjdesk::PeerProfile invalidUser{"peer", {}, "100.100.100.100", true};
+        invalidUser.sshUser = "user@other-host";
+        QVERIFY(!invalidUser.error().isEmpty());
         for (const auto &profile : {
             zjdesk::PeerProfile{"bad name", "203.0.113.9", {}},
             zjdesk::PeerProfile{"linux-wzj", {}, {}},

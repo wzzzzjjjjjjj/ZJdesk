@@ -32,5 +32,6 @@ int main(int argc, char **argv)
     MainWindow window(parser.isSet("server") ? parser.value("server") : QString(), parser.value("room"), parser.value("display-name"));
     window.enableNetworkSetup();
     window.show();
+    window.showPeerSetup(true);
     return app.exec();
 }

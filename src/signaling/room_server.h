@@ -25,9 +25,11 @@ public:
     quint16 port() const { return server_.serverPort(); }
     QString errorString() const { return server_.errorString(); }
     int roomCount() const { return rooms_.size(); }
+    static QStringList networkAddresses();
 
 signals:
     void event(const QString &message);
+    void peerNetworkDiscovered(const QString &tailscaleAddress, const QStringList &addresses, const QString &deviceName = {});
 
 private slots:
     void refreshRemoteCodes();
@@ -67,6 +69,7 @@ private:
 
     QWebSocketServer server_;
     QHash<QWebSocket *, Peer> peers_;
+    QSet<QWebSocket *> networkWatchers_;
     QHash<QString, QList<QWebSocket *>> rooms_;
     QHash<QString, SharedScreen> sharedScreens_;
     QHash<QString, QHash<QString, QSet<QString>>> annotationGrants_;

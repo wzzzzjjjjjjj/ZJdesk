@@ -39,6 +39,7 @@ private slots:
         auto history = zjdesk::NetworkSetup::localAddresses();
         history.append({peer, peer, "invalid", "127.0.0.1", "169.254.1.2", "255.255.255.255"});
         QCOMPARE(zjdesk::NetworkSetup::suggestedPeerAddresses(history), QStringList{peer});
+        QVERIFY(zjdesk::NetworkSetup::lanPeerAddresses(history).isEmpty());
     }
 
     void peerSuggestionsIncludeCurrentLanSubnet()
@@ -57,6 +58,7 @@ private slots:
                 const auto candidate = QHostAddress(network + (entry.ip().toIPv4Address() == network + 1 ? 2 : 1)).toString();
                 if (zjdesk::NetworkSetup::localAddresses().contains(candidate)) continue;
                 QCOMPARE(zjdesk::NetworkSetup::suggestedPeerAddresses({candidate}), QStringList{candidate});
+                QCOMPARE(zjdesk::NetworkSetup::lanPeerAddresses({"100.94.123.45", candidate, candidate, "127.0.0.1"}), QStringList{candidate});
                 return;
             }
         }
@@ -100,6 +102,34 @@ private slots:
         another.verify(configuration(port));
         QTRY_COMPARE(result.size(), 1);
         QVERIFY(another.verified());
+    }
+
+    void standaloneServiceForwardsDiscoveryOverLoopback()
+    {
+        QWebSocketServer service("Local service", QWebSocketServer::NonSecureMode);
+        QVERIFY(service.listen(QHostAddress::AnyIPv4, 0));
+        QWebSocket *watcher = nullptr;
+        connect(&service, &QWebSocketServer::newConnection, this, [&] {
+            watcher = service.nextPendingConnection();
+            watcher->setParent(&service);
+            connect(watcher, &QWebSocket::textMessageReceived, watcher, [watcher](const QString &text) {
+                const auto request = zjdesk::protocol::decode(text);
+                if (request && request->type == "network_watch")
+                    watcher->sendTextMessage(zjdesk::protocol::encode({"peer_network", {
+                        {"tailscaleAddress", "100.94.123.45"}, {"addresses", QJsonArray{"100.94.123.45", "192.168.1.20"}}, {"deviceName", "Linux-A"}}}));
+            });
+        });
+        zjdesk::NetworkSetup setup;
+        QSignalSpy discovered(&setup, &zjdesk::NetworkSetup::peerNetworkDiscovered);
+        QVERIFY(!setup.startLocalServer(service.serverPort()));
+        QTRY_COMPARE(discovered.size(), 1);
+        QCOMPARE(discovered.first().at(0).toString(), QString("100.94.123.45"));
+        QCOMPARE(discovered.first().at(2).toString(), QString("Linux-A"));
+        QCOMPARE(discovered.first().at(1).toStringList(), QStringList({"100.94.123.45", "192.168.1.20"}));
+        QVERIFY(!setup.verified());
+        QVERIFY(watcher);
+        watcher->abort();
+        QTRY_COMPARE_WITH_TIMEOUT(discovered.size(), 2, 6500);
     }
 
     void initTestCase()

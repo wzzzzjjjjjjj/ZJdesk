@@ -89,6 +89,14 @@ QStringList NetworkSetup::suggestedPeerAddresses(const QStringList &history)
     return result;
 }
 
+QStringList NetworkSetup::lanPeerAddresses(const QStringList &addresses)
+{
+    auto candidates = suggestedPeerAddresses(addresses.mid(0, 64));
+    for (qsizetype i = candidates.size(); i-- > 0;)
+        if (QHostAddress(candidates[i]).isInSubnet(QHostAddress("100.64.0.0"), 10)) candidates.removeAt(i);
+    return candidates;
+}
+
 QString NetworkSetup::configurationError(const NetworkConfiguration &configuration)
 {
     if (!usableAddress(configuration.windowsAddress))
@@ -150,13 +158,50 @@ void NetworkSetup::verifyPeer(const QString &peerAddress, const QUrl &serverUrl)
 bool NetworkSetup::startLocalServer(quint16 port)
 {
     if (server_) return server_->port() == port;
+    discoveryRetry_.stop();
+    QObject::disconnect(&discoveryRetry_, nullptr, this, nullptr);
+    if (discoveryWatcher_)
+    {
+        QObject::disconnect(discoveryWatcher_, nullptr, nullptr, nullptr);
+        delete discoveryWatcher_;
+        discoveryWatcher_ = nullptr;
+    }
     auto *server = new RoomServer(this);
     if (!server->listen(QHostAddress::AnyIPv4, port))
     {
         delete server;
-        return false; // An existing service may already own this port; verification checks it.
+        // A standalone local service can forward discovery to this client over loopback.
+        if (!discoveryWatcher_)
+        {
+            discoveryWatcher_ = new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, this);
+            discoveryWatcher_->setProxy(QNetworkProxy::NoProxy);
+            discoveryWatcher_->setMaxAllowedIncomingMessageSize(protocol::MaxMessageBytes);
+            discoveryWatcher_->setMaxAllowedIncomingFrameSize(protocol::MaxMessageBytes);
+            const QUrl url(QString("ws://127.0.0.1:%1").arg(port));
+            discoveryRetry_.setSingleShot(true);
+            discoveryRetry_.setInterval(5000);
+            connect(&discoveryRetry_, &QTimer::timeout, this, [this, url] { discoveryWatcher_->open(url); });
+            connect(discoveryWatcher_, &QWebSocket::connected, this, [this] {
+                discoveryWatcher_->sendTextMessage(protocol::encode({"network_watch", {}}));
+            });
+            connect(discoveryWatcher_, &QWebSocket::disconnected, &discoveryRetry_, qOverload<>(&QTimer::start));
+            connect(discoveryWatcher_, &QWebSocket::errorOccurred, this, [this] { discoveryRetry_.start(); });
+            connect(discoveryWatcher_, &QWebSocket::textMessageReceived, this, [this](const QString &text) {
+                const auto message = protocol::decode(text);
+                if (!message || message->type != "peer_network") return;
+                const auto address = message->payload.value("tailscaleAddress").toString();
+                const auto inventory = message->payload.value("addresses").toArray();
+                if (!QHostAddress(address).isInSubnet(QHostAddress("100.64.0.0"), 10) || inventory.size() > 64) return;
+                QStringList addresses;
+                for (const auto &value : inventory) addresses.append(value.toString());
+                if (addresses.contains(address)) emit peerNetworkDiscovered(address, addresses, message->payload.value("deviceName").toString().trimmed().left(128));
+            });
+            discoveryWatcher_->open(url);
+        }
+        return false; // Verification still checks the service already owning this port.
     }
     server_ = server;
+    connect(server, &RoomServer::peerNetworkDiscovered, this, &NetworkSetup::peerNetworkDiscovered);
     return true;
 }
 

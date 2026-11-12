@@ -31,6 +31,7 @@ public:
     void requestCameraPermission();
     void startRemoteAccess();
     void enableNetworkSetup();
+    void showPeerSetup(bool required = false);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -50,6 +51,9 @@ private:
     void verifyStartupPeer();
     void invalidateNetworkSetup();
     void refreshNetworkPeerHistory();
+    void learnPeerNetwork(const QString &tailscaleAddress, const QStringList &addresses, const QString &deviceName = {});
+    bool rememberPeerProfile();
+    void selectPeerDevice(int index);
     void refreshMeetingParticipants();
     void setMeetingRoster(const QStringList &names);
     void expandVideo(bool expanded);
@@ -82,8 +86,8 @@ private:
     zjdesk::NetworkSetup networkSetup_;
     QUrl networkServerOverride_;
     zjdesk::PeerProfile peerProfile_;
-    Ipv4AddressEdit *networkPeer_ = nullptr;
-    QString networkPeerKey_;
+    QComboBox *networkPeer_ = nullptr;
+    QList<zjdesk::PeerProfile> recentPeers_;
     bool networkVerifying_ = false;
     QLabel *networkStatus_ = nullptr;
     QLineEdit *serverEdit_ = nullptr;
