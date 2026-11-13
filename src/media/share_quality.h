@@ -38,11 +38,30 @@ public:
     }
     bool observe(double encodedFps, double receivedFps);
     bool observeNetwork(qint64 receivedPackets, qint64 lostPackets, double excessDelayMs = -1);
+    // 接收端排队中的陈旧画面（相对基线的取帧偏移）超过阈值即进入排水：队列只有靠
+    // "发送帧率低于接收端消费帧率"才会减少，接收侧丢弃 VP9 参考帧会破坏解码链。
+    static constexpr double DrainBacklogMs = 250;
+    // 排空判定留迟滞：队列贴着阈值时不要每个窗口来回切档。
+    static constexpr double ReleaseBacklogMs = 120;
+    bool observeBacklog(double backlogMs, double receiverFps = -1);
+    // 排水期间常规阶梯必须冻结：低帧率是主动选择，不是能力不足。
+    bool draining() const
+    {
+        return draining_;
+    }
+    // 共享开始之后才到达的对端显示上限：只收紧帧率，尺寸档不变。
+    bool limitMaximumFps(int fps);
 private:
+    void clampFpsLimit();
+    // 当前尺寸内不大于 fps 的最高档；没有更低档时取本尺寸最小帧率那一档。
+    int rungForFps(int fps) const;
     QList<ShareProfile> profiles_;
     int index_ = 0;
     int slowWindows_ = 0;
     int stableWindows_ = 0;
+    bool draining_ = false;
+    int drainCeilingFps_ = 0;
+    int maximumFpsLimit_ = 0;
     int bitrateLimit_ = 0;
     int minimumBitrate_ = 2000000;
     int maximumBitrate_ = 40000000;

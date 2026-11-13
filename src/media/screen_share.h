@@ -80,6 +80,8 @@ struct ShareStats
     QJsonArray jitterBufferLatenciesMs;
     double pullPlayoutOffsetMs = 0; // Signed local running time minus segment-mapped PTS, not video age.
     quint64 pullPlayoutSamples = 0;
+    // Excess of the playout offset over its slow-moving floor: frames queued in the receive path.
+    double videoBacklogMs = -1;
     FrameTimingSummary pullPlayoutLateness;
 
     QJsonObject timingDiagnostics() const;
@@ -110,6 +112,8 @@ public:
     void reportPresentation(quint64 frames, quint64 epoch, bool active = true, double gapMaxMs = -1,
         const VideoPresentationStats &presentation = {});
     void sendControl(const QJsonObject &message, quint64 epoch);
+    // Peer display ceiling learned after start(); only lowers the frame-rate rung.
+    void limitMaximumFps(int fps, quint64 epoch);
     void sendFile(const QJsonObject &message, quint64 epoch);
     void setCursorEmbedded(bool embedded, quint64 epoch);
 

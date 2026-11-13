@@ -130,6 +130,72 @@ private slots:
         QCOMPARE(quality.profile().size, QSize(2560, 1440));
     }
 
+    void shareQualityDrainsReceiverBacklog()
+    {
+        using Quality = zjdesk::ShareQuality;
+        // 1920×1080@60 的阶梯是 60/50/45/40/30/24，同尺寸内先降帧率。
+        Quality quality(QSize(1920, 1080), 60);
+        QCOMPARE(quality.profile().fps, 60);
+        // 队列深度是实测值，一个统计窗口就要动手：接收端实测 54 fps → 持久上限 48，
+        // 排水按上限的七成取档（30 fps），队列才会减少而不是原地踏步。
+        QVERIFY(quality.observeBacklog(760, 54));
+        QCOMPARE(quality.profile().fps, 30);
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        QVERIFY(quality.draining());
+        // 排水期间的上报帧率被自己的低帧率压住，不能当能力用，否则上限会阶梯式塌到下限。
+        QVERIFY(!quality.observeBacklog(700, 30));
+        QVERIFY(!quality.observeBacklog(700, 12));
+        QCOMPARE(quality.profile().fps, 30);
+        // 排水期贴着阈值不来回切档：200 ms 仍算未排空，120 ms 以下才回到上限档。
+        QVERIFY(!quality.observeBacklog(200, 30));
+        QVERIFY(quality.draining());
+        QCOMPARE(quality.profile().fps, 30);
+        // 队列排空后立刻回到实测能力对应的档位（48 → 45），不必再等稳定窗口。
+        QVERIFY(quality.observeBacklog(40, 54));
+        QVERIFY(!quality.draining());
+        QCOMPARE(quality.profile().fps, 45);
+        // 上限是持久的：稳定窗口不能爬回 60 再把队列灌满。
+        for (int i = 0; i < 40; ++i) quality.observe(60, 60);
+        QCOMPARE(quality.profile().fps, 45);
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        QVERIFY(!quality.observeBacklog(40, 54));
+    }
+
+    void shareQualityDrainStaysWithinCurrentSize()
+    {
+        using Quality = zjdesk::ShareQuality;
+        // 没有实测能力可依时按当前档位估算，最低只到 MinimumFps，且不缩尺寸。
+        Quality quality(QSize(1920, 1080), 60);
+        QVERIFY(quality.observeBacklog(2000));
+        QCOMPARE(quality.profile().fps, 40);
+        for (int i = 0; i < 40; ++i)
+            quality.observeBacklog(2000);
+        QCOMPARE(quality.profile().fps, Quality::MinimumFps);
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        // 没有实测能力时排空后只回到当前档位，不凭空加帧率。
+        QVERIFY(!quality.observeBacklog(40));
+        QVERIFY(!quality.draining());
+        QCOMPARE(quality.profile().fps, Quality::MinimumFps);
+    }
+
+    void shareQualityLimitsLateDisplayCeiling()
+    {
+        using Quality = zjdesk::ShareQuality;
+        Quality quality(QSize(1920, 1080), 144);
+        QCOMPARE(quality.profile().fps, 144);
+        // 对端显示器上限在共享开始后才到达（本机 75 Hz 推给 60 Hz 接收端的情形）。
+        QVERIFY(quality.limitMaximumFps(60));
+        QCOMPARE(quality.profile().fps, 60);
+        QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        QVERIFY(!quality.limitMaximumFps(60));
+        // 上限是持久的：稳定窗口不能把它爬回上限以上。
+        for (int i = 0; i < 40; ++i) quality.observe(144, 144);
+        QCOMPARE(quality.profile().fps, 60);
+        // 无效上限不改变档位。
+        QVERIFY(!quality.limitMaximumFps(3));
+        QCOMPARE(quality.profile().fps, 60);
+    }
+
 #ifdef Q_OS_WIN
     void windowsSystemCursorImages_data()
     {

@@ -1207,6 +1207,10 @@ void SessionCoordinator::receiveControlRequest(const QJsonObject &message)
         peerControllable_ = message.value("control").toBool();
         const double fps = message.value("maximumFps").toDouble();
         peerMaximumFps_ = std::isfinite(fps) && fps >= 5 && fps <= 240 && fps == int(fps) ? int(fps) : 0;
+        // 本机先按自己的刷新率开始了共享，对端上限晚到时不能只留给自适应降档：
+        // 75 fps 推给 60 Hz 接收端会白耗解码余量，积压也就没有回收的余地。
+        if (peerMaximumFps_ > 0 && screenActive() && !receivingScreen_)
+            screen_.limitMaximumFps(peerMaximumFps_, shareEpoch_);
         emit remoteChanged();
         requestRemoteControlWhenReady();
     }

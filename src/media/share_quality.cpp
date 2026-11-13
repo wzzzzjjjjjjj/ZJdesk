@@ -73,14 +73,94 @@ bool ShareQuality::observe(double encodedFps, double receivedFps)
         --higherResolution;
     stableWindows_ = excessDelayMs_ < 60 && actual >= fps * (higherResolution >= 0 ? 0.85 : 0.95)
         ? stableWindows_ + 1 : 0;
+    const int previous = index_;
     if (slowWindows_ >= (encoderStarved ? 2 : 4) && index_ + 1 < profiles_.size())
         ++index_;
     else if (stableWindows_ >= 15 && index_ > 0)
         index_ = higherResolution >= 0 ? higherResolution : index_ - 1;
     else
         return false;
+    clampFpsLimit();
+    if (index_ == previous)
+        return false;
     slowWindows_ = stableWindows_ = 0;
     return true;
+}
+
+bool ShareQuality::observeBacklog(double backlogMs, double receiverFps)
+{
+    if (!(backlogMs >= (draining_ ? ReleaseBacklogMs : DrainBacklogMs)))
+    {
+        if (!draining_)
+            return false;
+        // 队列已排空：立刻回到实测能力对应的档位，不必再等稳定窗口——
+        // 上限本来就取自实测帧率，爬回去也不会重新灌满队列。
+        draining_ = false;
+        const int previous = index_;
+        index_ = rungForFps(drainCeilingFps_ > 0 ? drainCeilingFps_ : profile().fps);
+        clampFpsLimit();
+        slowWindows_ = stableWindows_ = 0;
+        return index_ != previous;
+    }
+    // 接收端上报的帧率就是这条链路现在能消费的帧率；按九成钉成持久上限，
+    // 否则稳定窗口会爬回高帧率、把队列重新灌满。排水期间的上报值被自己的低帧率
+    // 压住，不能当能力用，否则上限会一路阶梯式塌到 MinimumFps。
+    if (!draining_ && receiverFps >= MinimumFps)
+    {
+        drainCeilingFps_ = qMax(MinimumFps, int(receiverFps * 0.9));
+        maximumFpsLimit_ = maximumFpsLimit_ > 0 ? qMin(maximumFpsLimit_, drainCeilingFps_) : drainCeilingFps_;
+    }
+    const int ceiling = drainCeilingFps_ > 0 ? drainCeilingFps_ : profile().fps;
+    const int previous = index_;
+    draining_ = true;
+    clampFpsLimit();
+    // 只降帧率不缩尺寸：排空需要的是帧率差，缩尺寸会同时牺牲清晰度。
+    index_ = rungForFps(qBound(MinimumFps, int(ceiling * 0.7), ceiling));
+    slowWindows_ = stableWindows_ = 0;
+    return index_ != previous;
+}
+
+int ShareQuality::rungForFps(int fps) const
+{
+    const QSize size = profiles_.at(index_).size;
+    int first = index_;
+    while (first > 0 && profiles_.at(first - 1).size == size)
+        --first;
+    int lowest = first;
+    for (int i = first; i < profiles_.size() && profiles_.at(i).size == size; ++i)
+    {
+        lowest = i;
+        if (profiles_.at(i).fps <= fps)
+            return i;
+    }
+    return lowest;
+}
+
+bool ShareQuality::limitMaximumFps(int fps)
+{
+    if (fps < 5 || fps > 240)
+        return false;
+    maximumFpsLimit_ = maximumFpsLimit_ > 0 ? qMin(maximumFpsLimit_, fps) : fps;
+    const int previous = index_;
+    clampFpsLimit();
+    if (index_ == previous)
+        return false;
+    slowWindows_ = stableWindows_ = 0;
+    return true;
+}
+
+void ShareQuality::clampFpsLimit()
+{
+    if (maximumFpsLimit_ <= 0)
+        return;
+    while (profiles_.at(index_).fps > maximumFpsLimit_)
+    {
+        const int next = index_ + 1;
+        // 本尺寸没有更低帧率的档位时不再降，留给常规降档去换尺寸。
+        if (next >= profiles_.size() || profiles_.at(next).size != profiles_.at(index_).size)
+            return;
+        index_ = next;
+    }
 }
 
 bool ShareQuality::observeNetwork(qint64 receivedPackets, qint64 lostPackets, double excessDelayMs)

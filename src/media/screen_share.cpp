@@ -10,6 +10,7 @@
 #include <QHash>
 #include <QNetworkInterface>
 #include <atomic>
+#include <array>
 #include <functional>
 #include <memory>
 #ifdef ZJDESK_HAS_GSTREAMER
@@ -39,7 +40,7 @@ QJsonObject ShareStats::timingDiagnostics() const
         {"decoder", decoder}, {"hardwareDecoder", hardwareDecoder}, {"codecProfile", codecProfile},
         {"playout", QJsonObject{{"requestedLatencyMs", requestedLatencyMs},
             {"webrtcLatencyReadbackMs", actualLatencyMs}, {"jitterBufferLatenciesMs", jitterBufferLatenciesMs},
-            {"sinkSync", sinkSync}, {"pullOffsetMs", pullPlayoutOffsetMs},
+            {"sinkSync", sinkSync}, {"pullOffsetMs", pullPlayoutOffsetMs}, {"videoBacklogMs", videoBacklogMs},
             {"samples", qint64(pullPlayoutSamples)}, {"pullLateness", pullPlayoutLateness.toJson()}}},
         {"codecOutputFormat", codecOutputFormat}, {"codecOutputMemory", codecOutputMemory},
         {"congestion", QJsonObject{{"minimumBitrate", congestionMinimumBitrate},
@@ -106,6 +107,11 @@ public:
         pullPlayoutOffsetMs_ = 0;
         pullPlayoutSamples_ = 0;
         pullPlayoutLateness_ = {};
+        videoBacklogMs_ = -1;
+        offsetBaselineMs_ = 0;
+        offsetBaselineValid_ = false;
+        offsetHistory_.fill(0);
+        offsetHistoryIndex_ = 0;
         automatic_ = targetFps == 0;
         const bool conservative = qEnvironmentVariable("ZJDESK_SHARE_LOW_BANDWIDTH") == "1";
         const QHostAddress verifiedLocal(qEnvironmentVariable("ZJDESK_WEBRTC_LOCAL_ADDRESS"));
@@ -577,6 +583,18 @@ public:
         emit statusChanged(epoch, "stopped", QStringLiteral("屏幕共享已停止"));
     }
 
+    void limitMaximumFps(int fps, quint64 epoch)
+    {
+#ifdef ZJDESK_HAS_GSTREAMER
+        if (!sender_ || !automatic_ || !pipeline_ || epoch != epoch_ || !quality_.limitMaximumFps(fps))
+            return;
+        applyProfile();
+#else
+        Q_UNUSED(fps)
+        Q_UNUSED(epoch)
+#endif
+    }
+
     void negotiate(const QString &type, const QJsonObject &payload, quint64 epoch)
     {
 #ifdef ZJDESK_HAS_GSTREAMER
@@ -605,6 +623,18 @@ public:
                     else
                         g_object_set(encoder, "target-bitrate", encoderBudget(), nullptr);
                     gst_object_unref(encoder);
+                }
+                // A queued receiver only drains once the sender produces fewer frames than it
+                // decodes. The queue depth is measured, so it bypasses adapt()'s settle window
+                // and stable-window counting: waiting for those only lets the queue grow more.
+                if (automatic_)
+                {
+                    bool changed = quality_.observeBacklog(payload.value("backlogMs").toDouble(-1), peerFps_);
+                    const double reportedMaximum = payload.value("maximumFps").toDouble(-1);
+                    if (reportedMaximum >= 5 && reportedMaximum <= 240 && reportedMaximum == int(reportedMaximum))
+                        changed = quality_.limitMaximumFps(int(reportedMaximum)) || changed;
+                    if (changed)
+                        applyProfile();
                 }
             }
             return;
@@ -1104,11 +1134,26 @@ private:
     {
         const double peer = feedbackClock_.isValid() && feedbackClock_.elapsed() < 5000 ? peerFps_ : -1;
         const int settleMs = revision_ == 1 ? 10000 : 4000;
-        if (!automatic_ || profileClock_.elapsed() < settleMs || !quality_.observe(encodedFps, peer))
+        // 排水期间的低帧率是主动选择：照常规阶梯判断会把它当成能力不足继续缩档。
+        if (!automatic_ || quality_.draining() || profileClock_.elapsed() < settleMs
+            || !quality_.observe(encodedFps, peer))
             return;
+        applyProfile();
+    }
+    // Push the ladder's current rung into the running pipeline and tell the receiver.
+    void applyProfile()
+    {
         profile_ = quality_.profile();
         targetFps_ = profile_.fps;
         auto *filter = gst_bin_get_by_name(GST_BIN(pipeline_), "quality");
+        auto *encoder = gst_bin_get_by_name(GST_BIN(pipeline_), "encoder");
+        // 对端上限可能在管线还在协商时就到达，元素尚未存在时不改档，等下一次机会。
+        if (!filter || !encoder)
+        {
+            if (filter) gst_object_unref(filter);
+            if (encoder) gst_object_unref(encoder);
+            return;
+        }
         auto *caps = gst_caps_new_simple("video/x-raw", "width", G_TYPE_INT, profile_.size.width(),
             "height", G_TYPE_INT, profile_.size.height(), "framerate", GST_TYPE_FRACTION, profile_.fps, 1,
             "pixel-aspect-ratio", GST_TYPE_FRACTION, 1, 1, nullptr);
@@ -1117,7 +1162,6 @@ private:
         g_object_set(filter, "caps", caps, nullptr);
         gst_caps_unref(caps);
         gst_object_unref(filter);
-        auto *encoder = gst_bin_get_by_name(GST_BIN(pipeline_), "encoder");
         if (hardwareEncoder_)
             g_object_set(encoder, "qp", guint(hardwareQuantizer()),
                 "key-int-max", guint(qMin(1024, profile_.fps * 5)), nullptr);
@@ -1409,6 +1453,14 @@ private:
                     pullPlayoutOffsetMs_ = (double(now - base) - double(runningPts)) / GST_MSECOND;
                     ++pullPlayoutSamples_;
                     pullPlayoutLateness_.record(qMax(0.0, pullPlayoutOffsetMs_));
+                    // The offset also carries the sender's timeline start, so only the distance
+                    // above its own floor is queued video; the floor is the last minute's minimum.
+                    if (!offsetBaselineValid_)
+                    {
+                        offsetBaselineMs_ = pullPlayoutOffsetMs_;
+                        offsetBaselineValid_ = true;
+                    }
+                    videoBacklogMs_ = qMax(0.0, pullPlayoutOffsetMs_ - offsetBaselineMs_);
                 }
                 if (clock) gst_object_unref(clock);
             }
@@ -1520,6 +1572,16 @@ private:
                 stats.pullPlayoutOffsetMs = pullPlayoutOffsetMs_;
                 stats.pullPlayoutSamples = pullPlayoutSamples_;
                 stats.pullPlayoutLateness = pullPlayoutLateness_.summary();
+                if (!sender_ && offsetBaselineValid_)
+                {
+                    offsetHistory_[offsetHistoryIndex_ % OffsetHistorySeconds] = pullPlayoutOffsetMs_;
+                    ++offsetHistoryIndex_;
+                    offsetBaselineMs_ = pullPlayoutOffsetMs_;
+                    for (int i = 0; i < qMin(offsetHistoryIndex_, OffsetHistorySeconds); ++i)
+                        offsetBaselineMs_ = qMin(offsetBaselineMs_, offsetHistory_[i]);
+                    videoBacklogMs_ = qMax(0.0, pullPlayoutOffsetMs_ - offsetBaselineMs_);
+                    stats.videoBacklogMs = videoBacklogMs_;
+                }
                 if (!sender_)
                 {
                     guint latency = 0;
@@ -1610,6 +1672,8 @@ private:
                 if (stats.presentedFps >= 0)
                     actual = qMin(actual, stats.presentedFps);
                 emit negotiationReady(epoch_, "share", {{"action", "stats"}, {"revision", revision_}, {"fps", actual},
+                    {"maximumFps", ScreenShare::displayMaximumFps()},
+                    {"backlogMs", qRound(qMax(0.0, videoBacklogMs_))},
                     {"packetsReceived", stats.packetsReceived}, {"packetsLost", stats.packetsLost}});
             }
         }
@@ -1678,6 +1742,12 @@ private:
     double pullPlayoutOffsetMs_ = 0;
     quint64 pullPlayoutSamples_ = 0;
     FrameTiming pullPlayoutLateness_;
+    static constexpr int OffsetHistorySeconds = 60;
+    std::array<double, OffsetHistorySeconds> offsetHistory_{};
+    int offsetHistoryIndex_ = 0;
+    double offsetBaselineMs_ = 0;
+    bool offsetBaselineValid_ = false;
+    double videoBacklogMs_ = -1;
     int revision_ = 1;
     double peerFps_ = -1;
     QElapsedTimer profileClock_;
@@ -1830,6 +1900,11 @@ void ScreenShare::stop(quint64 epoch)
         pendingPosition_.reset();
     }
     QMetaObject::invokeMethod(worker_, [this, epoch] { worker_->stop(epoch); });
+}
+
+void ScreenShare::limitMaximumFps(int fps, quint64 epoch)
+{
+    QMetaObject::invokeMethod(worker_, [this, fps, epoch] { worker_->limitMaximumFps(fps, epoch); });
 }
 
 void ScreenShare::negotiate(const QString &type, const QJsonObject &payload, quint64 epoch)

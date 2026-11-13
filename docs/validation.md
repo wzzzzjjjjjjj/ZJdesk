@@ -1,5 +1,51 @@
 # 验证记录
 
+## 2026-11-13：接收端积压反馈与帧率回收
+
+范围为本机工作目录 `F:\projects\ZJdesk` / `ZJ-desk`，未提交。起因是一份双端事件日志显示：指针本地跟手、
+点击 / 拖拽后画面滞后约 1.57 秒、停止操作后恢复。日志中接收端 `pullOffsetMs` 从 14 ms 涨到 1568 ms
+（约 2 帧/s 的持续赤字），而同一时段 vp9dec 单帧均值只有 8.7 ms、p95 14.7 ms、8119 帧里仅 20 帧超过 50 ms，
+说明积压不在解码器算力，而在"发送帧率不低于接收端实际消费帧率时积压无处可去"。
+
+- 接收端新增 `videoBacklogMs`（取帧偏移减去最近 60 秒最小值），每秒随 stats 上行 `backlogMs`；
+  发送端当时按"连续两个窗口 ≥ 250 ms 降档、≥ 1000 ms 一次降两档"实现（第二轮实测后改为单窗口排水，见下）；
+  不丢弃接收端 VP9 参考帧（旧候选的 DTS 改写 / clocksync / 任意积压跳帧未恢复）。
+- 共享开始后才到达的对端 `maximumFps` 现在会立即收紧帧率档，不再等自适应四个窗口。
+- 新增 `shareQualityDrainsReceiverBacklog`、`shareQualityLimitsLateDisplayCeiling`，覆盖两级确认、双档降级、
+  停止降档、本尺寸到 `MinimumFps` 不跨尺寸、上限持久与无效上限。两个用例单独运行 4 passed / 0 failed（5 ms）。
+- `build.ps1`（Windows Debug / Qt 6.8.3 / MSVC2022 / GStreamer 1.26.11）构建通过：
+  core 5.36 s、file-clipboard 0.18 s、signaling 18.32 s、network-setup 10.19 s、peer-connection 34.53 s、
+  media 133.40 s 通过；`windows-runtime-integrity` 报 "Fixture did not run at low integrity."，
+  与此前 handoff 记录的"管理员 High Mandatory Level 会话无法构造低完整性 fixture"一致，需在普通会话复验。
+
+### 第二轮：同一问题的双机复现日志（`F:\下载\1113`）
+
+用户在带第一轮改动的构建上复现了同样的现象（会话 02:52:38–02:52:56Z，Windows 11 控制端 + Ubuntu 被控端）。
+Windows 快照（02:52:48.662，rev 2，400 个样本）：`pullOffsetMs` 919.44、`videoBacklogMs` 759.73、
+`processedFps` 53.84、codec 均值 12.02 / p95 18.5 / 最大 70.27（400 帧中仅 2 帧超过 50 ms）、
+`decodedToSink` 2.98，即接收端每帧串行约 15–17 ms、可持续消费约 58–66 fps；
+发送端同期 `targetFps` 60、`processedFps` 60.82、codec 6.27 ms、`captureToEncoder` 8.55 ms。
+结论：链路依旧没有可回收积压的余量——发送帧率贴着接收端消费上限，队列只涨不消；第一轮的反馈环太慢
+（4 秒门控 + 连续两个窗口 + 最多两档），900 ms 积压出现时还没降档，降档后也只剩几帧/秒的排空差额。
+另：Linux 端 41.351 先开共享"目标 75 fps"，47.843 才因对端 `maximumFps` 降到 60，晚了约 6.5 秒。
+
+- `ShareQuality::observeBacklog(backlogMs, receiverFps)`：单个统计窗口即判定；以接收端上报帧率的九成为
+  持久上限（`limitMaximumFps` 同一变量），按上限的七成在当前尺寸内选档进入排水；`< 120 ms` 且有排水状态时
+  立即回到上限那一档（不等稳定窗口，250/120 的迟滞避免贴着阈值切档）；排水期间不再用上报帧率更新上限
+  （否则会被自己的低帧率阶梯式压到下限）。
+- `ShareQuality::draining()`；`adapt()` 在排水期间冻结常规阶梯，避免把主动降帧率当成能力不足继续缩档。
+- 发送端 stats 分支去掉 `profileClock_.elapsed() >= 4000` 门控，积压路径与新增的 `maximumFps` 收紧共用一次
+  `applyProfile()`；接收端 stats 现在带 `maximumFps`（本机显示上限），不必等控制信令的 capabilities。
+- 用例改为 `shareQualityDrainsReceiverBacklog`（单窗口入排水、200 ms 仍续排（迟滞）、排水期不塌档、
+  排空后回到 45、上限持久）与 `shareQualityDrainStaysWithinCurrentSize`（无实测能力时按当前档估算、
+  最低 `MinimumFps`、不跨尺寸、不凭空加帧率）。
+- `build.ps1` 构建与 ctest 通过：signaling 18.13 s、network-setup 10.18 s、peer-connection 34.52 s、
+  media 137.21 s，core（含新用例）通过；`windows-runtime-integrity` 同样因高完整性会话失败。
+  三个用例单独运行 5 passed / 0 failed。
+- 仍未验证：真实双机复现"拖拽 → 积压 760 ms → 排水 → 回到基线"的完整曲线；`maximumFps` 经 stats 到达的
+  实际延迟；排水期的画面抖动是否被用户接受（下限 24 fps，排空通常在 1–2 个统计窗口内）。
+
+
 ## 2026-11-03：移除独立本地预览
 
 范围为 `C:\Users\29822\.codex\worktrees\e37f\ZJdesk` / `codex/ZJdesk-1`，未提交。修改前工作树干净，与 `codex/ZJdesk-2` 最新提交同为 `bac3584127986e511e0a7062db526c516b65afa8`，双方独有提交均为 0。
