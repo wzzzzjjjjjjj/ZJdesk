@@ -1,6 +1,7 @@
 #include "remote-control/file_clipboard.h"
 #include <QDir>
 #include <QFile>
+#include <QJsonDocument>
 #include <QtTest>
 
 using zjdesk::FileClipboard;
@@ -9,6 +10,68 @@ class FileClipboardTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void arbitraryFormatsBothDirections_data()
+    {
+        QTest::addColumn<QString>("name");
+        QTest::addColumn<int>("bytes");
+        // Contents are opaque bytes: neither the extension nor a recognizable header is required.
+        const QStringList names{QStringLiteral("中文 报告.docx"), "report.doc", "table.xlsx", "table.xls",
+            "slides.pptx", "slides.ppt", "document.pdf", "plain.txt", "data.csv", "config.json",
+            "drawing.dwg", "model.step", "photo.jpg", "image.png", "image.webp", "animation.gif",
+            "audio.mp3", "audio.wav", "video.mp4", "video.mkv", "archive.zip", "archive.7z",
+            "archive.rar", "archive.tar.gz", "program.exe", "library.dll", "package.deb",
+            "firmware.bin", "disk.iso", "database.sqlite", "script.sh", "README", ".env",
+            "UPPER.PDF", "unknown.custom-format", QStringLiteral("中文 % # + 文件.未知")};
+        for (const auto &name : names)
+            QTest::newRow(name.toUtf8().constData()) << name << 65539;
+        for (const int bytes : {0, 1, 16383, 16384, 16385, 32768})
+            QTest::newRow(qPrintable(QString("chunk-boundary-%1").arg(bytes))) << QString("boundary.dat") << bytes;
+    }
+
+    void arbitraryFormatsBothDirections()
+    {
+        QFETCH(QString, name);
+        QFETCH(int, bytes);
+        QTemporaryDir source;
+        QVERIFY(source.isValid());
+        FileClipboard first, second;
+        // Exercise the JSON wire representation as well as the file chunks.
+        connect(&first, &FileClipboard::sendMessage, &second, [&](const QJsonObject &message) {
+            second.receive(QJsonDocument::fromJson(QJsonDocument(message).toJson(QJsonDocument::Compact)).object());
+        }, Qt::QueuedConnection);
+        connect(&second, &FileClipboard::sendMessage, &first, [&](const QJsonObject &message) {
+            first.receive(QJsonDocument::fromJson(QJsonDocument(message).toJson(QJsonDocument::Compact)).object());
+        }, Qt::QueuedConnection);
+        for (int direction = 0; direction < 2; ++direction)
+        {
+            const auto folder = source.filePath(QString::number(direction));
+            QVERIFY(QDir().mkdir(folder));
+            QByteArray payload(bytes, Qt::Uninitialized);
+            for (int i = 0; i < bytes; ++i) payload[i] = char((i * 31 + i / 256 + direction * 97) & 0xff);
+            QFile original(QDir(folder).filePath(name));
+            QVERIFY(original.open(QIODevice::WriteOnly));
+            QCOMPARE(original.write(payload), qint64(bytes));
+            original.close();
+            auto *sender = direction == 0 ? &first : &second;
+            auto *receiver = direction == 0 ? &second : &first;
+            QSignalSpy ready(receiver, &FileClipboard::filesReady);
+            sender->start(true, quint64(direction + 1));
+            receiver->start(false, quint64(direction + 1));
+            sender->offerFiles({QUrl::fromLocalFile(original.fileName())});
+            QTRY_COMPARE(ready.size(), 1);
+            const auto urls = qvariant_cast<QList<QUrl>>(ready.first().first());
+            QCOMPARE(urls.size(), 1);
+            QCOMPARE(QFileInfo(urls.first().toLocalFile()).fileName(), name);
+            QFile received(urls.first().toLocalFile());
+            QVERIFY(received.open(QIODevice::ReadOnly));
+            QCOMPARE(received.size(), qint64(bytes));
+            QCOMPARE(received.readAll(), payload);
+            received.close();
+            QTRY_COMPARE(sender->status(), QStringLiteral("文件已到对方，可在文件管理器粘贴"));
+            first.stop(); second.stop();
+        }
+    }
+
     void gnomeAndUriFileLists()
     {
         QMimeData mime;

@@ -1,5 +1,17 @@
 # Windows ↔ Linux 文件剪贴板验证（2026-11-03）
 
+## 2026-11-16 当前工作树：任意文件格式回归
+
+文件传输不按扩展名或 MIME 类型筛选。两端共用 `FileClipboard` 的二进制读写、16 KiB 分块与 Base64 数据路径，不解析或转换文件内容；未知后缀、无后缀文件也按原样传输。文件名须兼容 Windows，其余授权、4096 项上限、符号链接拒绝与取消规则继续适用。
+
+`arbitraryFormatsBothDirections` 新增 42 组数据：36 个文件名覆盖 Word / Excel / PowerPoint / PDF、文本、图片、音视频、压缩包、程序、固件、镜像、数据库、脚本、未知后缀、无后缀、隐藏文件、大小写及中文 / 空格 / URL 特殊字符；另有 0、1、16383、16384、16385、32768 字节的分块边界。每组交换两端发送 / 接收角色，合计 84 次单向传输，经 JSON 序列化后逐字节比较内容，并核对原始文件名与长度。内容使用含 NUL 和高位字节的测试载荷，验证格式无关的原样传输，不验证各文件格式的应用打开能力。
+
+Windows `build.ps1 -Preset windows-release -Deploy` 构建、部署与七组非 GUI 回归全部通过，总计 211.37 秒。随后仅修正新增中文数据行名的报告编码，增量构建通过；文件组重跑 62 项通过、0 失败（含初始化 / 清理，4.895 秒），JUnit XML 可正常按 UTF-8 解析。构建与部署目录的客户端 SHA-256 一致。日志：`build/file-formats-windows-release.log`、`build/file-formats-final-build.log`、`build/file-formats-final.txt`。
+
+上述为 Windows 本机无 GUI 回归，不读写真实剪贴板，不代表本轮已完成 Windows/Linux 实机、原生粘贴、公网或大文件长测。下文 2026-11-03 结果是历史验证。
+
+## 2026-11-03 历史实现与实机验证
+
 实现位置：`C:\Users\29822\.codex\worktrees\bfbd\ZJdesk`，分支 `codex/ZJdesk-2`。
 Linux 验证使用独立目录 `/home/orbbec/ZJdesk/file-clipboard-bfbd-20261103`，不覆盖原始检出。
 
