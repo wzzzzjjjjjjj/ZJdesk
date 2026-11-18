@@ -17,30 +17,47 @@ class MediaTests : public QObject
 {
     Q_OBJECT
 private slots:
+    void latencyMarkerCrossesVp9AndReportsReceiverLatency_data()
+    {
+        QTest::addColumn<bool>("immediate");
+        QTest::newRow("scheduled") << false;
+        QTest::newRow("immediate") << true;
+    }
+
     void latencyMarkerCrossesVp9AndReportsReceiverLatency()
     {
+        QFETCH(bool, immediate);
         QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
-        const auto original = qgetenv("ZJDESK_WEBRTC_LATENCY_MS");
-        const auto restore = qScopeGuard([original] {
-            if (original.isNull()) qunsetenv("ZJDESK_WEBRTC_LATENCY_MS");
-            else qputenv("ZJDESK_WEBRTC_LATENCY_MS", original);
+        const QList<QByteArray> variables{
+            "ZJDESK_WEBRTC_LATENCY_MS", "ZJDESK_SHARE_WAN", "ZJDESK_SHARE_LOW_BANDWIDTH"};
+        QList<QByteArray> original;
+        for (const auto &name : variables) original.append(qgetenv(name.constData()));
+        const auto restore = qScopeGuard([&] {
+            for (qsizetype i = 0; i < variables.size(); ++i)
+                if (original.at(i).isNull()) qunsetenv(variables.at(i).constData());
+                else qputenv(variables.at(i).constData(), original.at(i));
         });
         qputenv("ZJDESK_WEBRTC_LATENCY_MS", "150");
-        zjdesk::ScreenShare sender, receiver;
+        qputenv("ZJDESK_SHARE_WAN", "1");
+        qputenv("ZJDESK_SHARE_LOW_BANDWIDTH", "0");
+        using Playback = zjdesk::ScreenShare::Playback;
+        zjdesk::ScreenShare sender;
+        zjdesk::ScreenShare receiver(nullptr, immediate ? Playback::Immediate : Playback::Scheduled);
+        bool received = false;
+        zjdesk::ShareStats stats;
+        QObject callbacks;
         connect(&sender, &zjdesk::ScreenShare::negotiationReady, &receiver,
             [&](quint64 epoch, const QString &type, const QJsonObject &payload) { receiver.negotiate(type, payload, epoch); });
         connect(&receiver, &zjdesk::ScreenShare::negotiationReady, &sender,
             [&](quint64 epoch, const QString &type, const QJsonObject &payload) { sender.negotiate(type, payload, epoch); });
-        connect(&receiver, &zjdesk::ScreenShare::controlChannelChanged, this, [&](quint64 epoch, bool ready) {
+        connect(&receiver, &zjdesk::ScreenShare::controlChannelChanged, &callbacks, [&](quint64 epoch, bool ready) {
             if (ready) receiver.sendControl({{"_zjdeskLatencyMarker", true}, {"epoch", "123"}, {"sequence", "456"}}, epoch);
         });
-        bool received = false;
-        connect(&receiver, &zjdesk::ScreenShare::frameReady, this, [&](quint64, const QImage &frame) {
+        connect(&receiver, &zjdesk::ScreenShare::frameReady, &callbacks, [&](quint64, const QImage &frame) {
             const auto marker = zjdesk::TestFrameMarker::read(frame);
             received |= marker && marker->epoch == 123 && marker->sequence == 456;
         });
-        zjdesk::ShareStats stats;
-        connect(&receiver, &zjdesk::ScreenShare::statisticsReady, this,
+        connect(&receiver, &zjdesk::ScreenShare::statisticsReady, &callbacks,
             [&](quint64, const zjdesk::ShareStats &value) { stats = value; });
         receiver.start(false, "test-latency", 17, 30, 30);
         sender.start(true, "test-latency", 17, 30, 30);
@@ -48,10 +65,40 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(stats.pullPlayoutSamples > 0, 5000);
         QCOMPARE(stats.requestedLatencyMs, 150);
         QCOMPARE(stats.actualLatencyMs, 150);
+        QCOMPARE(stats.sinkSync, !immediate);
         QVERIFY(!stats.jitterBufferLatenciesMs.isEmpty());
         for (const auto value : stats.jitterBufferLatenciesMs) QCOMPARE(value.toInt(), 150);
         sender.stop(18);
         receiver.stop(18);
+    }
+
+    void directWanShareDeliversFramesWithoutPlaybackWait()
+    {
+        const auto wan = qgetenv("ZJDESK_SHARE_WAN");
+        const auto conservative = qgetenv("ZJDESK_SHARE_LOW_BANDWIDTH");
+        const auto restore = qScopeGuard([&] {
+            if (wan.isNull()) qunsetenv("ZJDESK_SHARE_WAN");
+            else qputenv("ZJDESK_SHARE_WAN", wan);
+            if (conservative.isNull()) qunsetenv("ZJDESK_SHARE_LOW_BANDWIDTH");
+            else qputenv("ZJDESK_SHARE_LOW_BANDWIDTH", conservative);
+        });
+        qputenv("ZJDESK_SHARE_WAN", "1");
+        qputenv("ZJDESK_SHARE_LOW_BANDWIDTH", "0");
+        zjdesk::RoomServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const QUrl url(QString("ws://127.0.0.1:%1").arg(server.port()));
+        zjdesk::SessionCoordinator sender, receiver;
+        QVERIFY(sender.join(url, "wan-share", "Sender"));
+        QVERIFY(receiver.join(url, "wan-share", "Receiver"));
+        QTRY_COMPARE(sender.memberCount(), 2);
+        QVERIFY(sender.startScreenShare("test-hd"));
+        QTRY_VERIFY_WITH_TIMEOUT(receiver.shareStats().pullPlayoutSamples > 0, 15000);
+        const auto stats = receiver.shareStats();
+        QVERIFY(!stats.sinkSync);
+        QCOMPARE(stats.actualLatencyMs, stats.requestedLatencyMs);
+        QVERIFY(!stats.jitterBufferLatenciesMs.isEmpty());
+        for (const auto value : stats.jitterBufferLatenciesMs)
+            QCOMPARE(value.toInt(), stats.requestedLatencyMs);
     }
 
     void conferenceUsesSelectedLocalAddress()

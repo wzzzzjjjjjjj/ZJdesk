@@ -76,7 +76,8 @@ class ScreenShareWorker final : public QObject
 {
     Q_OBJECT
 public:
-    explicit ScreenShareWorker(ShareMailbox *mailbox) : mailbox_(mailbox)
+    ScreenShareWorker(ShareMailbox *mailbox, ScreenShare::Playback playback)
+        : mailbox_(mailbox), playback_(playback)
     {
 #ifdef ZJDESK_HAS_GSTREAMER
         guard_->worker = this;
@@ -250,7 +251,10 @@ public:
                 "video/x-vp9,colorimetry=1:3:5:1 ! "
                 "vp9dec name=decoder ! videoconvert ! video/x-raw,format=RGB ! "
                 "appsink name=frames max-buffers=1 drop=true sync=%2 wait-on-eos=false")
-                .arg(latency).arg(wideArea && !conservative ? "true" : "false");
+                // Waiting for the playback clock here also stalls the jitterbuffer's
+                // synchronous push. Direct screen sessions can present decoded frames immediately.
+                .arg(latency).arg(wideArea && !conservative && playback_ == ScreenShare::Playback::Scheduled
+                    ? "true" : "false");
         }
         GError *error = nullptr;
         pipeline_ = gst_parse_launch(description.toUtf8().constData(), &error);
@@ -1784,12 +1788,13 @@ private:
     QString remoteAddress_;
 #endif
     ShareMailbox *mailbox_;
+    const ScreenShare::Playback playback_;
 };
 
-ScreenShare::ScreenShare(QObject *parent) : QObject(parent)
+ScreenShare::ScreenShare(QObject *parent, Playback playback) : QObject(parent)
 {
     qRegisterMetaType<ShareStats>();
-    worker_ = new ScreenShareWorker(&mailbox_);
+    worker_ = new ScreenShareWorker(&mailbox_, playback);
     worker_->moveToThread(&thread_);
     connect(&thread_, &QThread::finished, worker_, &QObject::deleteLater);
     connect(worker_, &ScreenShareWorker::statusChanged, this, &ScreenShare::statusChanged);

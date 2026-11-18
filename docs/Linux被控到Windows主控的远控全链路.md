@@ -340,7 +340,7 @@ Tailscale 直连通常通过基于 WireGuard 的 UDP 隧道承载。对 ZJdesk �
 
 **内层的 WebRTC 传输方式与外层的 Tailscale 隧道是两件事。** 例如应用内层选到 TCP，不代表 Tailscale 公网直连外层就必然变为 TCP。
 
-项目会根据已验证地址、网段和显式配置判定 WAN。Tailscale 地址通常进入 WAN 策略：软件 VP9 / I420、GCC 拥塞控制、较小 RTP MTU，以及普通 WAN 默认 `400 ms` 接收缓冲和 `appsink sync=true`。这是项目策略判断，不是直接测量物理距离。
+项目会根据已验证地址、网段和显式配置判定 WAN。Tailscale 地址通常进入 WAN 策略，使用软件 VP9 / I420、GCC 拥塞控制、较小 RTP MTU，普通 WAN 默认接收缓冲为 `400 ms`。直连远控使用 `appsink sync=false`，解码后立即交付画面。
 
 ### 7.3 Tailscale 直连失败，走 DERP 中继
 
@@ -396,7 +396,7 @@ Windows → Windows Tailscale → 公网 DERP 中继 → Linux Tailscale → Lin
 
 因此“本机光标流畅”“Linux 已接受输入”“Windows 已看到操作结果”分别代表不同阶段。输入回执中的 `accepted` 和 `injectUs` 只反映注入处理，不证明 Linux 应用已经完成响应，也不证明对应新画面已经显示。
 
-跨网普通模式的 `400 ms` 是接收端抖动缓冲目标配置，**不是整个闭环固定 400 ms，也不是每个包到达后必定再等待 400 ms**。`sync=true` 参与同一播放时序，不能再机械加上另一个 400 ms。
+跨网普通模式的 `400 ms` 是接收端抖动缓冲目标配置。实际放行取决于 RTP 时间戳、到达情况和参考帧恢复，闭环耗时还包含输入、采集和呈现。
 
 丢包修复、等待关键帧、编码处理不足、网络排队和应用层排队都可能进一步影响闭环。自动档已有基于 backlog 的排空策略，但“只保留最新解码图像”不等于所有上游积压都立即消失。
 

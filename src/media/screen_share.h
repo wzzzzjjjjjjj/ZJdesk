@@ -102,7 +102,8 @@ class ScreenShare final : public QObject
 {
     Q_OBJECT
 public:
-    explicit ScreenShare(QObject *parent = nullptr);
+    enum class Playback { Scheduled, Immediate };
+    explicit ScreenShare(QObject *parent = nullptr, Playback playback = Playback::Scheduled);
     ~ScreenShare() override;
     static int displayMaximumFps();
     // Zero selects automatically; explicit 30/60 is used by performance validation.

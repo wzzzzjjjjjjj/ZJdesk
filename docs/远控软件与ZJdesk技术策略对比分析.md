@@ -173,7 +173,7 @@ g_object_set(transceiver, "do-nack", TRUE,
 const int defaultLatency = wideArea && !conservative ? 400 : 200;
 ```
 
-跨网非保守路径还启用 appsink 时钟同步。400ms 是接收抖动缓冲的配置目标，不是完整输入到显示时延；也不能再把 `sync=true` 另算成固定增加 400ms。[Z1]
+直连远控解码后立即交付画面（`appsink sync=false`）。普通 WAN 的 400 ms 接收缓冲参与 RTP 排序与修复，完整输入到显示时延还包含输入、采集、编解码和呈现。[Z1]
 
 已有 backlog 排空策略：250ms 触发、低于 120ms 退出，尝试让发送速度低于接收消费速度。当前 backlog 是相对近期最低播放偏移，不是绝对帧龄。`observeBacklog()` 还会收紧最大帧率上限；如果临时排空上限持续保留，恢复 30fps 可能受阻，这是源码风险判断，不是本次实测结论。[Z3]
 

@@ -240,7 +240,7 @@ private:
     bool cursorSyncActive_ = false;
     QTimer deadline_;
     MediaEngine media_;
-    ScreenShare screen_;
+    ScreenShare screen_{nullptr, ScreenShare::Playback::Immediate};
     QMap<QString, ScreenShare *> meetingSharePeers_;
     QSet<QString> meetingShareRunning_;
     QSet<QString> meetingControlReady_;

@@ -202,7 +202,7 @@ ShareStats 记录编解码均值 / 最大耗时、最大输出间隔、编码帧
 encoderQuantizer 读回编码器的 qp 配置属性，没有逐帧解析 VP9 码流中的量化值。
 codec 耗时只覆盖编码器 / 解码器 sink 到 src，不包含采集、网络或完整呈现延迟。
 编码线程按 CPU 逻辑线程数选择；采样与交付定时器为 4 ms。NACK / RTX 和请求 / 等待关键帧仍保留。
-WAN 接收端 webrtcbin 缓冲默认 400 ms，appsink 按时钟交付帧。局域网及保守档默认缓冲为 200 ms。`ZJDESK_WEBRTC_LATENCY_MS` 可选择 30、50、100、150、200 或 400 ms。WAN 和保守档 RTP 封包上限为 1100 字节，本地档为 1400 字节，为 1280 MTU 的 VPN 路径预留 RTP 扩展、修复和 SRTP 开销。
+普通 WAN 的 webrtcbin 接收缓冲默认 400 ms，局域网及保守档默认 200 ms。`ZJDESK_WEBRTC_LATENCY_MS` 可选择 30、50、100、150、200 或 400 ms。一对一直连的屏幕共享和远控在解码后立即交付帧（`appsink sync=false`），避免播放时钟等待阻塞同线程的 RTP 下送。会议共享在普通 WAN 仍按播放时钟交付。WAN 和保守档 RTP 封包上限为 1100 字节，本地档为 1400 字节，为 1280 MTU 的 VPN 路径预留 RTP 扩展、修复和 SRTP 开销。
 每秒读取 WebRTC RTP 收发字节数、收包数、累计丢包和抖动；远控测试输入带一次性探针，Linux 注入后经 DataChannel 应答，Windows 同时测首次解码帧与 OpenGL 画面交换。
 对照测试中小于 200 ms 的缓冲在连接初期产生长停顿或降分辨率，故未降低默认值；数据见 validation.md。
 `pullPlayoutOffsetMs` 本身含发送端时间轴起点，因此接收端再以最近 60 秒的最小取帧偏移为基线，
