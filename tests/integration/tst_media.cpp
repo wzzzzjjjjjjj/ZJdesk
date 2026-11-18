@@ -20,13 +20,16 @@ private slots:
     void latencyMarkerCrossesVp9AndReportsReceiverLatency_data()
     {
         QTest::addColumn<bool>("immediate");
-        QTest::newRow("scheduled") << false;
-        QTest::newRow("immediate") << true;
+        QTest::addColumn<bool>("wideArea");
+        QTest::newRow("scheduled") << false << true;
+        QTest::newRow("immediate") << true << true;
+        QTest::newRow("lan-immediate") << true << false;
     }
 
     void latencyMarkerCrossesVp9AndReportsReceiverLatency()
     {
         QFETCH(bool, immediate);
+        QFETCH(bool, wideArea);
         QVERIFY(zjdesk::MediaEnvironment::inspect().ready);
         const QList<QByteArray> variables{
             "ZJDESK_WEBRTC_LATENCY_MS", "ZJDESK_SHARE_WAN", "ZJDESK_SHARE_LOW_BANDWIDTH"};
@@ -38,14 +41,15 @@ private slots:
                 else qputenv(variables.at(i).constData(), original.at(i));
         });
         qputenv("ZJDESK_WEBRTC_LATENCY_MS", "150");
-        qputenv("ZJDESK_SHARE_WAN", "1");
+        qputenv("ZJDESK_SHARE_WAN", wideArea ? "1" : "0");
         qputenv("ZJDESK_SHARE_LOW_BANDWIDTH", "0");
         using Playback = zjdesk::ScreenShare::Playback;
         zjdesk::ScreenShare sender;
         zjdesk::ScreenShare receiver(nullptr, immediate ? Playback::Immediate : Playback::Scheduled);
-        bool received = false;
+        QImage received;
         zjdesk::ShareStats stats;
         QObject callbacks;
+        bool stopped = false;
         connect(&sender, &zjdesk::ScreenShare::negotiationReady, &receiver,
             [&](quint64 epoch, const QString &type, const QJsonObject &payload) { receiver.negotiate(type, payload, epoch); });
         connect(&receiver, &zjdesk::ScreenShare::negotiationReady, &sender,
@@ -55,21 +59,30 @@ private slots:
         });
         connect(&receiver, &zjdesk::ScreenShare::frameReady, &callbacks, [&](quint64, const QImage &frame) {
             const auto marker = zjdesk::TestFrameMarker::read(frame);
-            received |= marker && marker->epoch == 123 && marker->sequence == 456;
+            if (received.isNull() && marker && marker->epoch == 123 && marker->sequence == 456)
+                received = frame;
         });
         connect(&receiver, &zjdesk::ScreenShare::statisticsReady, &callbacks,
             [&](quint64, const zjdesk::ShareStats &value) { stats = value; });
+        connect(&receiver, &zjdesk::ScreenShare::statusChanged, &callbacks,
+            [&](quint64 epoch, const QString &state, const QString &) { stopped |= epoch == 18 && state == "stopped"; });
         receiver.start(false, "test-latency", 17, 30, 30);
         sender.start(true, "test-latency", 17, 30, 30);
-        QTRY_VERIFY_WITH_TIMEOUT(received, 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(!received.isNull(), 15000);
         QTRY_VERIFY_WITH_TIMEOUT(stats.pullPlayoutSamples > 0, 5000);
         QCOMPARE(stats.requestedLatencyMs, 150);
         QCOMPARE(stats.actualLatencyMs, 150);
-        QCOMPARE(stats.sinkSync, !immediate);
+        QCOMPARE(stats.sinkSync, wideArea && !immediate);
         QVERIFY(!stats.jitterBufferLatenciesMs.isEmpty());
         for (const auto value : stats.jitterBufferLatenciesMs) QCOMPARE(value.toInt(), 150);
         sender.stop(18);
         receiver.stop(18);
+        QTRY_VERIFY(stopped);
+        // A retained frame must survive the pipeline releasing its own reference.
+        const auto retained = zjdesk::TestFrameMarker::read(received);
+        QVERIFY(retained);
+        QCOMPARE(retained->epoch, quint32(123));
+        QCOMPARE(retained->sequence, quint32(456));
     }
 
     void directWanShareDeliversFramesWithoutPlaybackWait()

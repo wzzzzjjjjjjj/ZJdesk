@@ -198,6 +198,10 @@ TURN 仍未验收。候选属性依据 [libnice NiceAgent](https://libnice.freed
 ScreenShare 将只读映射的 GstBuffer 交给 QImage，最后一个图像引用释放时 unmap；
 写图像触发 Qt 隐式共享分离，停止 / 重开后保留的图像仍持有自身缓冲。单槽邮箱只留最新图像。
 这移除交接处的一次整帧复制，RGB 转换与 QPainter / OpenGL 上传仍存在。
+小端 Linux 的即播接收在局域网普通档下，在 VP9 解码器之后加一个单帧队列。
+队列满时丢弃最旧的已解码帧，将颜色转换与解码分到不同线程，避免丢弃 VP9 参考数据。
+`videoconvert` 使用 4 个转换线程输出 BGRx，按 Qt `RGB32` 的字节布局直接包装只读映射。
+这条路径仍执行 CPU 颜色转换与 OpenGL 上传；其他接收模式保留原 RGB 路径。
 ShareStats 记录编解码均值 / 最大耗时、最大输出间隔、编码帧 / 关键帧大小、邮箱覆盖、实际编码器与回退原因。
 encoderQuantizer 读回编码器的 qp 配置属性，没有逐帧解析 VP9 码流中的量化值。
 codec 耗时只覆盖编码器 / 解码器 sink 到 src，不包含采集、网络或完整呈现延迟。

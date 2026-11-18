@@ -249,14 +249,25 @@ public:
                 || requested == 100 || requested == 150 || requested == 200 || requested == 400)
                 ? requested : defaultLatency;
             requestedLatencyMs_ = latency;
+            QString rawOutput = QStringLiteral("videoconvert ! video/x-raw,format=RGB");
+#if defined(Q_OS_LINUX) && Q_BYTE_ORDER == Q_LITTLE_ENDIAN
+            if (!lowBandwidth_ && playback_ == ScreenShare::Playback::Immediate)
+            {
+                // Keep conversion off the decoder's streaming thread. Drop only decoded
+                // frames when it falls behind; encoded VP9 references stay intact.
+                rawOutput = QStringLiteral(
+                    "queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! "
+                    "videoconvert n-threads=4 ! video/x-raw,format=BGRx");
+            }
+#endif
             description = QString("webrtcbin name=rtc bundle-policy=max-bundle latency=%1 "
                 "rtpvp9depay name=incoming request-keyframe=true wait-for-keyframe=true ! "
                 "video/x-vp9,colorimetry=1:3:5:1 ! "
-                "vp9dec name=decoder ! videoconvert ! video/x-raw,format=RGB ! "
-                "appsink name=frames max-buffers=1 drop=true sync=%2 wait-on-eos=false")
+                "vp9dec name=decoder ! %2 ! "
+                "appsink name=frames max-buffers=1 drop=true sync=%3 wait-on-eos=false")
                 // Waiting for the playback clock here also stalls the jitterbuffer's
                 // synchronous push. Direct screen sessions can present decoded frames immediately.
-                .arg(latency).arg(wideArea && !conservative && playback_ == ScreenShare::Playback::Scheduled
+                .arg(latency).arg(rawOutput).arg(wideArea && !conservative && playback_ == ScreenShare::Playback::Scheduled
                     ? "true" : "false");
         }
         GError *error = nullptr;
@@ -1519,9 +1530,12 @@ private:
             if (gst_video_info_from_caps(&info, gst_sample_get_caps(sample))
                 && gst_video_frame_map(frame.get(), &info, gst_sample_get_buffer(sample), GST_MAP_READ))
             {
+                // On little-endian Linux, BGRx is the byte layout of opaque Qt RGB32.
+                const auto format = GST_VIDEO_INFO_FORMAT(&info) == GST_VIDEO_FORMAT_BGRx
+                    ? QImage::Format_RGB32 : QImage::Format_RGB888;
                 // The map retains the GstBuffer until the last implicitly shared QImage is released.
                 QImage image(static_cast<const uchar *>(GST_VIDEO_FRAME_PLANE_DATA(frame.get(), 0)),
-                    info.width, info.height, GST_VIDEO_FRAME_PLANE_STRIDE(frame.get(), 0), QImage::Format_RGB888,
+                    info.width, info.height, GST_VIDEO_FRAME_PLANE_STRIDE(frame.get(), 0), format,
                     [](void *data) {
                         auto *mapped = static_cast<GstVideoFrame *>(data);
                         gst_video_frame_unmap(mapped);

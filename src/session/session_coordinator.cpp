@@ -763,7 +763,12 @@ bool SessionCoordinator::startScreenShare(const QString &source, int targetFps)
     shareState_ = PreviewState::Starting;
     shareDetail_ = QStringLiteral("正在连接屏幕共享");
     shareStats_ = {};
-    screen_.start(true, source, ++shareEpoch_, targetFps, peerMaximumFps_);
+    // Automatic remote control targets at most 60 fps; media still applies the
+    // source refresh rate, path-specific limits and adaptive fallback.
+    const int receiverFps = controlStartedShare_
+        ? (peerMaximumFps_ > 0 ? qMin(peerMaximumFps_, 60) : 60)
+        : peerMaximumFps_;
+    screen_.start(true, source, ++shareEpoch_, targetFps, receiverFps);
     emit shareChanged();
     return true;
 }
