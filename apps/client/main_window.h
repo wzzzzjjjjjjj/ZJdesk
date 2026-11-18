@@ -43,6 +43,7 @@ private:
     void refreshDeviceControls();
     void refreshDevices();
     void refreshShare();
+    void reportSharePresentation(bool periodic, const QString &eventState = {});
     void refreshCaptureExclusion();
     void refreshAnnotations();
     void refreshControl();
@@ -113,6 +114,7 @@ private:
     VideoSurface *meetingRemoteVideo_ = nullptr;
     QList<VideoSurface *> meetingRemoteVideos_;
     VideoSurface *meetingShareVideo_ = nullptr;
+    QString sharePresentationState_;
     AnnotationLayer *desktopAnnotations_ = nullptr;
     QWidget *desktopAnnotationTools_ = nullptr;
     QComboBox *annotationTool_ = nullptr;

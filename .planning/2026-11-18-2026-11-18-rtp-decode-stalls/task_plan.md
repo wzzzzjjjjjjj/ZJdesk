@@ -4,10 +4,10 @@
 在隔离桌面定位 RTP 继续到达时的解码停顿，先验证 Windows 控制 Linux 的产品修复，再改善 Linux 控制 Windows。
 
 ## Next Step
-完成双端现场事件日志对照。
+三项实现与验证已完成。默认缓冲沿用 400 ms，150 ms 纳入后续公网长测。
 
 ## Current Phase
-Phase 10
+Phase 13
 
 ## Phases
 
@@ -62,6 +62,26 @@ Phase 10
 ### Phase 10: 分析双端现场事件日志
 - [x] 按会话匹配双端记录与输入序号
 - [x] 比较接收策略、按键回执、媒体指标及验证边界
+- **Status:** complete
+
+### Phase 11: 跨网帧率降档诊断
+- [x] 记录变档触发条件和决策指标
+- [x] 验证降档及恢复的数据可判读
+- **Status:** complete
+
+### Phase 12: 区分窗口停用与前台呈现卡顿
+- [x] 标记显示停用及恢复并隔离间隔统计
+- [x] 验证前台真实长间隔仍保留
+- **Status:** complete
+
+### Phase 13: 真实输入的抖动缓冲对照
+- [x] 保持即时交付，对照 400 / 200 / 150 ms
+- [x] 匹配点击、拖动、键入和呈现反馈并比较恢复
+- **Status:** complete
+
+### Phase 14: 集中审查与复核
+- [x] 审查排水、呈现状态、调用链和探针记录
+- [x] 复现并修复高接收帧率误触发跨网升档，复核 Windows 单测和既有双机数据
 - **Status:** complete
 
 ## Decisions Made

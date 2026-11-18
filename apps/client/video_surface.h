@@ -20,6 +20,7 @@ public:
     void setFrame(const QImage &frame);
     bool hasFrame() const { return !frame_.isNull(); }
     quint64 presentedFrames() const { return presentedFrames_; }
+    void setPresentationActive(bool active);
     double takePresentationGapMaxMs();
     zjdesk::VideoPresentationStats presentationStatistics() const;
     void setFrameCaption(const QString &caption) { frameCaption_ = caption; update(); }
@@ -61,6 +62,7 @@ private:
     bool pendingFrame_ = false;
     bool awaitingSwap_ = false;
     QElapsedTimer presentationClock_;
+    bool presentationActive_ = true;
     double presentationGapMaxMs_ = -1;
     zjdesk::FrameTiming presentationGaps_;
     zjdesk::FrameTiming receiveToPaint_;

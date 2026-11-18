@@ -123,6 +123,7 @@ signals:
     void negotiationReady(quint64 epoch, const QString &type, const QJsonObject &payload);
     void frameReady(quint64 epoch, const QImage &image);
     void statisticsReady(quint64 epoch, const zjdesk::ShareStats &stats);
+    void profileChanged(quint64 epoch, const QJsonObject &decision);
     void controlChannelChanged(quint64 epoch, bool ready);
     void controlReceived(quint64 epoch, const QJsonObject &message);
     void fileReceived(quint64 epoch, const QJsonObject &message);

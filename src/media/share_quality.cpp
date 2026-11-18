@@ -9,6 +9,7 @@ int ShareQuality::compatibleMaximumFps(int sourceFps, int receiverFps)
 }
 
 ShareQuality::ShareQuality(const QSize &nativeSize, int maximumFps, int minimumFps, Mode mode)
+    : temporaryDrainCeiling_(mode == Mode::WideArea)
 {
     auto native = nativeSize.isEmpty() ? QSize(1920, 1080) : nativeSize;
     maximumFps = maximumFps > 0 ? qBound(5, maximumFps, 240) : 60;
@@ -89,33 +90,40 @@ bool ShareQuality::observe(double encodedFps, double receivedFps)
 
 bool ShareQuality::observeBacklog(double backlogMs, double receiverFps)
 {
+    if (!(backlogMs >= 0))
+        return false;
     if (!(backlogMs >= (draining_ ? ReleaseBacklogMs : DrainBacklogMs)))
     {
         if (!draining_)
             return false;
-        // 队列已排空：立刻回到实测能力对应的档位，不必再等稳定窗口——
-        // 上限本来就取自实测帧率，爬回去也不会重新灌满队列。
+        // 排空后先回到实测能力对应的档位，跨网再用稳定窗口确认是否能升档。
         draining_ = false;
         const int previous = index_;
         index_ = rungForFps(drainCeilingFps_ > 0 ? drainCeilingFps_ : profile().fps);
+        if (temporaryDrainCeiling_)
+            drainCeilingFps_ = 0;
         clampFpsLimit();
         slowWindows_ = stableWindows_ = 0;
         return index_ != previous;
     }
-    // 接收端上报的帧率就是这条链路现在能消费的帧率；按九成钉成持久上限，
-    // 否则稳定窗口会爬回高帧率、把队列重新灌满。排水期间的上报值被自己的低帧率
-    // 压住，不能当能力用，否则上限会一路阶梯式塌到 MinimumFps。
-    if (!draining_ && receiverFps >= MinimumFps)
+    // 单次跨网抖动时的接收帧率只用于本次排水。排水期间的帧率受主动降速影响，
+    // 不能再拿来计算接收能力。
+    if (!draining_ && (temporaryDrainCeiling_ || receiverFps >= MinimumFps))
     {
-        drainCeilingFps_ = qMax(MinimumFps, int(receiverFps * 0.9));
-        maximumFpsLimit_ = maximumFpsLimit_ > 0 ? qMin(maximumFpsLimit_, drainCeilingFps_) : drainCeilingFps_;
+        drainCeilingFps_ = receiverFps >= MinimumFps
+            ? qMax(MinimumFps, int(receiverFps * 0.9)) : profile().fps;
+        if (temporaryDrainCeiling_)
+            drainCeilingFps_ = qMin(drainCeilingFps_, profile().fps);
+        else
+            maximumFpsLimit_ = maximumFpsLimit_ > 0 ? qMin(maximumFpsLimit_, drainCeilingFps_) : drainCeilingFps_;
     }
     const int ceiling = drainCeilingFps_ > 0 ? drainCeilingFps_ : profile().fps;
     const int previous = index_;
     draining_ = true;
     clampFpsLimit();
     // 只降帧率不缩尺寸：排空需要的是帧率差，缩尺寸会同时牺牲清晰度。
-    index_ = rungForFps(qBound(MinimumFps, int(ceiling * 0.7), ceiling));
+    index_ = rungForFps(qBound(qMin(MinimumFps, ceiling), int(ceiling * 0.7), ceiling));
+    clampFpsLimit();
     slowWindows_ = stableWindows_ = 0;
     return index_ != previous;
 }

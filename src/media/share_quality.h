@@ -61,6 +61,7 @@ private:
     int stableWindows_ = 0;
     bool draining_ = false;
     int drainCeilingFps_ = 0;
+    bool temporaryDrainCeiling_ = false;
     int maximumFpsLimit_ = 0;
     int bitrateLimit_ = 0;
     int minimumBitrate_ = 2000000;

@@ -107,6 +107,7 @@ public:
         requestedLatencyMs_ = -1;
         pullPlayoutOffsetMs_ = 0;
         pullPlayoutSamples_ = 0;
+        previousPlayoutSamples_ = 0;
         pullPlayoutLateness_ = {};
         videoBacklogMs_ = -1;
         offsetBaselineMs_ = 0;
@@ -133,6 +134,8 @@ public:
             profile_.fps = targetFps;
         revision_ = 1;
         peerFps_ = -1;
+        peerBacklogMs_ = -1;
+        lastEncodedFps_ = -1;
         profileClock_.restart();
         feedbackClock_.invalidate();
         targetFps_ = profile_.fps;
@@ -592,7 +595,7 @@ public:
 #ifdef ZJDESK_HAS_GSTREAMER
         if (!sender_ || !automatic_ || !pipeline_ || epoch != epoch_ || !quality_.limitMaximumFps(fps))
             return;
-        applyProfile();
+        applyProfile("receiver-limit", lastEncodedFps_, -1, -1, fps);
 #else
         Q_UNUSED(fps)
         Q_UNUSED(epoch)
@@ -616,6 +619,7 @@ public:
             else if (sender_ && action == "stats" && payload.value("revision").toInt() == revision_)
             {
                 peerFps_ = payload.value("fps").toDouble();
+                peerBacklogMs_ = payload.value("backlogMs").toDouble(-1);
                 feedbackClock_.restart();
                 if (quality_.observeNetwork(payload.value("packetsReceived").toInteger(-1),
                         payload.value("packetsLost").toInteger(-1), transportExcessMs_))
@@ -633,12 +637,17 @@ public:
                 // and stable-window counting: waiting for those only lets the queue grow more.
                 if (automatic_)
                 {
-                    bool changed = quality_.observeBacklog(payload.value("backlogMs").toDouble(-1), peerFps_);
+                    const bool wasDraining = quality_.draining();
+                    const bool backlogChanged = quality_.observeBacklog(peerBacklogMs_, peerFps_);
+                    const bool drainStateChanged = wasDraining != quality_.draining();
                     const double reportedMaximum = payload.value("maximumFps").toDouble(-1);
-                    if (reportedMaximum >= 5 && reportedMaximum <= 240 && reportedMaximum == int(reportedMaximum))
-                        changed = quality_.limitMaximumFps(int(reportedMaximum)) || changed;
-                    if (changed)
-                        applyProfile();
+                    const bool limitChanged = reportedMaximum >= 5 && reportedMaximum <= 240
+                        && reportedMaximum == int(reportedMaximum) && quality_.limitMaximumFps(int(reportedMaximum));
+                    if (backlogChanged || limitChanged || drainStateChanged)
+                        applyProfile(backlogChanged || drainStateChanged
+                                ? (quality_.draining() ? "backlog-drain" : "backlog-recovered") : "receiver-limit",
+                            lastEncodedFps_, peerFps_, peerBacklogMs_, reportedMaximum,
+                            limitChanged && (backlogChanged || drainStateChanged));
                 }
             }
             return;
@@ -767,6 +776,7 @@ signals:
     void statusChanged(quint64 epoch, const QString &status, const QString &detail);
     void negotiationReady(quint64 epoch, const QString &type, const QJsonObject &payload);
     void statisticsReady(quint64 epoch, const zjdesk::ShareStats &stats);
+    void profileChanged(quint64 epoch, const QJsonObject &decision);
     void controlChannelChanged(quint64 epoch, bool ready);
     void controlReceived(quint64 epoch, const QJsonObject &message);
     void fileReceived(quint64 epoch, const QJsonObject &message);
@@ -1136,19 +1146,46 @@ private:
     }
     void adapt(double encodedFps)
     {
+        lastEncodedFps_ = encodedFps;
         const double peer = feedbackClock_.isValid() && feedbackClock_.elapsed() < 5000 ? peerFps_ : -1;
         const int settleMs = revision_ == 1 ? 10000 : 4000;
         // 排水期间的低帧率是主动选择：照常规阶梯判断会把它当成能力不足继续缩档。
         if (!automatic_ || quality_.draining() || profileClock_.elapsed() < settleMs
             || !quality_.observe(encodedFps, peer))
             return;
-        applyProfile();
+        const auto next = quality_.profile();
+        const bool upgrade = next.size.width() > profile_.size.width()
+            || (next.size == profile_.size && next.fps > profile_.fps);
+        applyProfile(upgrade ? "stable-throughput" : "low-throughput", encodedFps, peer,
+            peer >= 0 ? peerBacklogMs_ : -1);
     }
     // Push the ladder's current rung into the running pipeline and tell the receiver.
-    void applyProfile()
+    void applyProfile(const char *reason, double encodedFps, double receiveFps = -1,
+        double backlogMs = -1, double receiverMaximumFps = -1, bool additionalLimitChange = false)
     {
-        profile_ = quality_.profile();
-        targetFps_ = profile_.fps;
+        const auto previous = profile_;
+        const auto next = quality_.profile();
+        const bool changed = next.size != previous.size || next.fps != previous.fps;
+        if (changed && !updateProfile(next))
+            return;
+        emit profileChanged(epoch_, {{"reason", QString::fromLatin1(reason)}, {"revision", revision_},
+            {"previousWidth", previous.size.width()}, {"previousHeight", previous.size.height()},
+            {"previousFps", previous.fps}, {"width", profile_.size.width()}, {"height", profile_.size.height()},
+            {"targetFps", profile_.fps}, {"encodedFps", encodedFps}, {"receiveFps", receiveFps},
+            {"backlogMs", backlogMs}, {"receiverMaximumFps", receiverMaximumFps},
+            {"additionalLimitChange", additionalLimitChange}, {"transportExcessMs", transportExcessMs_},
+            {"feedbackAgeMs", feedbackClock_.isValid() ? feedbackClock_.elapsed() : -1}});
+        if (!changed)
+            return;
+        lastEncodedFps_ = -1;
+        peerFps_ = -1;
+        feedbackClock_.invalidate();
+        profileClock_.restart();
+        announceProfile();
+    }
+
+    bool updateProfile(const ShareProfile &next)
+    {
         auto *filter = gst_bin_get_by_name(GST_BIN(pipeline_), "quality");
         auto *encoder = gst_bin_get_by_name(GST_BIN(pipeline_), "encoder");
         // 对端上限可能在管线还在协商时就到达，元素尚未存在时不改档，等下一次机会。
@@ -1156,8 +1193,10 @@ private:
         {
             if (filter) gst_object_unref(filter);
             if (encoder) gst_object_unref(encoder);
-            return;
+            return false;
         }
+        profile_ = next;
+        targetFps_ = profile_.fps;
         auto *caps = gst_caps_new_simple("video/x-raw", "width", G_TYPE_INT, profile_.size.width(),
             "height", G_TYPE_INT, profile_.size.height(), "framerate", GST_TYPE_FRACTION, profile_.fps, 1,
             "pixel-aspect-ratio", GST_TYPE_FRACTION, 1, 1, nullptr);
@@ -1173,10 +1212,7 @@ private:
             g_object_set(encoder, "target-bitrate", encoderBudget(), "keyframe-max-dist", profile_.fps * 5, nullptr);
         gst_object_unref(encoder);
         ++revision_;
-        peerFps_ = -1;
-        feedbackClock_.invalidate();
-        profileClock_.restart();
-        announceProfile();
+        return true;
     }
     static void configureTransceiver(GstElement *, GstWebRTCRTPTransceiver *transceiver, gpointer)
     {
@@ -1576,7 +1612,7 @@ private:
                 stats.pullPlayoutOffsetMs = pullPlayoutOffsetMs_;
                 stats.pullPlayoutSamples = pullPlayoutSamples_;
                 stats.pullPlayoutLateness = pullPlayoutLateness_.summary();
-                if (!sender_ && offsetBaselineValid_)
+                if (!sender_ && pullPlayoutSamples_ != previousPlayoutSamples_)
                 {
                     offsetHistory_[offsetHistoryIndex_ % OffsetHistorySeconds] = pullPlayoutOffsetMs_;
                     ++offsetHistoryIndex_;
@@ -1586,6 +1622,7 @@ private:
                     videoBacklogMs_ = qMax(0.0, pullPlayoutOffsetMs_ - offsetBaselineMs_);
                     stats.videoBacklogMs = videoBacklogMs_;
                 }
+                previousPlayoutSamples_ = pullPlayoutSamples_;
                 if (!sender_)
                 {
                     guint latency = 0;
@@ -1677,7 +1714,7 @@ private:
                     actual = qMin(actual, stats.presentedFps);
                 emit negotiationReady(epoch_, "share", {{"action", "stats"}, {"revision", revision_}, {"fps", actual},
                     {"maximumFps", ScreenShare::displayMaximumFps()},
-                    {"backlogMs", qRound(qMax(0.0, videoBacklogMs_))},
+                    {"backlogMs", qRound(stats.videoBacklogMs)},
                     {"packetsReceived", stats.packetsReceived}, {"packetsLost", stats.packetsLost}});
             }
         }
@@ -1745,6 +1782,7 @@ private:
     int requestedLatencyMs_ = -1;
     double pullPlayoutOffsetMs_ = 0;
     quint64 pullPlayoutSamples_ = 0;
+    quint64 previousPlayoutSamples_ = 0;
     FrameTiming pullPlayoutLateness_;
     static constexpr int OffsetHistorySeconds = 60;
     std::array<double, OffsetHistorySeconds> offsetHistory_{};
@@ -1754,6 +1792,8 @@ private:
     double videoBacklogMs_ = -1;
     int revision_ = 1;
     double peerFps_ = -1;
+    double peerBacklogMs_ = -1;
+    double lastEncodedFps_ = -1;
     QElapsedTimer profileClock_;
     QElapsedTimer feedbackClock_;
     QElapsedTimer networkClock_;
@@ -1800,6 +1840,7 @@ ScreenShare::ScreenShare(QObject *parent, Playback playback) : QObject(parent)
     connect(worker_, &ScreenShareWorker::statusChanged, this, &ScreenShare::statusChanged);
     connect(worker_, &ScreenShareWorker::negotiationReady, this, &ScreenShare::negotiationReady);
     connect(worker_, &ScreenShareWorker::statisticsReady, this, &ScreenShare::statisticsReady);
+    connect(worker_, &ScreenShareWorker::profileChanged, this, &ScreenShare::profileChanged);
     // Input receivers must keep running inside native UI move/resize loops.
     // Normal QObject receivers still queue these signals to their own threads.
     connect(worker_, &ScreenShareWorker::controlChannelChanged, this, &ScreenShare::controlChannelChanged, Qt::DirectConnection);

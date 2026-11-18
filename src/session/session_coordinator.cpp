@@ -227,6 +227,10 @@ SessionCoordinator::SessionCoordinator(QObject *parent) : QObject(parent)
         }
     });
     connect(&controlDeadline_, &QTimer::timeout, this, &SessionCoordinator::stopControl);
+    connect(&screen_, &ScreenShare::profileChanged, this, [this](quint64 epoch, const QJsonObject &decision) {
+        if (epoch == shareEpoch_ && screenActive())
+            events_.append("screen-profile", QString::fromUtf8(QJsonDocument(decision).toJson(QJsonDocument::Compact)));
+    });
     connect(&screen_, &ScreenShare::statisticsReady, this, [this](quint64 epoch, const ShareStats &stats) {
         if (epoch != shareEpoch_ || !screenActive())
             return;

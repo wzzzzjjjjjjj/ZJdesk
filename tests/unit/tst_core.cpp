@@ -178,6 +178,49 @@ private slots:
         QCOMPARE(quality.profile().fps, Quality::MinimumFps);
     }
 
+    void wanShareRecoversFromBacklogAndHonorsDisplayLimit()
+    {
+        using Quality = zjdesk::ShareQuality;
+        for (const bool limited : {false, true})
+        {
+            Quality quality(QSize(1920, 1080), 60, Quality::MinimumFps, Quality::Mode::WideArea);
+            QVERIFY(quality.observeBacklog(300, 30));
+            QCOMPARE(quality.profile().fps, 24);
+            QVERIFY(!quality.observeBacklog(-1, 0));
+            QVERIFY(quality.draining());
+            if (limited)
+                quality.limitMaximumFps(24);
+            QVERIFY(!quality.observeBacklog(40, 24));
+            QVERIFY(!quality.draining());
+            for (int i = 0; i < 14; ++i)
+                QVERIFY(!quality.observe(24, 24));
+            QCOMPARE(quality.observe(24, 24), !limited);
+            QCOMPARE(quality.profile().fps, limited ? 24 : 30);
+            QCOMPARE(quality.profile().size, QSize(1920, 1080));
+        }
+    }
+
+    void wanBacklogDoesNotRaiseTheCurrentFrameRate()
+    {
+        using Quality = zjdesk::ShareQuality;
+        Quality quality(QSize(1920, 1080), 60, Quality::MinimumFps, Quality::Mode::WideArea);
+        QVERIFY(!quality.observe(20, 20));
+        QVERIFY(quality.observe(20, 20));
+        QCOMPARE(quality.profile().fps, 24);
+
+        // Queued frames can arrive faster than the current sender profile for one window.
+        QVERIFY(!quality.observeBacklog(300, 48));
+        QVERIFY(quality.draining());
+        QCOMPARE(quality.profile().fps, 24);
+        QVERIFY(!quality.observeBacklog(40, 24));
+        QVERIFY(!quality.draining());
+        QCOMPARE(quality.profile().fps, 24);
+        for (int i = 0; i < 14; ++i)
+            QVERIFY(!quality.observe(24, 24));
+        QVERIFY(quality.observe(24, 24));
+        QCOMPARE(quality.profile().fps, 30);
+    }
+
     void shareQualityLimitsLateDisplayCeiling()
     {
         using Quality = zjdesk::ShareQuality;

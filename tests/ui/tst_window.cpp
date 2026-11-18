@@ -3861,6 +3861,33 @@ sys.stdout.buffer.write(data)
         QCOMPARE(surface.presentationStatistics().gaps.samples, quint64(0));
     }
 
+    void presentationGapExcludesInactiveInterval()
+    {
+        VideoSurface surface;
+        surface.resize(640, 480);
+        surface.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&surface));
+        QImage frame(640, 480, QImage::Format_RGB32);
+        frame.fill(Qt::blue);
+        surface.setFrame(frame);
+        QTRY_COMPARE(surface.presentedFrames(), quint64(1));
+        surface.setPresentationActive(false);
+        waitForPresentation(240);
+        surface.setFrame(frame);
+        QTRY_COMPARE(surface.presentedFrames(), quint64(2));
+        surface.setPresentationActive(true);
+        surface.setFrame(frame);
+        QTRY_COMPARE(surface.presentedFrames(), quint64(3));
+        QCOMPARE(surface.presentationStatistics().gaps.samples, quint64(0));
+        QCOMPARE(surface.takePresentationGapMaxMs(), -1.0);
+
+        waitForPresentation(240);
+        surface.setFrame(frame);
+        QTRY_COMPARE(surface.presentedFrames(), quint64(4));
+        QCOMPARE(surface.presentationStatistics().gaps.samples, quint64(1));
+        QVERIFY(surface.takePresentationGapMaxMs() > 200);
+    }
+
     void remoteCursorOverlayUsesHostShapeAndClearsOnStop()
     {
         VideoSurface surface;

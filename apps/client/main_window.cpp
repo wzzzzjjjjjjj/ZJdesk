@@ -1455,6 +1455,9 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     });
     connect(&session_, &zjdesk::SessionCoordinator::remoteCursorChanged, video_, &VideoSurface::setRemoteCursor);
     connect(&session_, &zjdesk::SessionCoordinator::shareChanged, this, &MainWindow::refreshShare);
+    connect(&session_, &zjdesk::SessionCoordinator::shareChanged, this, [this] {
+        reportSharePresentation(false);
+    });
     connect(&session_, &zjdesk::SessionCoordinator::remoteChanged, this, &MainWindow::refreshControl);
     connect(video_, &VideoSurface::remoteInput, &session_, &zjdesk::SessionCoordinator::sendRemoteInput);
     connect(controlButton_, &QPushButton::clicked, &session_, &zjdesk::SessionCoordinator::requestControl);
@@ -1476,10 +1479,7 @@ MainWindow::MainWindow(const QString &serverUrl, const QString &roomId, const QS
     connect(refreshDevicesButton_, &QPushButton::clicked, this, &MainWindow::requestCameraPermission);
     auto *statsTimer = new QTimer(this);
     connect(statsTimer, &QTimer::timeout, this, [this] {
-        auto *surface = session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting ? meetingShareVideo_ : video_;
-        session_.reportSharePresentation(surface->presentedFrames(),
-            surface->isVisible() && !isMinimized() && isActiveWindow(), surface->takePresentationGapMaxMs(),
-            surface->presentationStatistics());
+        reportSharePresentation(true);
     });
     statsTimer->start(1000);
     session_.events()->append("application", QStringLiteral("工作台已启动"));
@@ -2173,11 +2173,62 @@ void MainWindow::restoreMeetingVideo()
     refreshMeetingParticipants();
 }
 
+void MainWindow::reportSharePresentation(bool periodic, const QString &eventState)
+{
+    auto *surface = session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting ? meetingShareVideo_ : video_;
+    if (!session_.receivingScreen())
+    {
+        sharePresentationState_.clear();
+        return;
+    }
+    const QString state = isMinimized() ? QStringLiteral("minimized")
+        : !eventState.isEmpty() ? eventState
+        : !surface->isVisible() ? QStringLiteral("hidden")
+        : !isActiveWindow() ? QStringLiteral("inactive") : QStringLiteral("active");
+    const bool active = state == QStringLiteral("active");
+    surface->setPresentationActive(active);
+    if (state != sharePresentationState_)
+    {
+        const double previousGap = surface->takePresentationGapMaxMs();
+        QString detail = QStringLiteral("state=") + state;
+        if (sharePresentationState_ == QStringLiteral("active") && previousGap > 0)
+            detail += QStringLiteral(" previousActiveGapMaxMs=%1").arg(previousGap, 0, 'f', 1);
+        sharePresentationState_ = state;
+        session_.events()->append("screen-presentation", detail);
+        // Start a fresh rate window on the next periodic report after activation.
+        session_.reportSharePresentation(surface->presentedFrames(), false);
+        return;
+    }
+    if (periodic)
+        session_.reportSharePresentation(surface->presentedFrames(), active, surface->takePresentationGapMaxMs(),
+            surface->presentationStatistics());
+}
+
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == this && (event->type() == QEvent::WinIdChange || event->type() == QEvent::Show
         || event->type() == QEvent::WindowStateChange))
         refreshCaptureExclusion();
+    auto *surface = session_.roomType() == zjdesk::SessionCoordinator::RoomType::Meeting ? meetingShareVideo_ : video_;
+    if (watched == this || watched == surface)
+    {
+        switch (event->type())
+        {
+        case QEvent::Hide:
+            reportSharePresentation(false, QStringLiteral("hidden"));
+            break;
+        case QEvent::WindowDeactivate:
+            reportSharePresentation(false, QStringLiteral("inactive"));
+            break;
+        case QEvent::Show:
+        case QEvent::WindowActivate:
+        case QEvent::WindowStateChange:
+            reportSharePresentation(false);
+            break;
+        default:
+            break;
+        }
+    }
     if (event->type() == QEvent::KeyPress && (expandButton_->isChecked() || expandedMeetingVideo_)
         && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape)
     {
